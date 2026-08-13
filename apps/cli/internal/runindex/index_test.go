@@ -19,8 +19,8 @@ func TestUpsertListAndOutbox(t *testing.T) {
 	record := Record{
 		ID: "run-1", RequestID: "req-1", Status: "succeeded", Source: SourceLocal,
 		Capability: "greet@1.0.0", Recipe: "greet-shell@1.0.0",
-		CreatedAt: time.Now().UTC().Format(time.RFC3339Nano),
-		StateDir:  filepath.Join(root, ".doppels", "runs", "run-1"),
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339Nano),
+		StateDir:   filepath.Join(root, ".doppels", "runs", "run-1"),
 		SyncStatus: SyncNone,
 	}
 	if err := idx.Upsert(record); err != nil {

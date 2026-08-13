@@ -46,20 +46,20 @@ type AssignmentReference struct {
 }
 
 type RequestRecord struct {
-	APIVersion     string               `json:"apiVersion"`
-	Kind           string               `json:"kind"`
-	ID             string               `json:"id"`
-	CreatedAt      time.Time            `json:"createdAt"`
-	IdempotencyKey string               `json:"idempotencyKey"`
-	Origin         string               `json:"origin"`
-	Capability     DefinitionReference  `json:"capability"`
-	Inputs         map[string]any       `json:"inputs"`
-	RequestedBy    ActorReference       `json:"requestedBy"`
-	AssignedTo     *AssignmentReference `json:"assignedTo,omitempty"`
-	Organization   string               `json:"organization,omitempty"`
-	Space          string               `json:"space,omitempty"`
-	ShareID        string               `json:"shareId,omitempty"`
-	OperatorDecision string             `json:"operatorDecision,omitempty"`
+	APIVersion       string               `json:"apiVersion"`
+	Kind             string               `json:"kind"`
+	ID               string               `json:"id"`
+	CreatedAt        time.Time            `json:"createdAt"`
+	IdempotencyKey   string               `json:"idempotencyKey"`
+	Origin           string               `json:"origin"`
+	Capability       DefinitionReference  `json:"capability"`
+	Inputs           map[string]any       `json:"inputs"`
+	RequestedBy      ActorReference       `json:"requestedBy"`
+	AssignedTo       *AssignmentReference `json:"assignedTo,omitempty"`
+	Organization     string               `json:"organization,omitempty"`
+	Space            string               `json:"space,omitempty"`
+	ShareID          string               `json:"shareId,omitempty"`
+	OperatorDecision string               `json:"operatorDecision,omitempty"`
 }
 
 type RunRecord struct {

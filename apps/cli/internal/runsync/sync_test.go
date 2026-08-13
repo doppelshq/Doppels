@@ -38,7 +38,7 @@ func TestFlushAcksSuccessfulIngest(t *testing.T) {
 	}
 	run := map[string]any{
 		"apiVersion": "doppels.so/v1alpha1", "kind": "Run", "id": runID, "requestId": reqID,
-		"createdAt": time.Now().UTC().Format(time.RFC3339Nano),
+		"createdAt":  time.Now().UTC().Format(time.RFC3339Nano),
 		"capability": request["capability"], "inputs": request["inputs"],
 		"executor": map[string]any{"kind": "identity", "id": "tester"},
 	}

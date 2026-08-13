@@ -59,10 +59,10 @@ type SpaceBinding struct {
 }
 
 type Profile struct {
-	Server    string         `json:"server,omitempty"`
-	Context   Context        `json:"context,omitempty"`
-	LoginAt   time.Time      `json:"loginAt,omitempty"`
-	Bindings  []SpaceBinding `json:"bindings,omitempty"`
+	Server   string         `json:"server,omitempty"`
+	Context  Context        `json:"context,omitempty"`
+	LoginAt  time.Time      `json:"loginAt,omitempty"`
+	Bindings []SpaceBinding `json:"bindings,omitempty"`
 }
 
 type credentials struct {

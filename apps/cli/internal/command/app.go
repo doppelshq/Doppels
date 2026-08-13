@@ -164,7 +164,6 @@ func writeUsageSection(writer io.Writer, style termStyle, title string, lines []
 	fmt.Fprintln(writer)
 }
 
-
 func (app *App) flagSet(name string) *flag.FlagSet {
 	flags := flag.NewFlagSet(name, flag.ContinueOnError)
 	flags.SetOutput(app.Stderr)

@@ -104,7 +104,7 @@ func (app *App) planLocal(input reconcileInput, jsonOutput bool) int {
 			"kind": "Plan", "server": "local", "context": input.scope, "changes": changes, "applicable": true,
 		})
 	} else {
-	writeChanges(app.Stdout, "local", input.scope, changes, input.body.Resources)
+		writeChanges(app.Stdout, "local", input.scope, changes, input.body.Resources)
 	}
 	return ExitSuccess
 }
@@ -210,7 +210,7 @@ func (app *App) applyLocal(input reconcileInput, pendingLock *projectlock.Pendin
 			"applied": true, "lockFile": projectlock.Filename,
 		})
 	} else {
-	writeChanges(app.Stdout, "local", input.scope, changes, input.body.Resources)
+		writeChanges(app.Stdout, "local", input.scope, changes, input.body.Resources)
 		fmt.Fprintf(app.Stdout, "  %s  %s\n", newTermStyle(app.Stdout).field("Lock"), projectlock.Filename)
 	}
 	return ExitSuccess

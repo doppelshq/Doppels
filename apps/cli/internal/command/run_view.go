@@ -86,11 +86,11 @@ func formatRunEventLine(style termStyle, event execution.RunEvent) (string, stri
 	case "validation_failed":
 		return style.red(crossMark(style)), "validation failed"
 	case "approval_requested":
-		return style.yellow(ellipsisMark(style)), "approval needed · "+event.StepID
+		return style.yellow(ellipsisMark(style)), "approval needed · " + event.StepID
 	case "approval_approved":
-		return style.green(checkMark(style)), "approved · "+event.StepID
+		return style.green(checkMark(style)), "approved · " + event.StepID
 	case "approval_rejected":
-		return style.red(crossMark(style)), "rejected · "+event.StepID
+		return style.red(crossMark(style)), "rejected · " + event.StepID
 	case "step_started":
 		return style.cyan(arrowMark(style)), event.StepID
 	case "step_succeeded":

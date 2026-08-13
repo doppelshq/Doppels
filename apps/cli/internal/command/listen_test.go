@@ -112,7 +112,6 @@ func TestWriteListenBannerEmptyExplainsLocalMismatch(t *testing.T) {
 	}
 }
 
-
 func TestBuildListenCapabilitiesMarksRecipe(t *testing.T) {
 	t.Parallel()
 	catalog := manifest.NewCatalog(".", []manifest.Loaded{
