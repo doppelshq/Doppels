@@ -1,0 +1,44 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: repository-check
+  version: 1.0.0
+  displayName: Verificar repositorio
+  summary: Verifica el estado y los tests de un repositorio.
+  description: Comprueba que el árbol Git está limpio y que los tests pasan.
+  impact: low
+
+provides: [repository-check]
+runtime: shell
+
+requires:
+  commands: [git, npm]
+  files: [package.json]
+
+defaults:
+  timeout: 10m
+  approval: never
+
+steps:
+  - id: verify_tree
+    name: Verificar árbol de trabajo
+    run:
+      shell: sh
+      script: |
+        git diff --exit-code
+        git diff --cached --exit-code
+        export COMMIT_SHA="$(git rev-parse HEAD)"
+    produces:
+      commit_sha:
+        env: COMMIT_SHA
+
+  - id: test
+    name: Ejecutar tests
+    run:
+      shell: sh
+      script: |
+        npm test
+
+returns:
+  commit_sha: "{{ steps.verify_tree.commit_sha }}"

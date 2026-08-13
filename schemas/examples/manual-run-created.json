@@ -1,0 +1,32 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "Run",
+  "id": "47e14f37-1eb6-4b9d-b7b2-17e63f3ae4df",
+  "requestId": "18792d62-262c-4fa7-9724-f4dd75c88282",
+  "createdAt": "2026-08-01T11:00:02Z",
+  "capability": {
+    "name": "service-status",
+    "version": "1.0.0",
+    "manifestSha256": "76239f7fbae520f54b023c958c148dbaf20b640e852e14b6b3299ea64b7e7077",
+    "schema": {
+      "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
+      "sha256": "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+    }
+  },
+  "recipe": {
+    "name": "service-status-manual",
+    "version": "1.0.0",
+    "manifestSha256": "ee478745b424970952db5aa898d9c21c603915630758906fbdc76211dd65a9a5",
+    "schema": {
+      "id": "https://doppels.so/schemas/v1alpha1/recipe.schema.json",
+      "sha256": "a2b7183baf504c875ab619e6443afcd9fb8eb3281ed65bc1d79fbc7548ff919b"
+    }
+  },
+  "inputs": {
+    "endpoint": "https://status.example.test/health"
+  },
+  "executor": {
+    "kind": "identity",
+    "id": "carlos@example.test"
+  }
+}

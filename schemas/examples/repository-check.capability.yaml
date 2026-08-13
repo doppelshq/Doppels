@@ -1,0 +1,16 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: repository-check
+  version: 1.0.0
+  displayName: Verificar repositorio
+  summary: Verifica el estado y los tests de un repositorio.
+  impact: low
+
+inputs: {}
+
+outputs:
+  commit_sha:
+    type: string
+    description: Commit verificado.

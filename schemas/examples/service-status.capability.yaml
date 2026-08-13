@@ -1,0 +1,21 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: service-status
+  version: 1.0.0
+  displayName: Consultar estado de servicio
+  summary: Consulta el estado HTTP de un servicio.
+  impact: low
+
+inputs:
+  endpoint:
+    type: string
+    description: URL del endpoint que se va a consultar.
+    required: true
+
+outputs:
+  response:
+    type: artifact
+    description: Respuesta HTTP guardada como fichero.
+    mediaType: application/json

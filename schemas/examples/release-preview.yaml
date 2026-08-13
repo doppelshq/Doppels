@@ -1,0 +1,98 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: release-preview
+  version: 1.0.0
+  displayName: Generar vista previa de release
+  summary: Genera y publica una vista previa verificable de una release.
+  description: Valida el proyecto, genera artefactos y publica una vista previa.
+  impact: high
+  tags: [release, preview]
+  labels:
+    team: platform
+
+provides: [release-preview]
+runtime: shell
+
+requires:
+  commands:
+    - git
+    - name: node
+      version: ">=22.0.0 <26.0.0"
+    - npm
+    - tar
+  hostEnv: [DEPLOY_TOKEN]
+  files: [package.json]
+
+env:
+  CI: "true"
+
+defaults:
+  timeout: 15m
+  approval: never
+  workingDirectory: .
+
+steps:
+  - id: verify
+    name: Verificar proyecto
+    run:
+      shell: bash
+      script: |
+        git diff --exit-code
+        npm ci
+        npm test
+        export COMMIT_SHA="$(git rev-parse HEAD)"
+    produces:
+      commit_sha:
+        env: COMMIT_SHA
+
+  - id: build
+    name: Generar artefactos
+    env:
+      RELEASE_VERSION: "{{ inputs.release_version }}"
+    run:
+      shell: bash
+      script: |
+        npm run build -- --version "$RELEASE_VERSION"
+        tar -czf "release-$RELEASE_VERSION.tgz" dist/
+        ./bin/generate-sbom > sbom.json
+    produces:
+      release:
+        file: "release-{{ inputs.release_version }}.tgz"
+      sbom:
+        file: sbom.json
+
+  - id: security_scan
+    name: Analizar artefacto
+    env:
+      ARTIFACT: "{{ steps.build.release }}"
+    run:
+      shell: bash
+      script: |
+        ./bin/security-scan "$ARTIFACT"
+
+  - id: deploy_preview
+    name: Publicar vista previa
+    approval: required
+    env:
+      ARTIFACT: "{{ steps.build.release }}"
+      TARGET: "{{ inputs.environment }}"
+      DEPLOY_TOKEN:
+        from: host_env
+        name: DEPLOY_TOKEN
+    run:
+      shell: bash
+      script: |
+        export PREVIEW_URL="$(./bin/deploy-preview \
+          --artifact "$ARTIFACT" \
+          --environment "$TARGET" \
+          --token "$DEPLOY_TOKEN")"
+    produces:
+      preview_url:
+        env: PREVIEW_URL
+
+returns:
+  release: "{{ steps.build.release }}"
+  sbom: "{{ steps.build.sbom }}"
+  preview_url: "{{ steps.deploy_preview.preview_url }}"

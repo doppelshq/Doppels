@@ -1,0 +1,16 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "RunEvent",
+  "runId": "3d7edca8-a6fd-4309-ab19-3f0425d27b9e",
+  "sequence": 1,
+  "occurredAt": "2026-08-01T12:01:00Z",
+  "type": "run_succeeded",
+  "data": {
+    "returns": {
+      "decision": "approved"
+    },
+    "evidence": {
+      "approval_note": "Fechas revisadas y registradas por la persona responsable."
+    }
+  }
+}

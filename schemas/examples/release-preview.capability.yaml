@@ -1,0 +1,40 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: release-preview
+  version: 1.0.0
+  displayName: Generar vista previa de release
+  summary: Genera y publica una vista previa verificable de una release.
+  description: Define los parámetros y resultados públicos de una vista previa.
+  impact: high
+  tags: [release, preview]
+  labels:
+    team: platform
+
+documentation:
+  readme: ./release-preview.md
+
+inputs:
+  release_version:
+    type: string
+    description: Versión que se publicará en la vista previa.
+    required: true
+  environment:
+    type: string
+    description: Entorno de la vista previa.
+    required: true
+    enum: [staging, production]
+
+outputs:
+  release:
+    type: artifact
+    description: Paquete comprimido de la release.
+    mediaType: application/gzip
+  sbom:
+    type: artifact
+    description: Inventario de componentes de la release.
+    mediaType: application/json
+  preview_url:
+    type: string
+    description: URL pública de la vista previa.

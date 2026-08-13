@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/share.schema.json",
+  "title": "Doppels Share",
+  "description": "A one-use, expiring session that exposes a Capability form while its Recipe remains on the sharing host.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "id",
+    "createdAt",
+    "expiresAt",
+    "capabilityRevision",
+    "capability",
+    "sharedBy",
+    "requestLimit"
+  ],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "Share" },
+    "id": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "capabilityRevision": {
+      "description": "Exact source and schema digests for the public Capability snapshot.",
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/definitionReference"
+    },
+    "capability": {
+      "description": "Public snapshot used to render and validate the input form.",
+      "$ref": "https://doppels.so/schemas/v1alpha1/capability.schema.json"
+    },
+    "recipe": {
+      "description": "Absent when the shared Capability will be fulfilled without a codified Recipe.",
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/definitionReference"
+    },
+    "sharedBy": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/principalReference"
+    },
+    "requestLimit": { "const": 1 },
+    "inputs": {
+      "description": "Optional prefilled Capability inputs for the public form. Validated against the Share capability snapshot; may be a partial set.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "inputsLocked": {
+      "description": "When true, every key in inputs is immutable for the recipient (UI + server enforce).",
+      "type": "boolean",
+      "default": false
+    }
+  }
+}

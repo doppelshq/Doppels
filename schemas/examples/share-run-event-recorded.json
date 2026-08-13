@@ -1,0 +1,39 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "ShareMessage",
+  "messageId": "6778f3dd-9d5a-4414-831e-9b733be03173",
+  "shareId": "aa222d6a-0fc8-4dc1-b9b5-0e4673a2d7de",
+  "occurredAt": "2026-08-01T10:04:00.100Z",
+  "event": "run_event_recorded",
+  "payload": {
+    "apiVersion": "doppels.so/v1alpha1",
+    "kind": "RunEvent",
+    "runId": "7b8b7f76-7cac-4b79-b879-2d32dd41c9e7",
+    "sequence": 1,
+    "occurredAt": "2026-08-01T10:04:00Z",
+    "type": "run_succeeded",
+    "data": {
+      "returns": {
+        "release": {
+          "artifact": {
+            "id": "5745b85b-f328-4fc4-9e6f-65cb86f34a18",
+            "filename": "release-1.2.0.tgz",
+            "mediaType": "application/gzip",
+            "sizeBytes": 48123,
+            "sha256": "d18f902d71cae845b00e7b65c9dbeec06440a45e6191df16201859972054e9e3"
+          }
+        },
+        "sbom": {
+          "artifact": {
+            "id": "ff57d5f7-a3a1-471c-abeb-2b975bfced43",
+            "filename": "sbom.json",
+            "mediaType": "application/json",
+            "sizeBytes": 8392,
+            "sha256": "22eb111ce285906494db4da7fc9236b24fdb21048fd6a86a256f2ab509a48f9a"
+          }
+        },
+        "preview_url": "https://preview.example.test/releases/1.2.0"
+      }
+    }
+  }
+}

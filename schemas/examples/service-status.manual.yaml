@@ -1,0 +1,19 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: service-status-manual
+  version: 1.0.0
+  displayName: Consultar servicio manualmente
+  summary: Procedimiento humano alternativo para comprobar un servicio.
+
+provides: [service-status]
+runtime: manual
+
+procedure:
+  readme: ./service-status-runbook.md
+
+evidence:
+  verification_notes:
+    type: string
+    description: Resumen de las comprobaciones realizadas.

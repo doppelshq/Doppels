@@ -1,0 +1,90 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: release-pipeline-shell
+  version: 1.0.0
+  displayName: Release pipeline (shell)
+  summary: Four short Steps (1–3s) to exercise the live run timeline.
+  impact: low
+
+provides: [release-pipeline]
+runtime: shell
+
+requires:
+  commands: [sh]
+
+defaults:
+  approval: never
+
+steps:
+  - id: prepare
+    name: Prepare workspace
+    env:
+      VERSION: "{{ inputs.version }}"
+    run:
+      shell: sh
+      script: |
+        sleep 1
+        export STAGE=prepare
+        printf 'prepare %s\n' "$VERSION" > pipeline.log
+    produces:
+      stage:
+        env: STAGE
+      log:
+        file: pipeline.log
+
+  - id: build
+    name: Build artifacts
+    env:
+      LOG: "{{ steps.prepare.log }}"
+      VERSION: "{{ inputs.version }}"
+    run:
+      shell: sh
+      script: |
+        sleep 2
+        export STAGE=build
+        printf 'build %s\n' "$VERSION" >> "$LOG"
+    produces:
+      stage:
+        env: STAGE
+
+  - id: test
+    name: Run checks
+    env:
+      LOG: "{{ steps.prepare.log }}"
+      VERSION: "{{ inputs.version }}"
+    run:
+      shell: sh
+      script: |
+        sleep 3
+        export STAGE=test
+        printf 'test %s\n' "$VERSION" >> "$LOG"
+    produces:
+      stage:
+        env: STAGE
+
+  - id: ship
+    name: Ship release
+    env:
+      LOG: "{{ steps.prepare.log }}"
+      VERSION: "{{ inputs.version }}"
+    run:
+      shell: sh
+      script: |
+        sleep 1
+        export STAGE=ship
+        export SUMMARY="shipped $VERSION"
+        printf 'ship %s\n' "$VERSION" >> "$LOG"
+        cp "$LOG" receipt.txt
+    produces:
+      stage:
+        env: STAGE
+      summary:
+        env: SUMMARY
+      receipt:
+        file: receipt.txt
+
+returns:
+  summary: "{{ steps.ship.summary }}"
+  receipt: "{{ steps.ship.receipt }}"

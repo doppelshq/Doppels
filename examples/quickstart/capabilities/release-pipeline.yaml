@@ -1,0 +1,25 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: release-pipeline
+  version: 1.0.0
+  displayName: Release pipeline demo
+  summary: Multi-step Capability for timeline demos (prepare → build → test → ship).
+  impact: low
+  tags: [quickstart, demo]
+
+inputs:
+  version:
+    type: string
+    description: Version label stamped into the ship receipt.
+    required: true
+
+outputs:
+  receipt:
+    type: artifact
+    description: Plain-text pipeline receipt.
+    mediaType: text/plain
+  summary:
+    type: string
+    description: Short completion summary.

@@ -1,0 +1,11 @@
+apiVersion: doppels.so/v1alpha1
+kind: Space
+
+metadata:
+  name: platform
+  displayName: Platform
+  summary: Operaciones del equipo de plataforma.
+  labels:
+    environment: production
+  annotations:
+    doppels.so/owner: platform-team

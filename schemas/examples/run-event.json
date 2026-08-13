@@ -1,0 +1,8 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "RunEvent",
+  "runId": "7b8b7f76-7cac-4b79-b879-2d32dd41c9e7",
+  "sequence": 0,
+  "occurredAt": "2026-08-01T10:00:03Z",
+  "type": "run_created"
+}

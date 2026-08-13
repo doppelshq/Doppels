@@ -1,0 +1,24 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "Run",
+  "id": "3d7edca8-a6fd-4309-ab19-3f0425d27b9e",
+  "requestId": "f3bf17cf-8388-44f2-80b8-c70cf46b0f5d",
+  "createdAt": "2026-08-01T12:00:02Z",
+  "capability": {
+    "name": "time-off-request",
+    "version": "1.0.0",
+    "manifestSha256": "106cb5c81374182cb8b3f4db3e6a65222fb8090f1add8cf5da4f619367c2c582",
+    "schema": {
+      "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
+      "sha256": "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+    }
+  },
+  "inputs": {
+    "starts_on": "2026-08-10",
+    "ends_on": "2026-08-14"
+  },
+  "executor": {
+    "kind": "identity",
+    "id": "carlos@example.test"
+  }
+}

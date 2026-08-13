@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
+  "title": "Doppels Capability",
+  "description": "The public input and output contract for an action Doppels can fulfill.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "inputs", "outputs"],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "Capability" },
+    "metadata": {
+      "allOf": [
+        { "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/metadata" }
+      ]
+    },
+    "documentation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readme"],
+      "properties": {
+        "readme": { "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath" }
+      }
+    },
+    "inputs": { "$ref": "#/$defs/inputs" },
+    "outputs": { "$ref": "#/$defs/outputs" }
+  },
+  "$defs": {
+    "scalarType": {
+      "enum": ["string", "integer", "number", "boolean"]
+    },
+    "safeInteger": {
+      "type": "integer",
+      "minimum": -9007199254740991,
+      "maximum": 9007199254740991
+    },
+    "portableNumber": {
+      "anyOf": [
+        { "$ref": "#/$defs/safeInteger" },
+        {
+          "type": "number",
+          "not": { "type": "integer" }
+        }
+      ]
+    },
+    "inputs": {
+      "type": "object",
+      "propertyNames": {
+        "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+      },
+      "additionalProperties": { "$ref": "#/$defs/input" }
+    },
+    "input": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "$ref": "#/$defs/scalarType" },
+        "description": { "type": "string", "maxLength": 500 },
+        "required": { "type": "boolean", "default": false },
+        "default": { "type": ["string", "integer", "number", "boolean"] },
+        "enum": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "type": ["string", "integer", "number", "boolean"] }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "integer" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "default": { "$ref": "#/$defs/safeInteger" },
+              "enum": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/safeInteger" }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "number" } },
+            "required": ["type"]
+          },
+          "then": {
+            "properties": {
+              "default": { "$ref": "#/$defs/portableNumber" },
+              "enum": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/portableNumber" }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "outputs": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+      },
+      "additionalProperties": { "$ref": "#/$defs/output" }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "enum": ["string", "integer", "number", "boolean", "artifact"] },
+        "description": { "type": "string", "maxLength": 500 },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 200 }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "mediaType": {} },
+            "required": ["mediaType"]
+          },
+          "then": {
+            "properties": { "type": { "const": "artifact" } }
+          }
+        }
+      ]
+    }
+  }
+}

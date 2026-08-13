@@ -1,0 +1,17 @@
+Doppels
+Copyright 2026 OpenDoppel Authors
+
+https://github.com/doppelshq/doppels
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this software except in compliance with the License.
+You may obtain a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+This repository is the Apache-2.0 CLI, schemas, skills, and quickstart.
+The hosted control plane is not published here.
+
+Third-party dependencies retain their own copyrights and licenses.
+When vendored or redistributed, their NOTICE/LICENSE texts (if any)
+must be preserved alongside this file as required by those licenses.

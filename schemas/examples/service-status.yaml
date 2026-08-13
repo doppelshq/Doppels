@@ -1,0 +1,36 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: service-status
+  version: 1.0.0
+  displayName: Consultar estado de servicio
+  summary: Consulta el estado HTTP de un servicio.
+  description: Consulta un endpoint HTTP desde el host local.
+  impact: low
+
+provides: [service-status]
+runtime: shell
+
+requires:
+  commands: [curl]
+
+defaults:
+  approval: never
+
+steps:
+  - id: query
+    name: Consultar endpoint
+    env:
+      ENDPOINT: "{{ inputs.endpoint }}"
+    run:
+      shell: sh
+      timeout: 30s
+      script: |
+        curl --fail --silent --show-error "$ENDPOINT" > response.json
+    produces:
+      response:
+        file: response.json
+
+returns:
+  response: "{{ steps.query.response }}"

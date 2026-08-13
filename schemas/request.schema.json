@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/request.schema.json",
+  "title": "Doppels Request",
+  "description": "An immutable request to fulfill one Capability contract with resolved inputs.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "id",
+    "createdAt",
+    "idempotencyKey",
+    "origin",
+    "capability",
+    "inputs",
+    "requestedBy"
+  ],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "Request" },
+    "id": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "idempotencyKey": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "origin": {
+      "description": "Creation channel. share requires shareId; cli/api forbid it and require organization+space.",
+      "enum": ["share", "cli", "api"]
+    },
+    "capability": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/definitionReference"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "integer", "number", "boolean"]
+      }
+    },
+    "requestedBy": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/actorReference"
+    },
+    "assignedTo": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/assignmentReference"
+    },
+    "organization": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+    },
+    "space": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+    },
+    "shareId": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "origin": { "const": "share" } },
+        "required": ["origin"]
+      },
+      "then": {
+        "required": ["shareId"],
+        "properties": { "shareId": {} }
+      }
+    },
+    {
+      "if": {
+        "properties": { "origin": { "enum": ["cli", "api"] } },
+        "required": ["origin"]
+      },
+      "then": {
+        "required": ["organization", "space"],
+        "properties": {
+          "organization": {},
+          "space": {},
+          "shareId": false
+        }
+      }
+    }
+  ]
+}

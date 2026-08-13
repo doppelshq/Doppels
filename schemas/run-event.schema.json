@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/run-event.schema.json",
+  "title": "Doppels Run Event",
+  "description": "An immutable, append-only event in a Run audit trail.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "runId", "sequence", "occurredAt", "type"],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "RunEvent" },
+    "runId": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "sequence": { "type": "integer", "minimum": 0 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "type": {
+      "enum": [
+        "run_created",
+        "validation_succeeded",
+        "validation_failed",
+        "step_started",
+        "step_succeeded",
+        "step_failed",
+        "approval_requested",
+        "approval_approved",
+        "approval_rejected",
+        "run_cancelled",
+        "run_interrupted",
+        "run_succeeded",
+        "run_failed"
+      ]
+    },
+    "stepId": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+    },
+    "data": { "type": "object" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "step_started",
+              "step_succeeded",
+              "step_failed",
+              "approval_requested",
+              "approval_approved",
+              "approval_rejected"
+            ]
+          }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "required": ["stepId"],
+        "properties": { "stepId": {} }
+      }
+    },
+    {
+      "if": {
+        "properties": { "type": { "const": "run_succeeded" } },
+        "required": ["type"]
+      },
+      "then": {
+        "required": ["data"],
+        "properties": {
+          "data": { "$ref": "#/$defs/runSucceededData" }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "runSucceededData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["returns"],
+      "properties": {
+        "returns": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+          },
+          "additionalProperties": { "$ref": "#/$defs/returnValue" }
+        },
+        "evidence": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+          },
+          "additionalProperties": { "$ref": "#/$defs/returnValue" }
+        }
+      }
+    },
+    "returnValue": {
+      "oneOf": [
+        { "type": ["string", "number", "boolean"] },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["artifact"],
+          "properties": {
+            "artifact": { "$ref": "#/$defs/artifactReference" }
+          }
+        }
+      ]
+    },
+    "artifactReference": {
+      "description": "Stable artifact metadata; authorized clients obtain an expiring download URL over HTTP.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "filename", "mediaType", "sizeBytes", "sha256"],
+      "properties": {
+        "id": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+        },
+        "filename": { "type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+$" },
+        "mediaType": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "sizeBytes": { "type": "integer", "minimum": 0 },
+        "sha256": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/sha256"
+        }
+      }
+    }
+  }
+}

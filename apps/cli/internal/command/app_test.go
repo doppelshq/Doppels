@@ -1,0 +1,246 @@
+package command
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"doppels.so/cli/internal/manifest"
+)
+
+type unavailableHost struct{}
+
+func (unavailableHost) LookupCommand(string) (string, error)  { return "", errors.New("not found") }
+func (unavailableHost) LookupEnv(string) (string, bool)       { return "", false }
+func (unavailableHost) Stat(string) (fs.FileInfo, error)      { return nil, os.ErrNotExist }
+func (unavailableHost) CommandVersion(string) (string, error) { return "", errors.New("not found") }
+
+func testApp(root string) (*App, *bytes.Buffer, *bytes.Buffer) {
+	stdout, stderr := &bytes.Buffer{}, &bytes.Buffer{}
+	return &App{
+		Stdout:    stdout,
+		Stderr:    stderr,
+		Getwd:     func() (string, error) { return root, nil },
+		ConfigDir: func() (string, error) { return filepath.Join(root, ".test-config"), nil },
+		Host:      unavailableHost{},
+	}, stdout, stderr
+}
+
+func writeManifest(t *testing.T, root, directory, name, value string) string {
+	t.Helper()
+	path := filepath.Join(root, directory, name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, ".doppels"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestNoArgsPrintsUsage(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	if code := app.Run(nil); code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{
+		"Doppels",
+		"Space",
+		"Execute",
+		"Inspect",
+		"Identity",
+		"doppels init",
+		"doppels run",
+		"doppels runs [list]",
+		"doppels capabilities|caps",
+		"doppels organizations|orgs",
+		"doppels runs [list]",
+		"--json",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("usage missing %q\n%s", want, out)
+		}
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr should stay clean, got %s", stderr.String())
+	}
+}
+
+func TestHelpStillPrintsUsage(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	if code := app.Run([]string{"help"}); code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "doppels validate") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestInitValidateAndDescribe(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	if code := app.Run([]string{"spaces", "init", "platform", "--dir", root}); code != ExitSuccess {
+		t.Fatalf("spaces init exit = %d, stderr = %s", code, stderr.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "capabilities")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "recipes")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".doppels")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "doppels.platform.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"init", "--dir", root}); code != ExitSuccess {
+		t.Fatalf("init exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "local/private") {
+		t.Fatalf("init stdout = %q", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	writeManifest(t, root, "capabilities", "release.yaml", capabilityFixture)
+	if code := app.Run([]string{"validate"}); code != ExitSuccess {
+		t.Fatalf("validate exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Validated") || !strings.Contains(stdout.String(), "Capability") || !strings.Contains(stdout.String(), "capability/release-build@") {
+		t.Fatalf("validate stdout = %q", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"describe", "--json", "capability/release-build"}); code != ExitSuccess {
+		t.Fatalf("describe exit = %d, stderr = %s", code, stderr.String())
+	}
+	var response struct {
+		Kind   string `json:"kind"`
+		Source struct {
+			SHA256 string `json:"sha256"`
+		} `json:"source"`
+		Recipes []any `json:"recipes"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &response); err != nil {
+		t.Fatalf("decode output: %v\n%s", err, stdout.String())
+	}
+	if response.Kind != "CapabilityDescription" || len(response.Source.SHA256) != 64 || len(response.Recipes) != 0 {
+		t.Fatalf("unexpected describe response: %#v", response)
+	}
+}
+
+func TestValidateContractAndHostExitCodes(t *testing.T) {
+	t.Run("contract", func(t *testing.T) {
+		root := t.TempDir()
+		app, stdout, stderr := testApp(root)
+		writeManifest(t, root, "capabilities", "invalid.yaml", strings.Replace(capabilityFixture, "outputs:", "unexpected: true\noutputs:", 1))
+		code := app.Run([]string{"validate", "--json"})
+		if code != ExitContract {
+			t.Fatalf("exit = %d, want %d", code, ExitContract)
+		}
+		if stderr.Len() != 0 {
+			t.Fatalf("JSON mode wrote stderr: %s", stderr.String())
+		}
+		if !strings.Contains(stdout.String(), `"status": "invalid"`) {
+			t.Fatalf("stdout = %s", stdout.String())
+		}
+	})
+
+	t.Run("host", func(t *testing.T) {
+		root := t.TempDir()
+		app, _, stderr := testApp(root)
+		writeManifest(t, root, "capabilities", "release.yaml", capabilityFixture)
+		writeManifest(t, root, "recipes", "release.yaml", recipeFixture)
+		code := app.Run([]string{"validate"})
+		if code != ExitOperational {
+			t.Fatalf("exit = %d, want %d; %s", code, ExitOperational, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "host.command-missing") {
+			t.Fatalf("stderr = %s", stderr.String())
+		}
+	})
+}
+
+func TestDescribeShowsAmbiguousRecipesWithoutSelectingOne(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	writeManifest(t, root, "capabilities", "release.yaml", capabilityFixture)
+	writeManifest(t, root, "recipes", "first.yaml", manualRecipeFixture)
+	writeManifest(t, root, "recipes", "second.yaml", strings.Replace(manualRecipeFixture, "name: release-human", "name: release-review", 1))
+	if code := app.Run([]string{"describe", "capability/release-build"}); code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "explicit --recipe selection will be required") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestValidateExplicitFiles(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "capability.yaml")
+	if err := os.WriteFile(path, []byte(capabilityFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, stdout, stderr := testApp(root)
+	app.Host = manifest.OSHost{}
+	if code := app.Run([]string{"validate", "-f", path}); code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Validated") || !strings.Contains(stdout.String(), "capability/release-build@") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+const capabilityFixture = `apiVersion: doppels.so/v1alpha1
+kind: Capability
+metadata:
+  name: release-build
+  version: 1.0.0
+  summary: Build a release.
+inputs: {}
+outputs:
+  archive:
+    type: artifact
+`
+
+const recipeFixture = `apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: release-shell, version: 1.0.0}
+provides: [release-build]
+runtime: shell
+requires:
+  commands: [missing-tool]
+defaults: {approval: never}
+steps:
+  - id: build
+    name: Build
+    run: {shell: sh, script: touch archive.tgz}
+    produces:
+      archive: {file: archive.tgz}
+returns:
+  archive: "{{ steps.build.archive }}"
+`
+
+const manualRecipeFixture = `apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: release-human, version: 1.0.0}
+provides: [release-build]
+runtime: manual
+procedure: {readme: ./runbook.md}
+evidence:
+  notes: {type: string}
+`

@@ -1,0 +1,73 @@
+---
+version: "3"
+
+tasks:
+  default:
+    desc: Lista tareas disponibles
+    cmds:
+      - task --list
+
+  setup:
+    desc: Instala dependencias de schemas y CLI
+    cmds:
+      - task: setup:schemas
+      - task: setup:cli
+
+  setup:schemas:
+    dir: schemas
+    cmds:
+      - NPM_CONFIG_USERCONFIG=/dev/null npm ci --ignore-scripts --registry=https://registry.npmjs.org
+
+  setup:cli:
+    dir: apps/cli
+    cmds:
+      - go mod download
+
+  build:cli:
+    desc: Compila bin/doppels
+    dir: apps/cli
+    cmds:
+      - mkdir -p ../../bin
+      - go build -o ../../bin/doppels ./cmd/doppels
+
+  test:
+    desc: Schemas + CLI
+    cmds:
+      - task: test:schemas
+      - task: lint:cli
+      - task: test:cli
+
+  ci:
+    desc: Puerta del recorte OSS
+    cmds:
+      - task: setup
+      - task: test:schemas
+      - task: lint:cli
+      - task: test:cli
+      - task: test:cli:race
+
+  test:schemas:
+    dir: schemas
+    cmds:
+      - npm run validate
+
+  lint:cli:
+    dir: apps/cli
+    cmds:
+      - |
+        unformatted="$(gofmt -l .)"
+        if [ -n "$unformatted" ]; then
+          printf 'Go files must be formatted with gofmt:\n%s\n' "$unformatted" >&2
+          exit 1
+        fi
+      - go vet ./...
+
+  test:cli:
+    dir: apps/cli
+    cmds:
+      - go test ./...
+
+  test:cli:race:
+    dir: apps/cli
+    cmds:
+      - go test -race -count=1 ./...

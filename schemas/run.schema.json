@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/run.schema.json",
+  "title": "Doppels Run",
+  "description": "The immutable record of one automatic or human attempt to fulfill a Request.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "id",
+    "requestId",
+    "createdAt",
+    "capability",
+    "inputs",
+    "executor"
+  ],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "Run" },
+    "id": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "requestId": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "capability": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/definitionReference"
+    },
+    "recipe": {
+      "description": "Absent when the Capability is fulfilled without a codified Recipe.",
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/definitionReference"
+    },
+    "inputs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": ["string", "integer", "number", "boolean"]
+      }
+    },
+    "executor": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/principalReference"
+    },
+    "nodeId": { "type": "string", "minLength": 1, "maxLength": 200 }
+  }
+}

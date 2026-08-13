@@ -1,0 +1,30 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "Request",
+  "id": "3e5853b0-51ab-4fef-b402-486e02146591",
+  "createdAt": "2026-08-01T10:00:00Z",
+  "idempotencyKey": "share:aa222d6a:request:1",
+  "origin": "share",
+  "capability": {
+    "name": "release-preview",
+    "version": "1.0.0",
+    "manifestSha256": "3e8485b6d578eaba3588833e2353adf642432266600e831c7d32e9c8727b1810",
+    "schema": {
+      "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
+      "sha256": "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+    }
+  },
+  "inputs": {
+    "release_version": "1.2.0",
+    "environment": "staging"
+  },
+  "requestedBy": {
+    "kind": "identity",
+    "id": "ana@example.test"
+  },
+  "assignedTo": {
+    "kind": "identity",
+    "id": "carlos@example.test"
+  },
+  "shareId": "aa222d6a-0fc8-4dc1-b9b5-0e4673a2d7de"
+}

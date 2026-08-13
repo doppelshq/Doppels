@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/space.schema.json",
+  "title": "Doppels Space",
+  "description": "A mutable operational and authorization boundary inside the Organization selected by the CLI Context.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata"],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "Space" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+        },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "labels": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9._/-]{0,62}$" },
+          "additionalProperties": { "type": "string", "maxLength": 120 }
+        },
+        "annotations": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9._/-]{0,253}$" },
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "description": "Optional Capability/Recipe roots relative to the Space working tree. Absent discovery uses capabilities/ and recipes/.",
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+          }
+        },
+        "recipes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+          }
+        }
+      }
+    }
+  }
+}

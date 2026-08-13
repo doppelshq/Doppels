@@ -1,0 +1,31 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "Request",
+  "id": "f3bf17cf-8388-44f2-80b8-c70cf46b0f5d",
+  "createdAt": "2026-08-01T12:00:00Z",
+  "idempotencyKey": "local:time-off:yuri:2026-08-10",
+  "origin": "cli",
+  "capability": {
+    "name": "time-off-request",
+    "version": "1.0.0",
+    "manifestSha256": "106cb5c81374182cb8b3f4db3e6a65222fb8090f1add8cf5da4f619367c2c582",
+    "schema": {
+      "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
+      "sha256": "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+    }
+  },
+  "inputs": {
+    "starts_on": "2026-08-10",
+    "ends_on": "2026-08-14"
+  },
+  "requestedBy": {
+    "kind": "identity",
+    "id": "yuri@example.test"
+  },
+  "assignedTo": {
+    "kind": "identity",
+    "id": "carlos@example.test"
+  },
+  "organization": "acme",
+  "space": "personal"
+}

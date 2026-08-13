@@ -1,0 +1,23 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: time-off-request
+  version: 1.0.0
+  displayName: Solicitar vacaciones
+  summary: Solicita y registra un periodo de vacaciones.
+  impact: low
+  tags: [people, time-off]
+
+inputs:
+  starts_on:
+    type: string
+    required: true
+  ends_on:
+    type: string
+    required: true
+
+outputs:
+  decision:
+    type: string
+    description: Decisión entregada por la persona responsable.

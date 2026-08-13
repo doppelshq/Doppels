@@ -1,0 +1,25 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: manual-review
+  version: 1.0.0
+  displayName: Review a request manually
+  summary: Record a human decision and deliver a downloadable report.
+  impact: low
+  tags: [quickstart, manual]
+
+inputs:
+  subject:
+    type: string
+    description: Request the responsible person must review.
+    required: true
+
+outputs:
+  decision:
+    type: string
+    description: Decision made by the responsible person.
+  report:
+    type: artifact
+    description: Report delivered as a public result.
+    mediaType: text/plain

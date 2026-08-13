@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/recipe.schema.json",
+  "title": "Doppels Recipe",
+  "description": "A local, declarative and sequential implementation of one or more Capability contracts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "provides", "runtime"],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "Recipe" },
+    "metadata": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/metadata"
+    },
+    "provides": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+      }
+    },
+    "runtime": { "enum": ["shell", "manual"] },
+    "requires": { "$ref": "#/$defs/requires" },
+    "env": { "$ref": "#/$defs/environment" },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "timeout": { "$ref": "#/$defs/duration" },
+        "approval": { "enum": ["never", "required"] },
+        "workingDirectory": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+        }
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/step" }
+    },
+    "procedure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["readme"],
+      "properties": {
+        "readme": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+        }
+      }
+    },
+    "evidence": { "$ref": "#/$defs/evidence" },
+    "returns": { "$ref": "#/$defs/returns" }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "runtime": { "const": "shell" } },
+        "required": ["runtime"]
+      },
+      "then": {
+        "required": ["steps", "returns"],
+        "properties": {
+          "steps": {},
+          "returns": {},
+          "procedure": false,
+          "evidence": false
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "runtime": { "const": "manual" } },
+        "required": ["runtime"]
+      },
+      "then": {
+        "required": ["procedure", "evidence"],
+        "properties": {
+          "procedure": {},
+          "evidence": {},
+          "requires": false,
+          "env": false,
+          "defaults": false,
+          "steps": false,
+          "returns": false
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requires": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "commands": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/commandRequirement" }
+        },
+        "hostEnv": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+        },
+        "files": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+          }
+        }
+      }
+    },
+    "commandRequirement": {
+      "oneOf": [
+        { "type": "string", "pattern": "^[A-Za-z0-9._+-]+$" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string", "pattern": "^[A-Za-z0-9._+-]+$" },
+            "version": {
+              "type": "string",
+              "pattern": "^(>=|>|<=|<|=|~|\\^)?[0-9]+\\.[0-9]+\\.[0-9]+(?: +(>=|>|<=|<|=|~|\\^)?[0-9]+\\.[0-9]+\\.[0-9]+)*$"
+            }
+          }
+        }
+      ]
+    },
+    "environment": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+      "additionalProperties": { "$ref": "#/$defs/environmentValue" }
+    },
+    "environmentValue": {
+      "oneOf": [
+        { "type": "string" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["from", "name"],
+          "properties": {
+            "from": { "const": "host_env" },
+            "name": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" }
+          }
+        }
+      ]
+    },
+    "duration": { "type": "string", "pattern": "^[1-9][0-9]*(ms|s|m|h)$" },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "run"],
+      "properties": {
+        "id": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+        },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "approval": { "enum": ["never", "required"] },
+        "workingDirectory": {
+          "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+        },
+        "env": { "$ref": "#/$defs/environment" },
+        "run": { "$ref": "#/$defs/run" },
+        "produces": { "$ref": "#/$defs/produces" }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shell", "script"],
+      "properties": {
+        "shell": { "enum": ["bash", "sh"] },
+        "script": { "type": "string", "minLength": 1 },
+        "timeout": { "$ref": "#/$defs/duration" }
+      }
+    },
+    "produces": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+      },
+      "additionalProperties": { "$ref": "#/$defs/product" }
+    },
+    "evidence": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type"],
+        "properties": {
+          "type": { "enum": ["string", "artifact"] },
+          "description": { "type": "string", "maxLength": 500 }
+        }
+      }
+    },
+    "product": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {
+            "file": {
+              "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["env"],
+          "properties": {
+            "env": { "type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$" }
+          }
+        }
+      ]
+    },
+    "returns": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^\\{\\{\\s*steps\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\s*\\}\\}$"
+      }
+    }
+  }
+}

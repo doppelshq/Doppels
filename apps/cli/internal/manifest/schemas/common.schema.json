@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/common.schema.json",
+  "title": "Doppels common definitions",
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 63,
+      "pattern": "^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$"
+    },
+    "semver": {
+      "type": "string",
+      "maxLength": 100,
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\\.[0-9A-Za-z-]+)*)?$"
+    },
+    "uuid": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "allOf": [
+        { "not": { "pattern": "^/" } },
+        { "not": { "pattern": "^[A-Za-z]:" } },
+        { "not": { "pattern": "\\\\" } },
+        { "not": { "pattern": "(^|/)\\.\\.(/|$)" } }
+      ]
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "version": { "$ref": "#/$defs/semver" },
+        "displayName": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "summary": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 500 },
+        "impact": { "enum": ["low", "medium", "high", "critical"] },
+        "tags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        },
+        "labels": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9._/-]{0,62}$" },
+          "additionalProperties": { "type": "string", "maxLength": 120 }
+        },
+        "annotations": {
+          "type": "object",
+          "propertyNames": { "pattern": "^[a-z][a-z0-9._/-]{0,253}$" },
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "schemaReference": {
+      "type": "object",
+      "description": "Pins a schema $id and the doppels.so/schema-bundle-sha256/v1 digest of its complete external $ref closure.",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": { "type": "string", "format": "uri" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "definitionReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "manifestSha256", "schema"],
+      "properties": {
+        "name": { "$ref": "#/$defs/identifier" },
+        "version": { "$ref": "#/$defs/semver" },
+        "manifestSha256": { "$ref": "#/$defs/sha256" },
+        "schema": { "$ref": "#/$defs/schemaReference" }
+      }
+    },
+    "actorReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["identity", "agent", "service", "guest"] },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "principalReference": {
+      "description": "An authenticated actor allowed to own or execute work.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["identity", "agent", "service"] },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    },
+    "assignmentReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": { "enum": ["identity", "team", "space"] },
+        "id": { "type": "string", "minLength": 1, "maxLength": 200 }
+      }
+    }
+  }
+}

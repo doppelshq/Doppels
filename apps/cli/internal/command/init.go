@@ -1,0 +1,83 @@
+package command
+
+import (
+	"fmt"
+	"path/filepath"
+	"strings"
+
+	"doppels.so/cli/internal/configstore"
+	"doppels.so/cli/internal/project"
+)
+
+func (app *App) runInit(arguments []string) int {
+	flags := app.flagSet("init")
+	dir := flags.String("dir", "", "directory for the Space working tree (default: cwd)")
+	jsonOutput := flags.Bool("json", false, "write a machine-readable response")
+	if err := flags.Parse(arguments); err != nil {
+		return ExitContract
+	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(app.Stderr, "init accepts no positional arguments; use doppels spaces init <name> to add Spaces")
+		return ExitContract
+	}
+	target := strings.TrimSpace(*dir)
+	if target == "" {
+		cwd, err := app.Getwd()
+		if err != nil {
+			fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
+			return ExitOperational
+		}
+		target = cwd
+	}
+	paths, err := project.Init(target)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "initialize Space working tree: %v\n", err)
+		return ExitOperational
+	}
+	root, err := filepath.Abs(target)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "resolve Space root: %v\n", err)
+		return ExitOperational
+	}
+	manifestPath, manifestCreated, err := project.WriteSpaceManifest(root, configstore.LocalSpace)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "write Space manifest: %v\n", err)
+		return ExitContract
+	}
+	store, err := app.configStore()
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "resolve CLI configuration: %v\n", err)
+		return ExitOperational
+	}
+	if err := store.SetContext(configstore.LocalContext()); err != nil {
+		fmt.Fprintf(app.Stderr, "set local context: %v\n", err)
+		return ExitOperational
+	}
+	if err := store.SetBinding(configstore.LocalOrganization, configstore.LocalSpace, root); err != nil {
+		fmt.Fprintf(app.Stderr, "record Space binding: %v\n", err)
+		return ExitOperational
+	}
+	if *jsonOutput {
+		app.writeJSON(map[string]any{
+			"status":          "initialized",
+			"root":            root,
+			"context":         configstore.LocalContext(),
+			"manifest":        manifestPath,
+			"manifestCreated": manifestCreated,
+			"directories":     paths,
+		})
+		return ExitSuccess
+	}
+	style := newTermStyle(app.Stdout)
+	fmt.Fprintln(app.Stdout)
+	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Root"), style.value(root))
+	if manifestCreated {
+		fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Wrote"), filepath.Base(manifestPath))
+	} else {
+		fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Kept"), filepath.Base(manifestPath))
+	}
+	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Context"), configstore.LocalContext().String())
+	fmt.Fprintln(app.Stdout)
+	fmt.Fprintf(app.Stdout, "  %s\n", style.dim("Next: add Capabilities/Recipes, then doppels apply (local) or doppels login for cloud"))
+	return ExitSuccess
+}

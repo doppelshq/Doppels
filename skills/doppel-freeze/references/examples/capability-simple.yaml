@@ -1,0 +1,28 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: query-endpoint
+  version: 1.0.0
+  displayName: Consultar endpoint
+  summary: Realiza una petición HTTP a un endpoint configurable.
+  description: Llama a un endpoint y devuelve la respuesta como artefacto.
+  impact: low
+  tags: [http, query]
+
+inputs:
+  endpoint:
+    type: string
+    description: URL del endpoint a consultar.
+    required: true
+  method:
+    type: string
+    enum: [GET, POST]
+    default: GET
+    description: Método HTTP.
+
+outputs:
+  response:
+    type: artifact
+    description: Cuerpo de la respuesta.
+    mediaType: application/json

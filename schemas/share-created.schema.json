@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/share-created.schema.json",
+  "title": "Doppels Share Created Response",
+  "description": "The one-time response returned to the CLI after creating a Share.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "share", "publicUrl", "runnerToken"],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "ShareCreated" },
+    "share": { "$ref": "https://doppels.so/schemas/v1alpha1/share.schema.json" },
+    "publicUrl": { "type": "string", "format": "uri" },
+    "runnerToken": {
+      "description": "Bearer credential returned once to the CLI and never persisted in plaintext.",
+      "type": "string",
+      "minLength": 32
+    }
+  }
+}

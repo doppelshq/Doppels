@@ -1,0 +1,24 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "RunEvent",
+  "runId": "47e14f37-1eb6-4b9d-b7b2-17e63f3ae4df",
+  "sequence": 1,
+  "occurredAt": "2026-08-01T11:03:00Z",
+  "type": "run_succeeded",
+  "data": {
+    "returns": {
+      "response": {
+        "artifact": {
+          "id": "5fb0fe46-e0ed-4fc2-8330-dd67b14e768d",
+          "filename": "service-status.json",
+          "mediaType": "application/json",
+          "sizeBytes": 412,
+          "sha256": "a44a418efea36b4067a488482898d855cd89e09cb00ff7f97ad1ad9c0e2f5cf5"
+        }
+      }
+    },
+    "evidence": {
+      "verification_notes": "Servicio accesible; respuesta revisada manualmente."
+    }
+  }
+}

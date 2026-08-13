@@ -1,0 +1,40 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: curl-query
+  version: 1.0.0
+  displayName: Consultar endpoint con curl
+  summary: Ejecuta curl contra un endpoint y guarda la respuesta.
+  impact: low
+
+provides: [query-endpoint]
+
+runtime: shell
+
+requires:
+  commands: [curl]
+
+defaults:
+  timeout: 30s
+  approval: never
+
+steps:
+  - id: fetch
+    name: Realizar petición
+    env:
+      ENDPOINT: "{{ inputs.endpoint }}"
+      METHOD: "{{ inputs.method }}"
+    run:
+      shell: sh
+      script: |
+        curl --fail --silent --show-error \
+          --request "$METHOD" \
+          "$ENDPOINT" \
+          --output response.json
+    produces:
+      response:
+        file: response.json
+
+returns:
+  response: "{{ steps.fetch.response }}"

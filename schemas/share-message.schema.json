@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://doppels.so/schemas/v1alpha1/share-message.schema.json",
+  "title": "Doppels Share Channel Message",
+  "description": "The domain envelope carried by the Phoenix Channel for one Share session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "messageId", "shareId", "occurredAt", "event", "payload"],
+  "properties": {
+    "apiVersion": { "const": "doppels.so/v1alpha1" },
+    "kind": { "const": "ShareMessage" },
+    "messageId": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "shareId": {
+      "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/uuid"
+    },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "event": {
+      "enum": [
+        "runner_status",
+        "request_available",
+        "run_submitted",
+        "run_recorded",
+        "run_event_submitted",
+        "run_event_recorded",
+        "share_closed"
+      ]
+    },
+    "payload": { "type": "object" }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "event": { "const": "runner_status" },
+        "payload": { "$ref": "#/$defs/runnerStatus" }
+      }
+    },
+    {
+      "properties": {
+        "event": { "const": "request_available" },
+        "payload": { "$ref": "https://doppels.so/schemas/v1alpha1/request.schema.json" }
+      }
+    },
+    {
+      "properties": {
+        "event": { "const": "run_submitted" },
+        "payload": { "$ref": "https://doppels.so/schemas/v1alpha1/run.schema.json" }
+      }
+    },
+    {
+      "properties": {
+        "event": { "const": "run_recorded" },
+        "payload": { "$ref": "https://doppels.so/schemas/v1alpha1/run.schema.json" }
+      }
+    },
+    {
+      "properties": {
+        "event": { "const": "run_event_submitted" },
+        "payload": { "$ref": "https://doppels.so/schemas/v1alpha1/run-event.schema.json" }
+      }
+    },
+    {
+      "properties": {
+        "event": { "const": "run_event_recorded" },
+        "payload": { "$ref": "https://doppels.so/schemas/v1alpha1/run-event.schema.json" }
+      }
+    },
+    {
+      "properties": {
+        "event": { "const": "share_closed" },
+        "payload": { "$ref": "#/$defs/shareClosed" }
+      }
+    }
+  ],
+  "$defs": {
+    "runnerStatus": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "enum": ["online", "offline"] }
+      }
+    },
+    "shareClosed": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason"],
+      "properties": {
+        "reason": { "enum": ["completed", "expired", "revoked"] }
+      }
+    }
+  }
+}

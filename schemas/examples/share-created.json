@@ -1,0 +1,85 @@
+{
+  "apiVersion": "doppels.so/v1alpha1",
+  "kind": "ShareCreated",
+  "share": {
+    "apiVersion": "doppels.so/v1alpha1",
+    "kind": "Share",
+    "id": "aa222d6a-0fc8-4dc1-b9b5-0e4673a2d7de",
+    "createdAt": "2026-08-01T09:55:00Z",
+    "expiresAt": "2026-08-01T10:55:00Z",
+    "capabilityRevision": {
+      "name": "release-preview",
+      "version": "1.0.0",
+      "manifestSha256": "3e8485b6d578eaba3588833e2353adf642432266600e831c7d32e9c8727b1810",
+      "schema": {
+        "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
+        "sha256": "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+      }
+    },
+    "capability": {
+      "apiVersion": "doppels.so/v1alpha1",
+      "kind": "Capability",
+      "metadata": {
+        "name": "release-preview",
+        "version": "1.0.0",
+        "displayName": "Generar vista previa de release",
+        "summary": "Genera y publica una vista previa verificable de una release.",
+        "description": "Define los parámetros y resultados públicos de una vista previa.",
+        "impact": "high",
+        "tags": ["release", "preview"],
+        "labels": {
+          "team": "platform"
+        }
+      },
+      "inputs": {
+        "release_version": {
+          "type": "string",
+          "description": "Versión que se publicará en la vista previa.",
+          "required": true
+        },
+        "environment": {
+          "type": "string",
+          "description": "Entorno de la vista previa.",
+          "required": true,
+          "enum": ["staging", "production"]
+        }
+      },
+      "outputs": {
+        "release": {
+          "type": "artifact",
+          "description": "Paquete comprimido de la release.",
+          "mediaType": "application/gzip"
+        },
+        "sbom": {
+          "type": "artifact",
+          "description": "Inventario de componentes de la release.",
+          "mediaType": "application/json"
+        },
+        "preview_url": {
+          "type": "string",
+          "description": "URL pública de la vista previa."
+        }
+      }
+    },
+    "recipe": {
+      "name": "release-preview",
+      "version": "1.0.0",
+      "manifestSha256": "06389291763c058e928718305659b4377de7b56db7fb9de24735cf0a0398196b",
+      "schema": {
+        "id": "https://doppels.so/schemas/v1alpha1/recipe.schema.json",
+        "sha256": "a2b7183baf504c875ab619e6443afcd9fb8eb3281ed65bc1d79fbc7548ff919b"
+      }
+    },
+    "sharedBy": {
+      "kind": "identity",
+      "id": "carlos@example.test"
+    },
+    "requestLimit": 1,
+    "inputs": {
+      "environment": "staging"
+    },
+    "inputsLocked": true
+  },
+  "publicUrl": "https://doppels.so/s/x7Kp92",
+  "runnerToken": "runner_7bQ3cDjYs6dM2hV9pL4wXa8nK1eF5tR0"
+}

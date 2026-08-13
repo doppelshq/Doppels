@@ -1,0 +1,13 @@
+# Doppels OSS — toolchains (mise)
+# https://mise.jdx.dev
+
+[tools]
+go = "1.26.5"
+node = "25.9.0"
+task = "3.52.0"
+
+[env]
+_.path = ["{{config_root}}/bin"]
+
+[settings]
+experimental = true

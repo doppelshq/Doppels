@@ -1,0 +1,10 @@
+.env
+.env.local
+**/.env
+!**/.env.example
+
+node_modules/
+
+/bin/
+**/.doppels/
+/examples/quickstart/receipt.txt

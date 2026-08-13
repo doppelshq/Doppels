@@ -1,0 +1,25 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: greet
+  version: 1.0.0
+  displayName: Greet a person
+  summary: Produce a greeting and a downloadable receipt.
+  impact: low
+  tags: [quickstart]
+
+inputs:
+  name:
+    type: string
+    description: Person to greet.
+    required: true
+
+outputs:
+  message:
+    type: string
+    description: Generated greeting.
+  receipt:
+    type: artifact
+    description: Plain-text copy of the greeting.
+    mediaType: text/plain
