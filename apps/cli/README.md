@@ -119,7 +119,7 @@ doppels organizations list
 doppels org use acme
 doppels spaces list
 doppels space use platform
-doppels plan
+doppels preview
 doppels apply
 ```
 
@@ -128,7 +128,7 @@ owner-only credentials file. `DOPPELS_CONFIG_HOME` overrides that location. The
 session response also ensures a personal Organization/Space (`<slug>`/`private`)
 on the control plane and selects that Context after login. A Context is local
 CLI state selecting an Organization and Space; it is not a Cloud resource.
-`plan` never mutates local or remote state. `apply` discovers
+`preview` never mutates local or remote state. `apply` discovers
 the local Capability and Recipe manifests, optionally reconciles
 `doppels.<space>.yaml`, registers immutable revisions, then writes the
 deterministic `doppels.lock`. Reusing a pinned name/version with changed bytes

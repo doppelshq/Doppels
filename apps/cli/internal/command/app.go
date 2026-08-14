@@ -94,8 +94,8 @@ func (app *App) Run(arguments []string) int {
 		return app.runWhoAmI(arguments[1:])
 	case "context":
 		return app.runContext(arguments[1:])
-	case "plan":
-		return app.runPlan(arguments[1:])
+	case "preview":
+		return app.runPreview(arguments[1:])
 	case "apply":
 		return app.runApply(arguments[1:])
 	case "prune":
@@ -118,7 +118,7 @@ func (app *App) usage(writer io.Writer) {
 		{"doppels init [--dir PATH]", "working tree + local/private"},
 		{"doppels spaces [list]|init …", "Spaces in this tree / add Space"},
 		{"doppels validate [-f manifest]", "check manifests"},
-		{"doppels plan|apply [-f …]", "reconcile Space (local or cloud)"},
+		{"doppels preview|apply [-f …]", "reconcile Space (local or cloud)"},
 	})
 	writeUsageSection(writer, style, "Execute", []usageLine{
 		{"doppels run [capability/<name>]", "pick Cap/Recipe/inputs · -d"},

@@ -9,9 +9,9 @@ import (
 	"testing"
 )
 
-func TestPlanSendsScopedAuthenticatedRequest(t *testing.T) {
+func TestPreviewSendsScopedAuthenticatedRequest(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/organizations/acme/spaces/platform/plan" {
+		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/organizations/acme/spaces/platform/preview" {
 			t.Fatalf("request = %s %s", request.Method, request.URL.Path)
 		}
 		if request.Header.Get("Authorization") != "Bearer secret" {
@@ -32,7 +32,7 @@ func TestPlanSendsScopedAuthenticatedRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	response, err := client.Plan(context.Background(), "secret", "acme", "platform", ReconcileRequest{Resources: []Resource{{Kind: "Capability", SourceAuthority: "manifest"}}})
+	response, err := client.Preview(context.Background(), "secret", "acme", "platform", ReconcileRequest{Resources: []Resource{{Kind: "Capability", SourceAuthority: "manifest"}}})
 	if err != nil {
 		t.Fatal(err)
 	}

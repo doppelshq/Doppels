@@ -81,14 +81,9 @@ nombre propuesto para que pueda ajustarlo antes de persistir.
 Tras cada cambio significativo en el YAML:
 
 ```bash
-doppel validate ./capabilities/<name>.yaml
-doppel plan ./capabilities/<name>.yaml --input ...
-```
-
-Si hay Recipe:
-
-```bash
-doppel validate ./recipes/<name>.yaml
+doppels validate ./capabilities/<name>.yaml
+doppels validate ./recipes/<name>.yaml   # si hay Recipe
+doppels preview                          # diff del registry; no muta
 ```
 
 Durante pruebas, ejecutar siempre que sea posible:

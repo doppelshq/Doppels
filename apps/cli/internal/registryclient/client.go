@@ -1,5 +1,5 @@
 // Package registryclient speaks the durable control-plane registry API used by
-// doppels plan and doppels apply. It has no knowledge of local discovery or CLI
+// doppels preview and doppels apply. It has no knowledge of local discovery or CLI
 // configuration, keeping those commands testable without a Cloud process.
 package registryclient
 
@@ -88,7 +88,7 @@ type Change struct {
 	Reason  string `json:"reason,omitempty"`
 }
 
-type PlanResponse struct {
+type PreviewResponse struct {
 	Changes    []Change `json:"changes"`
 	Applicable bool     `json:"applicable"`
 }
@@ -405,9 +405,9 @@ func (c *Client) Session(ctx context.Context, token string) (*SessionResponse, e
 	return &result, nil
 }
 
-func (c *Client) Plan(ctx context.Context, token, organization, space string, body ReconcileRequest) (*PlanResponse, error) {
-	var response PlanResponse
-	if err := c.reconcile(ctx, "plan", token, organization, space, body, &response); err != nil {
+func (c *Client) Preview(ctx context.Context, token, organization, space string, body ReconcileRequest) (*PreviewResponse, error) {
+	var response PreviewResponse
+	if err := c.reconcile(ctx, "preview", token, organization, space, body, &response); err != nil {
 		return nil, err
 	}
 	return &response, nil

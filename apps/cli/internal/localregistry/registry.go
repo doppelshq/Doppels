@@ -1,5 +1,5 @@
 // Package localregistry persists the offline (org local) control-plane snapshot
-// under .doppels/ for plan/apply without Cloud.
+// under .doppels/ for preview/apply without Cloud.
 package localregistry
 
 import (

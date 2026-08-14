@@ -60,6 +60,7 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 		"Inspect",
 		"Identity",
 		"doppels init",
+		"doppels preview|apply",
 		"doppels run",
 		"doppels runs [list]",
 		"doppels capabilities|caps",
@@ -73,6 +74,20 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr should stay clean, got %s", stderr.String())
+	}
+	if strings.Contains(out, "doppels plan|") || strings.Contains(out, "doppels plan ") {
+		t.Fatalf("usage still advertises plan:\n%s", out)
+	}
+}
+
+func TestPlanIsUnknownCommand(t *testing.T) {
+	root := t.TempDir()
+	app, _, stderr := testApp(root)
+	if code := app.Run([]string{"plan"}); code != ExitContract {
+		t.Fatalf("plan exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown command "plan"`) {
+		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
 

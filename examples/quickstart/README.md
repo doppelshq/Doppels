@@ -53,7 +53,7 @@ Para registrar durablemente el Space en el control plane local:
 # Alternativa bootstrap:
 DOPPELS_API_TOKEN=local-development-token \
 ../../bin/doppels login --server http://localhost:4000
-../../bin/doppels plan
+../../bin/doppels preview
 ../../bin/doppels apply
 ```
 
@@ -65,7 +65,7 @@ sembrado `local`:
 ```console
 ../../bin/doppels org use local
 ../../bin/doppels space use platform
-../../bin/doppels plan
+../../bin/doppels preview
 ../../bin/doppels apply
 ```
 

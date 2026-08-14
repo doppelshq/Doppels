@@ -14,7 +14,7 @@ import (
 	"testing"
 )
 
-func TestPlanAndApplyDiscoverProjectAndWriteLockAfterSuccess(t *testing.T) {
+func TestPreviewAndApplyDiscoverProjectAndWriteLockAfterSuccess(t *testing.T) {
 	var reconciles atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -22,7 +22,7 @@ func TestPlanAndApplyDiscoverProjectAndWriteLockAfterSuccess(t *testing.T) {
 			fmt.Fprint(writer, `{"apiVersion":"doppels.so/v1alpha1","identity":{"kind":"identity","id":"owner"},"personal":{"organization":"owner","space":"private"}}`)
 			return
 		}
-		if request.URL.Path != "/api/v1/organizations/acme/spaces/platform/plan" && request.URL.Path != "/api/v1/organizations/acme/spaces/platform/apply" {
+		if request.URL.Path != "/api/v1/organizations/acme/spaces/platform/preview" && request.URL.Path != "/api/v1/organizations/acme/spaces/platform/apply" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -74,7 +74,7 @@ func TestPlanAndApplyDiscoverProjectAndWriteLockAfterSuccess(t *testing.T) {
 			}
 		}
 		changes := `[{"action":"create","kind":"Space","name":"platform","reason":"missing"}]`
-		if strings.HasSuffix(request.URL.Path, "/plan") {
+		if strings.HasSuffix(request.URL.Path, "/preview") {
 			fmt.Fprintf(writer, `{"changes":%s,"applicable":true}`, changes)
 		} else {
 			fmt.Fprintf(writer, `{"changes":%s,"applied":true}`, changes)
@@ -109,11 +109,14 @@ metadata:
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := app.Run([]string{"plan", "--json"}); code != ExitSuccess {
-		t.Fatalf("plan exit = %d, stderr = %s", code, stderr.String())
+	if code := app.Run([]string{"preview", "--json"}); code != ExitSuccess {
+		t.Fatalf("preview exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind": "Preview"`) {
+		t.Fatalf("preview json = %s", stdout.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "doppels.lock")); !os.IsNotExist(err) {
-		t.Fatalf("plan unexpectedly wrote lock: %v", err)
+		t.Fatalf("preview unexpectedly wrote lock: %v", err)
 	}
 	stdout.Reset()
 	stderr.Reset()
@@ -133,14 +136,14 @@ metadata:
 
 	stdout.Reset()
 	stderr.Reset()
-	if code := app.Run([]string{"plan"}); code != ExitSuccess {
-		t.Fatalf("human plan exit = %d, stderr = %s", code, stderr.String())
+	if code := app.Run([]string{"preview"}); code != ExitSuccess {
+		t.Fatalf("human preview exit = %d, stderr = %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Cloud") || !strings.Contains(stdout.String(), server.URL) || !strings.Contains(stdout.String(), "Scope") || !strings.Contains(stdout.String(), "acme/platform") {
-		t.Fatalf("human plan missing Cloud/Scope: %s", stdout.String())
+		t.Fatalf("human preview missing Cloud/Scope: %s", stdout.String())
 	}
 	if reconciles.Load() != 3 {
-		t.Fatalf("reconcile calls after human plan = %d", reconciles.Load())
+		t.Fatalf("reconcile calls after human preview = %d", reconciles.Load())
 	}
 
 	for filename, version := range map[string]string{"other-v1.yaml": "1.0.0", "other-v2.yaml": "2.0.0"} {
@@ -153,8 +156,8 @@ outputs: {answer: {type: string}}
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := app.Run([]string{"plan"}); code != ExitContract {
-		t.Fatalf("multi-revision plan exit = %d, stderr = %s", code, stderr.String())
+	if code := app.Run([]string{"preview"}); code != ExitContract {
+		t.Fatalf("multi-revision preview exit = %d, stderr = %s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), `multiple local revisions of Capability "other"`) || reconciles.Load() != 3 {
 		t.Fatalf("stderr/calls = %s / %d", stderr.String(), reconciles.Load())
@@ -177,8 +180,8 @@ outputs: {answer: {type: string}}
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := app.Run([]string{"plan"}); code != ExitContract {
-		t.Fatalf("changed plan exit = %d, stderr = %s", code, stderr.String())
+	if code := app.Run([]string{"preview"}); code != ExitContract {
+		t.Fatalf("changed preview exit = %d, stderr = %s", code, stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "version bump") || reconciles.Load() != 3 {
 		t.Fatalf("stderr/calls = %s / %d", stderr.String(), reconciles.Load())

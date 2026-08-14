@@ -93,4 +93,4 @@ Antes de pedir confirmación al usuario, verificar:
 - [ ] Dependencias declaradas con versión si conocida.
 - [ ] `approval` coherente con `impact`.
 - [ ] `doppels validate` pasa.
-- [ ] `doppels plan --dry-run` pasa.
+- [ ] `doppels preview` pasa (si hay Context Org/Space).

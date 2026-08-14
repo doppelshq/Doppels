@@ -62,7 +62,7 @@ The skill then:
 3. Asks what to capture (one Capability per distinct outcome).
 4. Reads the session (commands, files, inputs, outputs) and **writes YAML by hand** — there is no `doppels freeze` generator command.
 5. Loops `doppels validate` and test `doppels run …` when safe until clean.
-6. Shows you the contract and asks before treating it as done.
+6. Shows you the contract and asks before treating it as done. **Commit** the YAML when you are happy — that is the repeatable asset.
 
 Skill internals: [`skills/doppel-freeze/SKILL.md`](skills/doppel-freeze/SKILL.md) and [`skills/doppel-freeze/references/`](skills/doppel-freeze/references/).
 

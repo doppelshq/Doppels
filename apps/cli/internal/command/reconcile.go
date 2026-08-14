@@ -43,8 +43,8 @@ type recipeRegistryDescriptor struct {
 
 const maxManifestSourceBytes = 1_000_000
 
-func (app *App) runPlan(arguments []string) int {
-	flags := app.flagSet("plan")
+func (app *App) runPreview(arguments []string) int {
+	flags := app.flagSet("preview")
 	jsonOutput := flags.Bool("json", false, "write a machine-readable response")
 	var spaceFile string
 	flags.StringVar(&spaceFile, "f", "", "Space manifest (defaults to doppels.<space>.yaml when present)")
@@ -53,7 +53,7 @@ func (app *App) runPlan(arguments []string) int {
 		return ExitContract
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(app.Stderr, "plan accepts a Space manifest through -f; definitions are discovered from the local Space")
+		fmt.Fprintln(app.Stderr, "preview accepts a Space manifest through -f; definitions are discovered from the local Space")
 		return ExitContract
 	}
 	input, code := app.reconcileInput(spaceFile)
@@ -61,28 +61,28 @@ func (app *App) runPlan(arguments []string) int {
 		return code
 	}
 	if input.local {
-		return app.planLocal(input, *jsonOutput)
+		return app.previewLocal(input, *jsonOutput)
 	}
 	client, err := app.registryClient(input.session.Profile.Server)
 	if err != nil {
 		fmt.Fprintln(app.Stderr, err)
 		return ExitOperational
 	}
-	response, err := client.Plan(app.context(), input.session.Token, input.scope.Organization, input.scope.Space, input.body)
+	response, err := client.Preview(app.context(), input.session.Token, input.scope.Organization, input.scope.Space, input.body)
 	if err != nil {
-		fmt.Fprintf(app.Stderr, "plan: %v\n", err)
+		fmt.Fprintf(app.Stderr, "preview: %v\n", err)
 		return reconcileErrorCode(err)
 	}
 	server := input.session.Profile.Server
 	if *jsonOutput {
 		app.writeJSON(map[string]any{
-			"kind": "Plan", "server": server, "context": input.scope, "changes": response.Changes,
+			"kind": "Preview", "server": server, "context": input.scope, "changes": response.Changes,
 			"applicable": response.Applicable,
 		})
 	} else {
 		writeChanges(app.Stdout, server, input.scope, response.Changes, input.body.Resources)
 		if !response.Applicable {
-			fmt.Fprintln(app.Stderr, "Plan contains conflicts and cannot be applied")
+			fmt.Fprintln(app.Stderr, "Preview contains conflicts and cannot be applied")
 			writeApplyConflictHints(app.Stderr, input.scope, response.Changes)
 		}
 	}
@@ -92,7 +92,7 @@ func (app *App) runPlan(arguments []string) int {
 	return ExitSuccess
 }
 
-func (app *App) planLocal(input reconcileInput, jsonOutput bool) int {
+func (app *App) previewLocal(input reconcileInput, jsonOutput bool) int {
 	previous, err := localregistry.Load(input.root)
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "load local registry: %v\n", err)
@@ -101,7 +101,7 @@ func (app *App) planLocal(input reconcileInput, jsonOutput bool) int {
 	changes := localregistry.DiffChanges(previous.Resources, input.body.Resources)
 	if jsonOutput {
 		app.writeJSON(map[string]any{
-			"kind": "Plan", "server": "local", "context": input.scope, "changes": changes, "applicable": true,
+			"kind": "Preview", "server": "local", "context": input.scope, "changes": changes, "applicable": true,
 		})
 	} else {
 		writeChanges(app.Stdout, "local", input.scope, changes, input.body.Resources)
@@ -232,7 +232,7 @@ func (app *App) reconcileInput(explicitSpaceFile string) (reconcileInput, int) {
 	}
 	scope, err := store.Context()
 	if err != nil || !scope.Valid() || scope.Space == "" {
-		fmt.Fprintln(app.Stderr, "plan/apply require a Space; run doppels org use <organization> and doppels space use <space>")
+		fmt.Fprintln(app.Stderr, "preview/apply require a Space; run doppels org use <organization> and doppels space use <space>")
 		return reconcileInput{}, ExitContract
 	}
 	local := scope.IsLocal()
@@ -371,7 +371,7 @@ func ensureSingleRegistryRevision(catalog *manifest.Catalog) error {
 		}
 		sort.Strings(names)
 		if len(names) > 0 {
-			return fmt.Errorf("plan/apply found multiple local revisions of %s %q; select exactly one revision in the local Space", kind.name, names[0])
+			return fmt.Errorf("preview/apply found multiple local revisions of %s %q; select exactly one revision in the local Space", kind.name, names[0])
 		}
 	}
 	return nil
@@ -399,7 +399,7 @@ func writeChanges(writer io.Writer, server string, scope configstore.Context, ch
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Cloud"), style.value(server))
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Scope"), style.value(scope.String()))
 	if len(changes) == 0 || allChangesUnchanged(changes) {
-		fmt.Fprintf(writer, "  %s  %s\n", style.field("Plan"), style.dim("Already in sync"))
+		fmt.Fprintf(writer, "  %s  %s\n", style.field("Preview"), style.dim("Already in sync"))
 		return
 	}
 	fmt.Fprintln(writer)

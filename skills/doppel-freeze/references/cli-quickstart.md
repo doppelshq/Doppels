@@ -58,8 +58,8 @@ doppel list
 # Validar manifest contra schema
 doppels validate <archivo>
 
-# Mostrar plan de ejecución
-doppels plan <archivo> --input <nombre>=<valor>
+# Diff del registry (no muta)
+doppels preview
 
 # Ejecutar (modo prueba sin efectos)
 doppels run --dry-run <archivo> --input <nombre>=<valor>
