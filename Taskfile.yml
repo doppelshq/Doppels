@@ -26,9 +26,12 @@ tasks:
   build:cli:
     desc: Compila bin/doppels
     dir: apps/cli
+    vars:
+      VERSION:
+        sh: git describe --tags --always --dirty 2>/dev/null || echo dev
     cmds:
       - mkdir -p ../../bin
-      - go build -o ../../bin/doppels ./cmd/doppels
+      - go build -ldflags "-s -w -X doppels.so/cli/internal/version.Version={{.VERSION}}" -o ../../bin/doppels ./cmd/doppels
 
   test:
     desc: Schemas + CLI

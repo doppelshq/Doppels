@@ -4,7 +4,12 @@ Binario: **`doppels`** (no `doppel`).
 
 ## Instalar
 
-No hay tap Homebrew ni `install.sh` todavía. Desde fuente:
+```bash
+curl -fsSL https://doppels.so/install.sh | sh
+# o: brew tap doppelshq/tap && brew install doppels
+```
+
+Desde fuente (mise):
 
 ```bash
 git clone https://github.com/doppelshq/doppels.git

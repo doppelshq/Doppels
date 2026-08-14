@@ -13,7 +13,7 @@ builds:
     goos: [linux, darwin]
     goarch: [amd64, arm64]
     ldflags:
-      - -s -w
+      - -s -w -X doppels.so/cli/internal/version.Version={{.Version}}
 
 archives:
   - formats: [tar.gz]

@@ -68,6 +68,17 @@ Skill internals: [`skills/doppel-freeze/SKILL.md`](skills/doppel-freeze/SKILL.md
 
 ## Install the CLI
 
+```console
+curl -fsSL https://doppels.so/install.sh | sh
+```
+
+Homebrew:
+
+```console
+brew tap doppelshq/tap
+brew install doppels
+```
+
 From source (mise):
 
 ```console
@@ -78,9 +89,9 @@ task setup
 task build:cli          # → ./bin/doppels
 ```
 
-With the mise shell hook, `bin/` is on `PATH`.
+With the mise shell hook, `bin/` is on `PATH`. Check with `doppels --version`.
 
-Tagged builds (when a `v*` tag exists): [GitHub Releases](https://github.com/doppelshq/doppels/releases). Homebrew tap comes later.
+Tagged builds: [GitHub Releases](https://github.com/doppelshq/doppels/releases).
 
 ## CLI workflow
 

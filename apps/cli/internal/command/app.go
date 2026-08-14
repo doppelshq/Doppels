@@ -17,6 +17,7 @@ import (
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/projectlock"
+	"doppels.so/cli/internal/version"
 )
 
 const (
@@ -59,6 +60,9 @@ func (app *App) Run(arguments []string) int {
 	switch arguments[0] {
 	case "help", "-h", "--help":
 		app.usage(app.Stdout)
+		return ExitSuccess
+	case "version", "-v", "--version":
+		fmt.Fprintf(app.Stdout, "doppels %s\n", version.Version)
 		return ExitSuccess
 	case "init":
 		return app.runInit(arguments[1:])
