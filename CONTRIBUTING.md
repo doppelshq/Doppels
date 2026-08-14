@@ -1,5 +1,11 @@
 # Contributing to Doppels
 
+This repository is the **source of truth** for the Apache-2.0 CLI, schemas,
+and agent skills. Pull requests merge here.
+
+The private control plane (`doppelshq/internal`) consumes this repo as a git
+submodule. Do not send CLI patches there.
+
 Keep changes small, tested, and on-vocabulary (Capability, Recipe, Request,
 Run, RunEvent).
 
