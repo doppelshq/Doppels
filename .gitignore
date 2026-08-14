@@ -6,5 +6,6 @@
 node_modules/
 
 /bin/
+/dist/
 **/.doppels/
 /examples/quickstart/receipt.txt

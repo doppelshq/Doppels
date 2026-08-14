@@ -68,7 +68,7 @@ Skill internals: [`skills/doppel-freeze/SKILL.md`](skills/doppel-freeze/SKILL.md
 
 ## Install the CLI
 
-Toolchains: [mise](https://mise.jdx.dev).
+From source (mise):
 
 ```console
 git clone https://github.com/doppelshq/doppels.git
@@ -79,6 +79,8 @@ task build:cli          # → ./bin/doppels
 ```
 
 With the mise shell hook, `bin/` is on `PATH`.
+
+Tagged builds (when a `v*` tag exists): [GitHub Releases](https://github.com/doppelshq/doppels/releases). Homebrew tap comes later.
 
 ## CLI workflow
 

@@ -23,6 +23,9 @@ which doppels
 
 Si no está en PATH: usa `./bin/doppels` desde la raíz de este repo.
 
+Tras un tag `v*`: binarios en
+[GitHub Releases](https://github.com/doppelshq/doppels/releases).
+
 ## Space local
 
 ```bash
