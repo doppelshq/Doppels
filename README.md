@@ -4,7 +4,7 @@
 
 You explore with an agent. You get something that works once. Next week you re-prompt and hope. Doppels turns that session into a **Capability** (the contract) and a **Recipe** (how it runs on *your* machine)—typed, validated, replayable. Execution never leaves the host. Credentials stay where they already are (`aws`, `gcloud`, `psql`, SSH, VPN).
 
-Apache-2.0. The hosted control plane ([doppels.so](https://doppels.so)) is **not** in this repository.
+Apache-2.0.
 
 ## Why
 
@@ -60,24 +60,21 @@ More examples in that folder (`release-pipeline`, manual fulfillment without a R
 | --- | --- |
 | **Capability** | Public contract: inputs and outputs |
 | **Recipe** | Local how: Steps, host `requires`, `returns` |
-| **Request / Run** | A ask, and one attempt to fulfill it |
 
-A Capability can have zero, one, or many Recipes. With no Recipe you can still fulfill manually. Cloud, if you use it later, coordinates shares and teams—it never executes Steps.
+A Capability can have zero, one, or many Recipes. With no Recipe you can still fulfill manually.
 
 ## What’s in this repo
 
 ```text
-apps/cli/              Go runtime (validate, run, share client)
+apps/cli/              Go runtime (validate, run, local history)
 schemas/               JSON Schema contracts (source of truth)
 skills/doppel-freeze/  Agent skill for Cursor / Claude / Codex
 skills/doppel-use/     Draft — blocked on MCP
 examples/quickstart/   Local Space you can run offline
 ```
 
-`doppels share` can talk to a server (`--server`). Default hosted API is doppels.so. That server lives elsewhere.
+## Links
 
-## Docs & product
-
-- Site: [doppels.so](https://doppels.so)
-- Contribute: [CONTRIBUTING.md](CONTRIBUTING.md) (DCO + CLA)
-- License: Apache-2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE)
+- [doppels.so](https://doppels.so)
+- [CONTRIBUTING.md](CONTRIBUTING.md) (DCO + CLA)
+- [LICENSE](LICENSE) and [NOTICE](NOTICE) — Apache-2.0
