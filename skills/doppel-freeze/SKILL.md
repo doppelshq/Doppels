@@ -1,6 +1,6 @@
 ---
 name: doppel-freeze
-description: Convierte la sesión actual del agente en una Capability + Recipe local determinista. Asume que el agente no conoce Doppel y lo guía desde instalación hasta manifest validado. Usar cuando el usuario diga "doppel freeze", "congelar esto", "guardar este proceso" o quiera capturar trabajo exploratorio en algo repetible.
+description: Convierte la sesión actual del agente en una Capability + Recipe local determinista. Asume que el agente no conoce Doppel y lo guía desde instalación hasta manifest validado. Usar SOLO cuando el usuario pida captura de forma explícita: "doppel freeze", "congelar esto", "guardar este proceso", "hazlo repetible" o "cómo lo vuelvo a ejecutar". No activar por defecto en cada tarea operativa. No preguntar al final de cada operación si persistir.
 requires:
   doppel: ">=0.1.0"
 ---
@@ -9,6 +9,10 @@ requires:
 
 Esta skill guía al agente para capturar una sesión de trabajo en una Capability
 y Recipe locales deterministas. No asume conocimiento previo de Doppel.
+
+**Cuándo activar (v1):** solo con petición explícita de captura, o si el
+usuario pregunta cómo repetir lo que acaba de funcionar (ofrecer freeze
+**una vez**). Nunca recipe-first. Nunca preguntar al cierre de cada tarea.
 
 ## Flujo
 
@@ -118,6 +122,8 @@ decisión del usuario.
 - El agente NUNCA invoca un comando `doppel freeze` generador (no existe).
 - El agente NUNCA escribe secretos en el YAML; solo referencias (`from:
   host_env`).
+- El agente NUNCA inicia freeze solo porque la tarea “parecía operativa”.
+- El agente NUNCA pregunta al final de cada operación si persistir.
 - El agente SIEMPRE valida antes de pedir confirmación al usuario.
 - Si la CLI no está disponible, abortar y dar instrucciones.
 - El manifest resultante debe ser YAML legible y editable, no opaco.
