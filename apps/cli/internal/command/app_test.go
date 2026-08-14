@@ -65,6 +65,8 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 		"doppels runs [list]",
 		"doppels capabilities|caps",
 		"doppels organizations|orgs",
+		"doppels publish",
+		"doppels install",
 		"doppels runs [list]",
 		"--json",
 	} {

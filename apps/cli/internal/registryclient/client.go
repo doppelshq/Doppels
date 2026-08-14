@@ -566,6 +566,118 @@ func (c *Client) IngestRun(ctx context.Context, token, organization, space strin
 	return nil
 }
 
+type HubListing struct {
+	Organization      string `json:"organization"`
+	CapabilityName    string `json:"capabilityName"`
+	CapabilityVersion string `json:"capabilityVersion"`
+	CapabilitySummary string `json:"capabilitySummary,omitempty"`
+	CapabilitySource  string `json:"capabilitySource"`
+	RecipeName        string `json:"recipeName"`
+	RecipeVersion     string `json:"recipeVersion"`
+	RecipeSource      string `json:"recipeSource"`
+	Status            string `json:"status"`
+	PublicPath        string `json:"publicPath"`
+}
+
+type PublishRequest struct {
+	CapabilityName    string `json:"capabilityName"`
+	CapabilityVersion string `json:"capabilityVersion"`
+	CapabilitySummary string `json:"capabilitySummary,omitempty"`
+	CapabilitySource  string `json:"capabilitySource"`
+	RecipeName        string `json:"recipeName"`
+	RecipeVersion     string `json:"recipeVersion"`
+	RecipeSource      string `json:"recipeSource"`
+}
+
+func (c *Client) Publish(ctx context.Context, token, organization string, body PublishRequest) (*HubListing, error) {
+	if strings.TrimSpace(token) == "" || containsControl(token) {
+		return nil, errors.New("a valid login token is required")
+	}
+	if organization == "" {
+		return nil, errors.New("Organization is required")
+	}
+	endpoint := "/api/v1/organizations/" + url.PathEscape(organization) + "/hub/publications"
+	var listing HubListing
+	if err := c.postAuthJSON(ctx, token, endpoint, http.StatusCreated, body, &listing); err != nil {
+		return nil, err
+	}
+	return &listing, nil
+}
+
+func (c *Client) Unpublish(ctx context.Context, token, organization, capabilityName string) (*HubListing, error) {
+	if strings.TrimSpace(token) == "" || containsControl(token) {
+		return nil, errors.New("a valid login token is required")
+	}
+	if organization == "" || capabilityName == "" {
+		return nil, errors.New("Organization and Capability name are required")
+	}
+	endpoint := "/api/v1/organizations/" + url.PathEscape(organization) + "/hub/publications/" + url.PathEscape(capabilityName) + "/unpublish"
+	var listing HubListing
+	if err := c.postAuthJSON(ctx, token, endpoint, http.StatusOK, map[string]any{}, &listing); err != nil {
+		return nil, err
+	}
+	return &listing, nil
+}
+
+func (c *Client) GetHubListing(ctx context.Context, organization, capabilityName string) (*HubListing, error) {
+	if organization == "" || capabilityName == "" {
+		return nil, errors.New("Organization and Capability name are required")
+	}
+	endpoint := "/api/v1/hub/" + url.PathEscape(organization) + "/" + url.PathEscape(capabilityName)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, c.resolve(endpoint), nil)
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("User-Agent", "doppels-cli/v1alpha1")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return nil, fmt.Errorf("GET %s: %w", endpoint, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, responseError("GET "+endpoint, response.StatusCode, response.Body)
+	}
+	var listing HubListing
+	if err := decodeJSONLoose(response.Body, &listing); err != nil {
+		return nil, fmt.Errorf("decode hub listing: %w", err)
+	}
+	if listing.CapabilityName == "" || listing.RecipeSource == "" {
+		return nil, errors.New("Cloud returned an incomplete hub listing")
+	}
+	return &listing, nil
+}
+
+func (c *Client) postAuthJSON(ctx context.Context, token, endpoint string, wantStatus int, body, output any) error {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, c.resolve(endpoint), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "doppels-cli/v1alpha1")
+	response, err := c.http.Do(request)
+	if err != nil {
+		return fmt.Errorf("POST %s: %w", endpoint, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != wantStatus {
+		return responseError("POST "+endpoint, response.StatusCode, response.Body)
+	}
+	if output == nil {
+		return nil
+	}
+	if err := decodeJSONLoose(response.Body, output); err != nil {
+		return fmt.Errorf("decode %s response: %w", endpoint, err)
+	}
+	return nil
+}
+
 func (c *Client) reconcile(ctx context.Context, operation, token, organization, space string, body ReconcileRequest, output any) error {
 	if strings.TrimSpace(token) == "" || containsControl(token) {
 		return errors.New("a valid login token is required")

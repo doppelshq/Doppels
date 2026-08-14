@@ -52,7 +52,7 @@ func (app *App) orgUse(arguments []string) int {
 	selected.Space = space
 	if err := store.SetContext(selected); err != nil {
 		if errors.Is(err, configstore.ErrNotLoggedIn) {
-			fmt.Fprintln(app.Stderr, err)
+			writeNotLoggedIn(app.Stderr)
 			return ExitContract
 		}
 		fmt.Fprintf(app.Stderr, "save context: %v\n", err)
@@ -112,7 +112,7 @@ func (app *App) spaceUse(arguments []string) int {
 	}
 	if err := store.SetContext(selected); err != nil {
 		if errors.Is(err, configstore.ErrNotLoggedIn) {
-			fmt.Fprintln(app.Stderr, err)
+			writeNotLoggedIn(app.Stderr)
 			return ExitContract
 		}
 		fmt.Fprintf(app.Stderr, "save context: %v\n", err)

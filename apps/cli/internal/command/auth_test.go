@@ -40,11 +40,15 @@ func TestLoginContextWhoAmIAndCloudLists(t *testing.T) {
 	if strings.Contains(stdout.String(), "test-token") || strings.Contains(stderr.String(), "test-token") {
 		t.Fatal("login token leaked to command output")
 	}
-	if !strings.Contains(stdout.String(), "identity/yuri") {
-		t.Fatalf("stdout = %s", stdout.String())
+	loginOut := stdout.String()
+	if strings.Contains(loginOut, "identity/yuri") {
+		t.Fatalf("Identity should not prefix kind, stdout = %s", loginOut)
 	}
-	if !strings.Contains(stdout.String(), "yuri/private") {
-		t.Fatalf("expected private Context, stdout = %s", stdout.String())
+	if !strings.Contains(loginOut, "yuri") || !strings.Contains(loginOut, "Cloud") || !strings.Contains(loginOut, server.URL) {
+		t.Fatalf("stdout = %s", loginOut)
+	}
+	if !strings.Contains(loginOut, "Org") || !strings.Contains(loginOut, "Space") || !strings.Contains(loginOut, "private") {
+		t.Fatalf("expected Org and Space, stdout = %s", loginOut)
 	}
 
 	stdout.Reset()
@@ -86,6 +90,25 @@ func TestLoginContextWhoAmIAndCloudLists(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	if code := app.Run([]string{"whoami"}); code != ExitSuccess {
+		t.Fatalf("whoami exit = %d, stderr = %s", code, stderr.String())
+	}
+	who := stdout.String()
+	if strings.Contains(who, "identity/yuri") {
+		t.Fatalf("Identity should not prefix kind, stdout = %s", who)
+	}
+	if !strings.Contains(who, "yuri") || !strings.Contains(who, "Cloud") || !strings.Contains(who, server.URL) {
+		t.Fatalf("stdout = %s", who)
+	}
+	if !strings.Contains(who, "Org") || !strings.Contains(who, "acme") {
+		t.Fatalf("expected current Org, stdout = %s", who)
+	}
+	if !strings.Contains(who, "Space") || !strings.Contains(who, "platform") {
+		t.Fatalf("expected current Space, stdout = %s", who)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	if code := app.Run([]string{"organizations", "list"}); code != ExitSuccess {
 		t.Fatalf("organizations list exit = %d, stderr = %s", code, stderr.String())
 	}
@@ -98,6 +121,18 @@ func TestLoginContextWhoAmIAndCloudLists(t *testing.T) {
 	}
 	if !strings.Contains(out, "*") {
 		t.Fatalf("expected current-org marker, stdout = %s", out)
+	}
+	if !strings.Contains(out, "Cloud") || !strings.Contains(out, server.URL) {
+		t.Fatalf("expected Cloud when server is not doppels.so, stdout = %s", out)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"organizations", "list", "--json"}); code != ExitSuccess {
+		t.Fatalf("organizations --json exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"server"`) || !strings.Contains(stdout.String(), server.URL) {
+		t.Fatalf("expected server in OrganizationList, stdout = %s", stdout.String())
 	}
 
 	stdout.Reset()
@@ -124,6 +159,13 @@ func TestLoginContextWhoAmIAndCloudLists(t *testing.T) {
 	stderr.Reset()
 	if code := app.Run([]string{"whoami"}); code != ExitContract {
 		t.Fatalf("whoami after logout exit = %d, stderr = %s", code, stderr.String())
+	}
+	hint := stderr.String()
+	if !strings.Contains(hint, "Not logged in to Doppels Cloud") {
+		t.Fatalf("stderr = %s", hint)
+	}
+	if !strings.Contains(hint, "doppels login") || !strings.Contains(hint, "--server") {
+		t.Fatalf("expected login hint, stderr = %s", hint)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"time"
@@ -11,6 +12,14 @@ import (
 	"doppels.so/cli/internal/configstore"
 	"doppels.so/cli/internal/registryclient"
 )
+
+const defaultCloudServer = "https://doppels.so"
+
+func nonDefaultCloud(server string) bool {
+	left := strings.TrimRight(strings.TrimSpace(server), "/")
+	right := strings.TrimRight(defaultCloudServer, "/")
+	return left != "" && left != right
+}
 
 func (app *App) configStore() (*configstore.Store, error) {
 	if configured := environmentValue(app.environment(), "DOPPELS_CONFIG_HOME"); configured != "" {
@@ -51,7 +60,7 @@ func (app *App) runLogin(arguments []string) int {
 			}
 		}
 		if defaultServer == "" {
-			defaultServer = "https://doppels.so"
+			defaultServer = defaultCloudServer
 		}
 	}
 	server := flags.String("server", defaultServer, "Doppels control-plane URL")
@@ -220,12 +229,13 @@ func (app *App) persistLogin(canonicalServer, token string, remote *registryclie
 	if jsonOutput {
 		app.writeJSON(view)
 	} else {
-		style := newTermStyle(app.Stdout)
-		fmt.Fprintln(app.Stdout)
-		fmt.Fprintf(app.Stdout, "  %s  %s/%s\n", style.field("Identity"), remote.Identity.Kind, remote.Identity.ID)
-		fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Server"), canonicalServer)
+		ctx := configstore.Context{}
 		if selectedContext != nil {
-			fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Context"), selectedContext.String())
+			ctx = *selectedContext
+		}
+		writeSessionSummary(app.Stdout, remote.Identity, canonicalServer, ctx)
+		if selectedContext != nil {
+			style := newTermStyle(app.Stdout)
 			fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Next"), style.dim("doppels organizations · doppels org use <organization>"))
 		}
 	}
@@ -299,7 +309,7 @@ func (app *App) runWhoAmI(arguments []string) int {
 	session, err := store.Session()
 	if err != nil {
 		if errors.Is(err, configstore.ErrNotLoggedIn) {
-			fmt.Fprintln(app.Stderr, err)
+			writeNotLoggedIn(app.Stderr)
 			return ExitContract
 		}
 		fmt.Fprintf(app.Stderr, "load login: %v\n", err)
@@ -319,17 +329,39 @@ func (app *App) runWhoAmI(arguments []string) int {
 	if *jsonOutput {
 		app.writeJSON(view)
 	} else {
-		style := newTermStyle(app.Stdout)
-		fmt.Fprintln(app.Stdout)
-		fmt.Fprintf(app.Stdout, "  %s  %s/%s\n", style.field("Identity"), remote.Identity.Kind, remote.Identity.ID)
-		fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Server"), session.Profile.Server)
-		if session.Profile.Context.Valid() {
-			fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Context"), session.Profile.Context.String())
-		} else {
-			fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Context"), style.dim("none"))
-		}
+		writeSessionSummary(app.Stdout, remote.Identity, session.Profile.Server, session.Profile.Context)
 	}
 	return ExitSuccess
+}
+
+func writeNotLoggedIn(writer io.Writer) {
+	style := newTermStyle(writer)
+	fmt.Fprintln(writer, "Not logged in to Doppels Cloud.")
+	fmt.Fprintln(writer)
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Login"), "doppels login")
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Local"), "doppels login --server http://127.0.0.1:4000")
+}
+
+func writeSessionSummary(writer io.Writer, identity registryclient.ActorReference, server string, ctx configstore.Context) {
+	style := newTermStyle(writer)
+	id := identity.ID
+	if identity.DisplayName != nil {
+		display := strings.TrimSpace(*identity.DisplayName)
+		if display != "" && display != id {
+			id = id + "  " + style.dim(display)
+		}
+	}
+	fmt.Fprintln(writer)
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Identity"), id)
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Cloud"), server)
+	if ctx.Valid() {
+		fmt.Fprintf(writer, "  %s  %s\n", style.field("Org"), ctx.Organization)
+		if ctx.Space != "" {
+			fmt.Fprintf(writer, "  %s  %s\n", style.field("Space"), ctx.Space)
+		}
+	} else {
+		fmt.Fprintf(writer, "  %s  %s\n", style.field("Org"), style.dim("none"))
+	}
 }
 
 func (app *App) runContext(arguments []string) int {

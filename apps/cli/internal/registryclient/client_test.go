@@ -111,6 +111,50 @@ func TestPrunePlanAndPruneSendKeepAndApplyFlag(t *testing.T) {
 	}
 }
 
+func TestGetHubListingIsPublicAndPublishSendsSources(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		switch {
+		case request.Method == http.MethodGet && request.URL.Path == "/api/v1/hub/acme/greet":
+			if request.Header.Get("Authorization") != "" {
+				t.Fatalf("public GET sent Authorization")
+			}
+			_, _ = writer.Write([]byte(`{"organization":"acme","capabilityName":"greet","capabilityVersion":"1.0.0","capabilitySource":"cap","recipeName":"greet-shell","recipeVersion":"1.0.0","recipeSource":"script","status":"listed","publicPath":"/@acme/greet"}`))
+		case request.Method == http.MethodPost && request.URL.Path == "/api/v1/organizations/acme/hub/publications":
+			if request.Header.Get("Authorization") != "Bearer secret" {
+				t.Fatalf("authorization = %q", request.Header.Get("Authorization"))
+			}
+			var body PublishRequest
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			if body.RecipeSource != "export MESSAGE=" {
+				t.Fatalf("body = %#v", body)
+			}
+			writer.WriteHeader(http.StatusCreated)
+			_, _ = writer.Write([]byte(`{"organization":"acme","capabilityName":"greet","capabilityVersion":"1.0.0","capabilitySource":"cap","recipeName":"greet-shell","recipeVersion":"1.0.0","recipeSource":"export MESSAGE=","status":"listed","publicPath":"/@acme/greet"}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	client, err := New(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	listing, err := client.GetHubListing(context.Background(), "acme", "greet")
+	if err != nil || listing.PublicPath != "/@acme/greet" {
+		t.Fatalf("listing = %#v err=%v", listing, err)
+	}
+	published, err := client.Publish(context.Background(), "secret", "acme", PublishRequest{
+		CapabilityName: "greet", CapabilityVersion: "1.0.0", CapabilitySource: "cap",
+		RecipeName: "greet-shell", RecipeVersion: "1.0.0", RecipeSource: "export MESSAGE=",
+	})
+	if err != nil || published.Status != "listed" {
+		t.Fatalf("publish = %#v err=%v", published, err)
+	}
+}
+
 func TestServerRejectsInsecureRemoteHTTP(t *testing.T) {
 	if _, err := New("http://example.com", nil); err == nil {
 		t.Fatal("expected insecure URL rejection")
