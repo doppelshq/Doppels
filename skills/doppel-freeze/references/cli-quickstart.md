@@ -1,83 +1,56 @@
 # CLI quickstart
 
-Comandos esenciales de Doppel para usar desde la skill `doppel-freeze`.
+Binario: **`doppels`** (no `doppel`).
 
-## Verificar instalación
+## Instalar
 
-```bash
-doppel --version
-which doppel
-```
-
-Si no está instalado, instalar según el sistema operativo.
-
-### macOS
+No hay tap Homebrew ni `install.sh` todavía. Desde fuente:
 
 ```bash
-brew install doppels/tap/doppels
+git clone https://github.com/doppelshq/doppels.git
+cd doppels
+mise install
+task setup
+task build:cli          # → ./bin/doppels
 ```
 
-### Linux
+Con el hook de mise, `bin/` entra en `PATH`. Comprueba:
 
 ```bash
-curl -fsSL https://doppels.so/install.sh | sh
+doppels --version
+which doppels
 ```
 
-### Verificar binario
+Si no está en PATH: usa `./bin/doppels` desde la raíz de este repo.
 
-```bash
-doppel --help
-doppel doctor
-```
-
-## Inicializar Space local
+## Space local
 
 ```bash
 doppels spaces init
 ```
 
-Crea estructura base:
-
 ```text
 .
 ├── capabilities/
 ├── recipes/
-├── doppels.<space>.yaml   # stub Space
+├── doppels.<space>.yaml
 └── .doppels/              # runtime only
 ```
 
-`doppels spaces init` es idempotente: no sobrescribe un `doppels.<space>.yaml`
-existente. No registra el Space en Cloud; usa `org use` / `space use` + `apply`.
-
-## Comandos frecuentes
+## Comandos
 
 ```bash
-# Listar Capabilities y Recipes
-doppel list
-
-# Validar manifest contra schema
-doppels validate <archivo>
-
-# Diff del registry (no muta)
-doppels preview
-
-# Ejecutar (modo prueba sin efectos)
-doppels run --dry-run <archivo> --input <nombre>=<valor>
-
-# Ejecutar
-doppels run <archivo> --input <nombre>=<valor>
+doppels validate
+doppels capabilities list
+doppels describe capability/<name>
+doppels run capability/<name> --input key=value --yes
+doppels runs list
+doppels runs show <run-id>
+doppels runs logs <run-id>
+doppels --help
+doppels <command> --help
 ```
 
-## Descubrir schemas
+`--json` en la mayoría de comandos.
 
-```bash
-doppel schema list
-doppel schema describe capability
-doppel schema describe recipe
-```
-
-## Ayuda contextual
-
-```bash
-doppel <command> --help
-```
+Manifests sueltos: `doppels validate -f ./capabilities/<name>.yaml`
