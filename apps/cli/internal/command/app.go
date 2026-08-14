@@ -102,6 +102,14 @@ func (app *App) Run(arguments []string) int {
 		return app.runPreview(arguments[1:])
 	case "apply":
 		return app.runApply(arguments[1:])
+	case "publish":
+		return app.runPublish(arguments[1:])
+	case "unpublish":
+		return app.runUnpublish(arguments[1:])
+	case "install":
+		return app.runInstall(arguments[1:])
+	case "fork":
+		return app.runFork(arguments[1:])
 	case "prune":
 		return app.runPrune(arguments[1:])
 	default:
@@ -141,8 +149,11 @@ func (app *App) usage(writer io.Writer) {
 		{"doppels org use · space use", "select Org / Space"},
 		{"doppels context [show]", "current binding"},
 	})
-	writeUsageSection(writer, style, "Maintenance", []usageLine{
-		{"doppels prune [--yes]", "drop stale local state"},
+	writeUsageSection(writer, style, "Hub", []usageLine{
+		{"doppels publish capability/<name>", "list Capability+Recipe (--yes)"},
+		{"doppels unpublish capability/<name>", "unlist; URL stays unpublished"},
+		{"doppels install @org/name[@ver]", "pin under .doppels/modules/"},
+		{"doppels fork @org/name", "copy YAML into capabilities/ + recipes/"},
 	})
 
 	fmt.Fprintln(writer, style.dim("Most commands accept --json.  doppels <command> --help for details."))

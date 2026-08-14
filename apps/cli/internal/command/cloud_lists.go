@@ -43,10 +43,19 @@ func (app *App) runOrganizations(arguments []string) int {
 	}
 	items = withLocalOrganization(items)
 	if *jsonOutput {
-		app.writeJSON(map[string]any{"kind": "OrganizationList", "items": items})
+		app.writeJSON(map[string]any{
+			"kind":   "OrganizationList",
+			"server": session.Profile.Server,
+			"items":  items,
+		})
 		return ExitSuccess
 	}
 	style := newTermStyle(app.Stdout)
+	if nonDefaultCloud(session.Profile.Server) {
+		fmt.Fprintln(app.Stdout)
+		fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Cloud"), session.Profile.Server)
+		fmt.Fprintln(app.Stdout)
+	}
 	current := session.Profile.Context.Organization
 	showDisplay := false
 	for _, item := range items {
@@ -176,7 +185,7 @@ func (app *App) loginSession() (configstore.Session, int) {
 		return session, ExitSuccess
 	}
 	if errors.Is(err, configstore.ErrNotLoggedIn) {
-		fmt.Fprintln(app.Stderr, err)
+		writeNotLoggedIn(app.Stderr)
 		return configstore.Session{}, ExitContract
 	}
 	fmt.Fprintf(app.Stderr, "load login: %v\n", err)
