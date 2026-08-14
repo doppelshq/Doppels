@@ -76,6 +76,7 @@ Homebrew:
 
 ```console
 brew tap doppelshq/tap
+brew trust doppelshq/tap   # Homebrew 6+
 brew install doppels
 ```
 
