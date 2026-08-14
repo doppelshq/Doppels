@@ -16,19 +16,55 @@ Doppels is the freeze button:
 2. CLI validates the contract and runs it locally.
 3. Same inputs → same Steps → auditable result.
 
-## Fastest path: freeze from the agent
+## How it works
 
-In Cursor, Claude Code, or Codex:
+```text
+Cursor / Claude / Codex          Your repo
+        │                              │
+        │  explore, fix, ship once     │
+        ▼                              │
+   doppel freeze (skill)               │
+        │                              │
+        │  writes YAML                 ▼
+        └──────────────────►  capabilities/<name>.yaml
+                              recipes/<name>.yaml   (optional)
+                                        │
+                                        ▼
+                              doppels validate
+                              doppels run capability/<name>
+                                        │
+                                        ▼
+                              .doppels/runs/<id>/   (logs, artifacts)
+```
+
+- **Capability** = what it does (inputs / outputs). The public contract.
+- **Recipe** = how it runs (Steps, shell, `requires`, `returns`). Stays on disk; never uploaded by this repo.
+- **Run** = one local attempt with fixed inputs. History lives under `.doppels/`.
+
+## Freeze from Cursor, Claude, or Codex
+
+**1. Install the skill** (once per machine or project):
 
 ```console
 npx skills add doppelshq/doppels --skill doppel-freeze
 ```
 
-Then ask the agent something like:
+**2. Do real work in the agent** — deploy, migrate, fix prod, whatever you want to repeat later.
+
+**3. Freeze** — say something like:
 
 > doppel freeze — turn what we just did into a Capability
 
-The skill installs/checks the CLI, writes the manifests, and validates them. You stay in the chat where you already work.
+The skill then:
+
+1. Checks `doppels` is on `PATH` (or points you at install steps below).
+2. Runs `doppels spaces init` if the folder has no `.doppels/` yet.
+3. Asks what to capture (one Capability per distinct outcome).
+4. Reads the session (commands, files, inputs, outputs) and **writes YAML by hand** — there is no `doppels freeze` generator command.
+5. Loops `doppels validate` and test `doppels run …` when safe until clean.
+6. Shows you the contract and asks before treating it as done.
+
+Skill internals: [`skills/doppel-freeze/SKILL.md`](skills/doppel-freeze/SKILL.md) and [`skills/doppel-freeze/references/`](skills/doppel-freeze/references/).
 
 ## Install the CLI
 
@@ -44,24 +80,37 @@ task build:cli          # → ./bin/doppels
 
 With the mise shell hook, `bin/` is on `PATH`.
 
-## Quickstart (offline)
+## CLI workflow
+
+From any project directory:
+
+```console
+doppels spaces init              # capabilities/, recipes/, .doppels/
+doppels validate                 # all manifests under discovery paths
+doppels capabilities list        # what you have locally
+doppels describe capability/greet
+doppels run capability/greet --input name=Ada --yes
+doppels runs list
+doppels runs show <run-id>
+doppels runs logs <run-id>
+```
+
+Machine-readable output: add `--json` to most commands.
+
+### Quickstart (copy-paste)
 
 ```console
 cd examples/quickstart
 ../../bin/doppels validate
 ../../bin/doppels run capability/greet --input name=Ada --yes
+../../bin/doppels runs list
 ```
 
-More examples in that folder (`release-pipeline`, manual fulfillment without a Recipe).
+That Space includes `greet`, a multi-step `release-pipeline`, and a Capability with no Recipe (`manual-review`).
 
-## Core ideas
+### Minimal manifests
 
-| Term | Meaning |
-| --- | --- |
-| **Capability** | Public contract: inputs and outputs |
-| **Recipe** | Local how: Steps, host `requires`, `returns` |
-
-A Capability can have zero, one, or many Recipes. With no Recipe you can still fulfill manually.
+See [`examples/quickstart/capabilities/greet.yaml`](examples/quickstart/capabilities/greet.yaml) and [`examples/quickstart/recipes/greet.yaml`](examples/quickstart/recipes/greet.yaml). More samples in [`skills/doppel-freeze/references/examples/`](skills/doppel-freeze/references/examples/). Full schema: [`schemas/`](schemas/).
 
 ## What’s in this repo
 
