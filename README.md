@@ -38,8 +38,8 @@ Cursor / Claude / Codex          Your repo
 ```
 
 - **Capability** = what it does (inputs / outputs). The public contract.
-- **Recipe** = how it runs (Steps, shell, `requires`, `returns`). Stays on disk; never uploaded by this repo.
-- **Run** = one local attempt with fixed inputs. History lives under `.doppels/`.
+- **Recipe** = how it runs (Steps, shell, `requires`, `returns`). Written to `recipes/` in **your** project — commit it to git like any other source.
+- **Run** = one local attempt with fixed inputs. History lives under `.doppels/` (runtime; usually gitignored).
 
 ## Freeze from Cursor, Claude, or Codex
 
