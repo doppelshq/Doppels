@@ -6,7 +6,7 @@ Binario: **`doppels`** (no `doppel`).
 
 ```bash
 curl -fsSL https://doppels.so/install.sh | sh
-# o: brew tap doppelshq/tap && brew install doppels
+# o: brew tap doppelshq/tap && brew trust doppelshq/tap && brew install doppels
 ```
 
 Desde fuente (mise):
