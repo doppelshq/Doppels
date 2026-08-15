@@ -76,6 +76,10 @@ brew trust doppelshq/tap   # Homebrew 6+
 brew install doppels
 ```
 
+Later (stable release only): submit a formula to
+[Homebrew/homebrew-core](https://github.com/Homebrew/homebrew-core) so
+`brew install doppels` works without a tap. Do not PR prerelease/`*-dev` tags.
+
 ### From source ([mise](https://mise.jdx.dev))
 
 ```console
