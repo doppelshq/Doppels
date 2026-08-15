@@ -509,6 +509,110 @@ func TestShareRejectsInputsAndAmbiguousRecipesBeforeBootstrap(t *testing.T) {
 	})
 }
 
+func TestShareSendsArtifactRetentionDaysFromRecipe(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "answer.yaml", shareCapabilityFixture)
+	recipe := shareManualRecipeFixture + "defaults:\n  artifactRetentionDays: 14\n"
+	writeManifest(t, root, "recipes", "one.yaml", recipe)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var got shareclient.CreateShareRequest
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/api/v1/shares", func(writer http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(writer).Encode(shareclient.ShareCreated{
+			APIVersion: shareclient.APIVersion,
+			Kind:       "ShareCreated",
+			Share: shareclient.Share{
+				APIVersion:            shareclient.APIVersion,
+				Kind:                  "Share",
+				ID:                    commandShareID,
+				CreatedAt:             now,
+				ExpiresAt:             got.ExpiresAt,
+				CapabilityRevision:    got.CapabilityRevision,
+				Capability:            got.Capability,
+				Recipe:                got.Recipe,
+				SharedBy:              execution.ActorReference{Kind: "anonymous", ID: "anonymous"},
+				RequestLimit:          1,
+				ArtifactRetentionDays: got.ArtifactRetentionDays,
+			},
+			PublicURL:   server.URL + "/s/public",
+			RunnerToken: commandRunnerToken,
+		})
+	})
+	mux.HandleFunc("/socket/websocket", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+	})
+
+	app, _, stderr := testApp(root)
+	app.HTTPClient = server.Client()
+	app.Now = func() time.Time { return now }
+	_ = app.Run([]string{
+		"share", "capability/answer-question", "--recipe", "answer-manual",
+		"--server", server.URL, "--expires", "1h",
+	})
+	if got.ArtifactRetentionDays != 14 {
+		t.Fatalf("artifactRetentionDays = %d, want 14; stderr = %s", got.ArtifactRetentionDays, stderr.String())
+	}
+}
+
+func TestShareDefaultsArtifactRetentionDaysToSeven(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "answer.yaml", shareCapabilityFixture)
+	writeManifest(t, root, "recipes", "one.yaml", shareManualRecipeFixture)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	var got shareclient.CreateShareRequest
+	mux := http.NewServeMux()
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	mux.HandleFunc("/api/v1/shares", func(writer http.ResponseWriter, request *http.Request) {
+		if err := json.NewDecoder(request.Body).Decode(&got); err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(writer).Encode(shareclient.ShareCreated{
+			APIVersion: shareclient.APIVersion,
+			Kind:       "ShareCreated",
+			Share: shareclient.Share{
+				APIVersion:         shareclient.APIVersion,
+				Kind:               "Share",
+				ID:                 commandShareID,
+				CreatedAt:          now,
+				ExpiresAt:          got.ExpiresAt,
+				CapabilityRevision: got.CapabilityRevision,
+				Capability:         got.Capability,
+				Recipe:             got.Recipe,
+				SharedBy:           execution.ActorReference{Kind: "anonymous", ID: "anonymous"},
+				RequestLimit:       1,
+			},
+			PublicURL:   server.URL + "/s/public",
+			RunnerToken: commandRunnerToken,
+		})
+	})
+	mux.HandleFunc("/socket/websocket", func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusInternalServerError)
+	})
+
+	app, _, stderr := testApp(root)
+	app.HTTPClient = server.Client()
+	app.Now = func() time.Time { return now }
+	_ = app.Run([]string{
+		"share", "capability/answer-question", "--recipe", "answer-manual",
+		"--server", server.URL, "--expires", "1h",
+	})
+	if got.ArtifactRetentionDays != 7 {
+		t.Fatalf("artifactRetentionDays = %d, want 7; stderr = %s", got.ArtifactRetentionDays, stderr.String())
+	}
+}
+
 func TestShareSendsPrefillInputsAndLockedFlag(t *testing.T) {
 	root := t.TempDir()
 	writeManifest(t, root, "capabilities", "answer.yaml", shareCapabilityFixture)

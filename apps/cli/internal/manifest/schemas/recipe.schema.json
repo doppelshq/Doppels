@@ -85,7 +85,6 @@
           "evidence": {},
           "requires": false,
           "env": false,
-          "defaults": false,
           "steps": false,
           "returns": false
         }

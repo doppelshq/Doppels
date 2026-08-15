@@ -232,15 +232,17 @@ func (app *App) runShare(arguments []string) int {
 
 	capabilityReference := execution.ReferenceCapability(capabilityDefinition)
 	createRequest := shareclient.CreateShareRequest{
-		CapabilityRevision: capabilityReference,
-		Capability:         capabilityDefinition.Value,
-		ExpiresAt:          expiresAt,
-		Inputs:             typedShareInputs,
-		InputsLocked:       *inputsLocked,
+		CapabilityRevision:    capabilityReference,
+		Capability:            capabilityDefinition.Value,
+		ExpiresAt:             expiresAt,
+		Inputs:                typedShareInputs,
+		InputsLocked:          *inputsLocked,
+		ArtifactRetentionDays: 7,
 	}
 	if recipeDefinition != nil {
 		reference := execution.ReferenceRecipe(*recipeDefinition)
 		createRequest.Recipe = &reference
+		createRequest.ArtifactRetentionDays = recipeDefinition.Value.ArtifactRetentionDaysOrDefault()
 	}
 	ctx := app.context()
 	created, err := client.Create(ctx, apiToken, createRequest)
