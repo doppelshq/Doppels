@@ -225,9 +225,19 @@ func (v EnvironmentValue) MarshalJSON() ([]byte, error) {
 }
 
 type Defaults struct {
-	Timeout          string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	Approval         string `yaml:"approval,omitempty" json:"approval,omitempty"`
-	WorkingDirectory string `yaml:"workingDirectory,omitempty" json:"workingDirectory,omitempty"`
+	Timeout               string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	Approval              string `yaml:"approval,omitempty" json:"approval,omitempty"`
+	WorkingDirectory      string `yaml:"workingDirectory,omitempty" json:"workingDirectory,omitempty"`
+	ArtifactRetentionDays *int   `yaml:"artifactRetentionDays,omitempty" json:"artifactRetentionDays,omitempty"`
+}
+
+// ArtifactRetentionDaysOrDefault returns Recipe defaults.artifactRetentionDays
+// or 7 when unset. Values must be one of 1, 7, 14, 30 (enforced by schema).
+func (r *Recipe) ArtifactRetentionDaysOrDefault() int {
+	if r != nil && r.Defaults != nil && r.Defaults.ArtifactRetentionDays != nil {
+		return *r.Defaults.ArtifactRetentionDays
+	}
+	return 7
 }
 
 type Procedure struct {
