@@ -31,6 +31,11 @@
         "approval": { "enum": ["never", "required"] },
         "workingDirectory": {
           "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
+        },
+        "artifactRetentionDays": {
+          "description": "Object Storage TTL for Share return artifacts. Must match cloud/S3 lifecycle tags (1, 7, 14, 30). Default 7 when omitted.",
+          "type": "integer",
+          "enum": [1, 7, 14, 30]
         }
       }
     },

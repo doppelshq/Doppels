@@ -18,6 +18,8 @@ requires:
 defaults:
   timeout: 30s
   approval: never
+  # Optional: Object Storage TTL for Share returns (1 | 7 | 14 | 30). Default 7.
+  # artifactRetentionDays: 7
 
 steps:
   - id: fetch

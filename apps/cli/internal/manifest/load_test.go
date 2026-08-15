@@ -136,3 +136,31 @@ returns:
   archive: "{{ steps.build.archive }}"
   checksum: "{{ steps.build.checksum }}"
 `
+
+func TestRecipeArtifactRetentionDaysOrDefault(t *testing.T) {
+	t.Parallel()
+
+	plain, err := Decode([]byte(validRecipeYAML))
+	if err != nil {
+		t.Fatalf("Decode() error = %v", err)
+	}
+	recipe := plain.(*Recipe)
+	if got := recipe.ArtifactRetentionDaysOrDefault(); got != 7 {
+		t.Fatalf("ArtifactRetentionDaysOrDefault() = %d, want 7", got)
+	}
+
+	withRetention := strings.Replace(
+		validRecipeYAML,
+		"defaults:\n  approval: never",
+		"defaults:\n  approval: never\n  artifactRetentionDays: 14",
+		1,
+	)
+	document, err := Decode([]byte(withRetention))
+	if err != nil {
+		t.Fatalf("Decode(withRetention) error = %v", err)
+	}
+	recipe = document.(*Recipe)
+	if got := recipe.ArtifactRetentionDaysOrDefault(); got != 14 {
+		t.Fatalf("ArtifactRetentionDaysOrDefault() = %d, want 14", got)
+	}
+}

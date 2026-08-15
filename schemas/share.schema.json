@@ -49,6 +49,12 @@
       "description": "When true, every key in inputs is immutable for the recipient (UI + server enforce).",
       "type": "boolean",
       "default": false
+    },
+    "artifactRetentionDays": {
+      "description": "Object Storage TTL for return artifacts on this Share. Copied from Recipe defaults.artifactRetentionDays (1, 7, 14, or 30). Default 7.",
+      "type": "integer",
+      "enum": [1, 7, 14, 30],
+      "default": 7
     }
   }
 }
