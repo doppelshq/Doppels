@@ -14,27 +14,29 @@ import (
 const APIVersion = manifest.APIVersion
 
 type CreateShareRequest struct {
-	CapabilityRevision execution.DefinitionReference  `json:"capabilityRevision"`
-	Capability         *manifest.Capability           `json:"capability"`
-	Recipe             *execution.DefinitionReference `json:"recipe,omitempty"`
-	ExpiresAt          time.Time                      `json:"expiresAt"`
-	Inputs             map[string]any                 `json:"inputs,omitempty"`
-	InputsLocked       bool                           `json:"inputsLocked,omitempty"`
+	CapabilityRevision    execution.DefinitionReference  `json:"capabilityRevision"`
+	Capability            *manifest.Capability           `json:"capability"`
+	Recipe                *execution.DefinitionReference `json:"recipe,omitempty"`
+	ExpiresAt             time.Time                      `json:"expiresAt"`
+	Inputs                map[string]any                 `json:"inputs,omitempty"`
+	InputsLocked          bool                           `json:"inputsLocked,omitempty"`
+	ArtifactRetentionDays int                            `json:"artifactRetentionDays,omitempty"`
 }
 
 type Share struct {
-	APIVersion         string                         `json:"apiVersion"`
-	Kind               string                         `json:"kind"`
-	ID                 string                         `json:"id"`
-	CreatedAt          time.Time                      `json:"createdAt"`
-	ExpiresAt          time.Time                      `json:"expiresAt"`
-	CapabilityRevision execution.DefinitionReference  `json:"capabilityRevision"`
-	Capability         *manifest.Capability           `json:"capability"`
-	Recipe             *execution.DefinitionReference `json:"recipe,omitempty"`
-	SharedBy           execution.ActorReference       `json:"sharedBy"`
-	RequestLimit       int                            `json:"requestLimit"`
-	Inputs             map[string]any                 `json:"inputs,omitempty"`
-	InputsLocked       bool                           `json:"inputsLocked,omitempty"`
+	APIVersion            string                         `json:"apiVersion"`
+	Kind                  string                         `json:"kind"`
+	ID                    string                         `json:"id"`
+	CreatedAt             time.Time                      `json:"createdAt"`
+	ExpiresAt             time.Time                      `json:"expiresAt"`
+	CapabilityRevision    execution.DefinitionReference  `json:"capabilityRevision"`
+	Capability            *manifest.Capability           `json:"capability"`
+	Recipe                *execution.DefinitionReference `json:"recipe,omitempty"`
+	SharedBy              execution.ActorReference       `json:"sharedBy"`
+	RequestLimit          int                            `json:"requestLimit"`
+	Inputs                map[string]any                 `json:"inputs,omitempty"`
+	InputsLocked          bool                           `json:"inputsLocked,omitempty"`
+	ArtifactRetentionDays int                            `json:"artifactRetentionDays,omitempty"`
 }
 
 type ShareCreated struct {

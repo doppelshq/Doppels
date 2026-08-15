@@ -183,9 +183,10 @@ func recipeStructuralDiagnostics(source string, recipe *Recipe) []Diagnostic {
 				diagnostics = append(diagnostics, diag(source, field+".description", "contract.description", "must contain at most 500 characters"))
 			}
 		}
-		if recipe.Requires != nil || recipe.Env != nil || recipe.Defaults != nil || recipe.Steps != nil || recipe.Returns != nil {
-			diagnostics = append(diagnostics, diag(source, "runtime", "recipe.manual-fields", "manual Recipes cannot declare requires, env, defaults, steps, or returns"))
+		if recipe.Requires != nil || recipe.Env != nil || recipe.Steps != nil || recipe.Returns != nil {
+			diagnostics = append(diagnostics, diag(source, "runtime", "recipe.manual-fields", "manual Recipes cannot declare requires, env, steps, or returns"))
 		}
+		diagnostics = append(diagnostics, defaultsStructuralDiagnostics(source, recipe.Defaults)...)
 		return diagnostics
 	}
 
@@ -194,17 +195,7 @@ func recipeStructuralDiagnostics(source string, recipe *Recipe) []Diagnostic {
 	}
 	diagnostics = append(diagnostics, requirementsStructuralDiagnostics(source, recipe.Requires)...)
 	diagnostics = append(diagnostics, environmentStructuralDiagnostics(source, "env", recipe.Env)...)
-	if recipe.Defaults != nil {
-		if recipe.Defaults.Timeout != "" && !durationPattern.MatchString(recipe.Defaults.Timeout) {
-			diagnostics = append(diagnostics, diag(source, "defaults.timeout", "duration.invalid", "must be a positive duration using ms, s, m, or h"))
-		}
-		if recipe.Defaults.Approval != "" && recipe.Defaults.Approval != "never" && recipe.Defaults.Approval != "required" {
-			diagnostics = append(diagnostics, diag(source, "defaults.approval", "approval.invalid", "must be never or required"))
-		}
-		if recipe.Defaults.WorkingDirectory != "" && !validRelativePath(recipe.Defaults.WorkingDirectory) {
-			diagnostics = append(diagnostics, diag(source, "defaults.workingDirectory", "path.relative", "must be a relative path without parent traversal"))
-		}
-	}
+	diagnostics = append(diagnostics, defaultsStructuralDiagnostics(source, recipe.Defaults)...)
 	if len(recipe.Steps) == 0 {
 		diagnostics = append(diagnostics, diag(source, "steps", "recipe.steps", "shell Recipes require at least one Step"))
 	}
@@ -321,6 +312,30 @@ func environmentStructuralDiagnostics(source, base string, environment map[strin
 			if !environmentPattern.MatchString(value.HostEnv.Name) {
 				diagnostics = append(diagnostics, diag(source, field+".name", "environment.host-env", "must be an environment variable name"))
 			}
+		}
+	}
+	return diagnostics
+}
+
+func defaultsStructuralDiagnostics(source string, defaults *Defaults) []Diagnostic {
+	if defaults == nil {
+		return nil
+	}
+	var diagnostics []Diagnostic
+	if defaults.Timeout != "" && !durationPattern.MatchString(defaults.Timeout) {
+		diagnostics = append(diagnostics, diag(source, "defaults.timeout", "duration.invalid", "must be a positive duration using ms, s, m, or h"))
+	}
+	if defaults.Approval != "" && defaults.Approval != "never" && defaults.Approval != "required" {
+		diagnostics = append(diagnostics, diag(source, "defaults.approval", "approval.invalid", "must be never or required"))
+	}
+	if defaults.WorkingDirectory != "" && !validRelativePath(defaults.WorkingDirectory) {
+		diagnostics = append(diagnostics, diag(source, "defaults.workingDirectory", "path.relative", "must be a relative path without parent traversal"))
+	}
+	if defaults.ArtifactRetentionDays != nil {
+		switch *defaults.ArtifactRetentionDays {
+		case 1, 7, 14, 30:
+		default:
+			diagnostics = append(diagnostics, diag(source, "defaults.artifactRetentionDays", "retention.invalid", "must be 1, 7, 14, or 30"))
 		}
 	}
 	return diagnostics
