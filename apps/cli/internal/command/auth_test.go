@@ -62,6 +62,17 @@ func TestLoginContextWhoAmIAndCloudLists(t *testing.T) {
 
 	stdout.Reset()
 	stderr.Reset()
+	if code := app.Run([]string{"context", "--json"}); code != ExitSuccess {
+		t.Fatalf("context --json exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind": "CurrentContext"`) ||
+		!strings.Contains(stdout.String(), `"organization": "yuri"`) ||
+		!strings.Contains(stdout.String(), `"space": "private"`) {
+		t.Fatalf("context --json = %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
 	if code := app.Run([]string{"org", "use", "acme"}); code != ExitSuccess {
 		t.Fatalf("org use exit = %d, stderr = %s", code, stderr.String())
 	}
