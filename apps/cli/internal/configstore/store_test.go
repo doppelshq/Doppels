@@ -101,6 +101,28 @@ func TestEnsureLocalContextAndBinding(t *testing.T) {
 	}
 }
 
+func TestSetTelemetryOptInWithoutLogin(t *testing.T) {
+	store := New(filepath.Join(t.TempDir(), "config"))
+	now := time.Date(2026, 8, 16, 18, 0, 0, 0, time.UTC)
+	if err := store.SetTelemetry(true, now); err != nil {
+		t.Fatal(err)
+	}
+	profile, err := store.Profile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !profile.Telemetry.Enabled || !profile.Telemetry.AcceptedAt.Equal(now) {
+		t.Fatalf("telemetry = %#v", profile.Telemetry)
+	}
+	if err := store.SetTelemetry(false, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	profile, err = store.Profile()
+	if err != nil || profile.Telemetry.Enabled || profile.Telemetry.RejectedAt.IsZero() {
+		t.Fatalf("reject = %#v / %v", profile.Telemetry, err)
+	}
+}
+
 func TestSessionRejectsPartiallyUpdatedServerPair(t *testing.T) {
 	store := New(filepath.Join(t.TempDir(), "config"))
 	if err := store.Login("https://first.doppels.so", "first", time.Now()); err != nil {
