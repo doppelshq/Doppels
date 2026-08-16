@@ -59,10 +59,19 @@ type SpaceBinding struct {
 }
 
 type Profile struct {
-	Server   string         `json:"server,omitempty"`
-	Context  Context        `json:"context,omitempty"`
-	LoginAt  time.Time      `json:"loginAt,omitempty"`
-	Bindings []SpaceBinding `json:"bindings,omitempty"`
+	Server    string         `json:"server,omitempty"`
+	Context   Context        `json:"context,omitempty"`
+	LoginAt   time.Time      `json:"loginAt,omitempty"`
+	Bindings  []SpaceBinding `json:"bindings,omitempty"`
+	Telemetry Telemetry      `json:"telemetry,omitempty"`
+}
+
+// Telemetry is the local opt-in for anonymous product analytics.
+// Default is off; DOPPELS_TELEMETRY=0 always disables shipping.
+type Telemetry struct {
+	Enabled    bool      `json:"enabled"`
+	AcceptedAt time.Time `json:"acceptedAt,omitempty"`
+	RejectedAt time.Time `json:"rejectedAt,omitempty"`
 }
 
 type credentials struct {
@@ -254,6 +263,24 @@ func (s *Store) Binding(organization, space string) (SpaceBinding, bool, error) 
 		}
 	}
 	return SpaceBinding{}, false, nil
+}
+
+// SetTelemetry persists the privacy opt-in (or opt-out) without requiring login.
+func (s *Store) SetTelemetry(enabled bool, now time.Time) error {
+	profile, err := s.Profile()
+	if err != nil {
+		if !errors.Is(err, ErrNotConfigured) {
+			return err
+		}
+		profile = Profile{}
+	}
+	stamp := now.UTC()
+	if enabled {
+		profile.Telemetry = Telemetry{Enabled: true, AcceptedAt: stamp}
+	} else {
+		profile.Telemetry = Telemetry{Enabled: false, RejectedAt: stamp}
+	}
+	return s.writeJSON("profile.json", profileFile{Version: version, Profile: profile})
 }
 
 func (s *Store) Logout() error {
