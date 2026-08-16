@@ -372,8 +372,8 @@ func (app *App) runContext(arguments []string) int {
 		fmt.Fprintln(app.Stdout, "             doppels space use <space>")
 		return ExitSuccess
 	}
-	if len(arguments) == 0 {
-		return app.contextCurrent(nil)
+	if len(arguments) == 0 || strings.HasPrefix(arguments[0], "-") {
+		return app.contextCurrent(arguments)
 	}
 	switch arguments[0] {
 	case "current", "show":
