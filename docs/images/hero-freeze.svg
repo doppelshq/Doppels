@@ -6,84 +6,143 @@
     <style>
       .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
     </style>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fafafa"/>
+      <stop offset="55%" stop-color="#fafafa"/>
+      <stop offset="100%" stop-color="#eef4ea"/>
+    </linearGradient>
+    <linearGradient id="hill-green" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#8fbd73"/>
+      <stop offset="100%" stop-color="#5fa06c"/>
+    </linearGradient>
+    <linearGradient id="hill-ice" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#f7fcfd"/>
+      <stop offset="100%" stop-color="#d7e8f0"/>
+    </linearGradient>
+    <radialGradient id="mist" cx="50%" cy="100%" r="70%">
+      <stop offset="0%" stop-color="#eef4ea" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="#eef4ea" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="frame">
+      <rect width="1120" height="428" rx="16"/>
+    </clipPath>
   </defs>
-  <rect width="1120" height="428" rx="16" fill="#fafafa"/>
 
-  <text class="sans" x="28" y="32" fill="#737373" font-size="13" font-weight="600">1  Freeze once</text>
-  <rect x="20" y="48" width="332" height="360" rx="12" fill="#fff" stroke="#e5e5e5"/>
-  <text class="sans" x="40" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Session</text>
-  <text class="sans" x="108" y="78" fill="#737373" font-size="12">Cursor / Claude / Codex</text>
+  <g clip-path="url(#frame)">
+    <rect width="1120" height="428" fill="url(#sky)"/>
 
-  <rect x="40" y="96" width="28" height="28" rx="14" fill="#0a0a0a"/>
-  <text class="sans" x="47" y="114" fill="#fff" font-size="9" font-weight="600">You</text>
-  <rect x="76" y="96" width="256" height="44" rx="8" fill="#f4f4f5"/>
-  <text class="sans" x="88" y="114" fill="#0a0a0a" font-size="12">Build a CLI to fetch top HN</text>
-  <text class="sans" x="88" y="130" fill="#0a0a0a" font-size="12">stories into a CSV.</text>
+    <!-- grove / glacier landscape -->
+    <ellipse cx="180" cy="430" rx="320" ry="120" fill="url(#hill-green)" opacity="0.55"/>
+    <ellipse cx="940" cy="440" rx="380" ry="130" fill="url(#hill-ice)" opacity="0.85"/>
+    <path d="M0 320 C180 250 360 290 560 300 C760 310 920 260 1120 290 L1120 428 L0 428 Z" fill="#eef4ea" opacity="0.35"/>
+    <path d="M420 330 C560 280 700 300 820 290 C920 282 1020 300 1120 320 L1120 428 L420 428 Z" fill="#e3eef3" opacity="0.55"/>
 
-  <rect x="40" y="152" width="28" height="28" rx="14" fill="#2F6B45"/>
-  <text class="sans" x="46" y="170" fill="#fff" font-size="9" font-weight="600">AI</text>
-  <rect x="76" y="152" width="256" height="44" rx="8" fill="#f4f4f5"/>
-  <text class="sans" x="88" y="170" fill="#0a0a0a" font-size="12">Done - CLI writes stories.csv.</text>
-  <text class="sans" x="88" y="186" fill="#737373" font-size="12">48,639 tokens  $0.54 once</text>
+    <!-- green pines -->
+    <g fill="#2f6b45" opacity="0.35">
+      <path d="M118 318 L132 286 L146 318 Z"/>
+      <path d="M110 318 L124 278 L138 318 Z"/>
+      <path d="M126 318 L140 292 L154 318 Z"/>
+    </g>
+    <!-- ice pines -->
+    <g fill="#ffffff" opacity="0.92">
+      <path d="M930 312 L944 268 L958 312 Z"/>
+      <path d="M918 312 L932 252 L946 312 Z"/>
+      <path d="M942 312 L956 276 L970 312 Z"/>
+    </g>
+    <g fill="#d7e8f0" opacity="0.8">
+      <path d="M930 302 L944 268 L958 302 Z"/>
+      <path d="M918 302 L932 252 L946 302 Z"/>
+    </g>
 
-  <rect x="40" y="208" width="28" height="28" rx="14" fill="#0a0a0a"/>
-  <text class="sans" x="47" y="226" fill="#fff" font-size="9" font-weight="600">You</text>
-  <rect x="76" y="208" width="256" height="40" rx="8" fill="#DDE9D8"/>
-  <text class="sans" x="88" y="233" fill="#0a0a0a" font-size="12">doppel freeze - capture this.</text>
+    <!-- clouds -->
+    <ellipse cx="160" cy="72" rx="110" ry="38" fill="#fff" opacity="0.75"/>
+    <ellipse cx="960" cy="64" rx="130" ry="42" fill="#fff" opacity="0.82"/>
+    <ellipse cx="560" cy="88" rx="90" ry="28" fill="#fff" opacity="0.45"/>
 
-  <rect x="40" y="264" width="292" height="124" rx="8" fill="#fafafa" stroke="#e5e5e5"/>
-  <text class="sans" x="56" y="288" fill="#737373" font-size="11">Capability  hn-top-stories.yaml</text>
-  <text class="sans" x="56" y="314" fill="#2F6B45" font-size="12" font-weight="600">name</text>
-  <text class="sans" x="98" y="314" fill="#0a0a0a" font-size="12">: hn-top-stories</text>
-  <text class="sans" x="56" y="334" fill="#2F6B45" font-size="12" font-weight="600">version</text>
-  <text class="sans" x="114" y="334" fill="#0a0a0a" font-size="12">: 1.0.0</text>
-  <text class="sans" x="56" y="354" fill="#2F6B45" font-size="12" font-weight="600">steps</text>
-  <text class="sans" x="56" y="374" fill="#737373" font-size="12">  - uses: http.get   parse.hn</text>
+    <rect width="1120" height="428" fill="url(#mist)"/>
+    <rect width="1120" height="428" fill="url(#sky)" opacity="0.18"/>
 
-  <circle cx="384" cy="228" r="22" fill="#2F6B45"/>
-  <g transform="rotate(45 384 228)">
-    <rect x="372" y="216" width="24" height="24" rx="6" fill="#0a0a0a"/>
-    <rect x="377" y="221" width="14" height="14" rx="2" fill="none" stroke="#fff" stroke-width="2"/>
+    <!-- content -->
+    <text class="sans" x="28" y="32" fill="#737373" font-size="13" font-weight="600">1  Freeze once</text>
+    <rect x="20" y="48" width="332" height="360" rx="12" fill="#fff" fill-opacity="0.96" stroke="#e5e5e5"/>
+    <text class="sans" x="40" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Session</text>
+    <text class="sans" x="108" y="78" fill="#737373" font-size="12">Cursor / Claude / Codex</text>
+
+    <rect x="40" y="96" width="28" height="28" rx="14" fill="#0a0a0a"/>
+    <text class="sans" x="47" y="114" fill="#fff" font-size="9" font-weight="600">You</text>
+    <rect x="76" y="96" width="256" height="44" rx="8" fill="#f4f4f5"/>
+    <text class="sans" x="88" y="114" fill="#0a0a0a" font-size="12">Build a CLI to fetch top HN</text>
+    <text class="sans" x="88" y="130" fill="#0a0a0a" font-size="12">stories into a CSV.</text>
+
+    <circle cx="54" cy="166" r="14" fill="#f4f4f5"/>
+    <g transform="translate(54 166)">
+      <g transform="scale(0.58) translate(-12 -12)">
+        <path fill="#d97757" d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/>
+      </g>
+    </g>
+    <rect x="76" y="152" width="256" height="44" rx="8" fill="#f4f4f5"/>
+    <text class="sans" x="88" y="170" fill="#0a0a0a" font-size="12">Done - CLI writes stories.csv.</text>
+    <text class="sans" x="88" y="186" fill="#737373" font-size="12">48,639 tokens  $0.54 once</text>
+
+    <rect x="40" y="208" width="28" height="28" rx="14" fill="#0a0a0a"/>
+    <text class="sans" x="47" y="226" fill="#fff" font-size="9" font-weight="600">You</text>
+    <rect x="76" y="208" width="256" height="40" rx="8" fill="#DDE9D8"/>
+    <text class="sans" x="88" y="233" fill="#0a0a0a" font-size="12">doppel freeze - capture this.</text>
+
+    <rect x="40" y="264" width="292" height="124" rx="8" fill="#fafafa" stroke="#e5e5e5"/>
+    <text class="sans" x="56" y="288" fill="#737373" font-size="11">Capability  hn-top-stories.yaml</text>
+    <text class="sans" x="56" y="314" fill="#2F6B45" font-size="12" font-weight="600">name</text>
+    <text class="sans" x="98" y="314" fill="#0a0a0a" font-size="12">: hn-top-stories</text>
+    <text class="sans" x="56" y="334" fill="#2F6B45" font-size="12" font-weight="600">version</text>
+    <text x="114" y="334" fill="#0a0a0a" font-size="12" class="sans">: 1.0.0</text>
+    <text class="sans" x="56" y="354" fill="#2F6B45" font-size="12" font-weight="600">steps</text>
+    <text class="sans" x="56" y="374" fill="#737373" font-size="12">  - uses: http.get   parse.hn</text>
+
+    <circle cx="384" cy="228" r="22" fill="#2F6B45" stroke="#fff" stroke-width="3"/>
+    <g transform="rotate(45 384 228)">
+      <rect x="372" y="216" width="24" height="24" rx="6" fill="#fff" stroke="#d4d4d8" stroke-width="2"/>
+      <rect x="377.5" y="221.5" width="13" height="13" rx="2" fill="none" stroke="#2F6B45" stroke-width="2"/>
+    </g>
+
+    <text class="sans" x="432" y="32" fill="#737373" font-size="13" font-weight="600">2  Saved on your Git</text>
+    <rect x="424" y="48" width="272" height="360" rx="12" fill="#fff" fill-opacity="0.96" stroke="#e5e5e5"/>
+    <text class="sans" x="444" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Your repo</text>
+    <text class="sans" x="444" y="98" fill="#737373" font-size="12">Plain YAML. Review it in a PR.</text>
+
+    <rect x="444" y="120" width="232" height="72" rx="10" fill="#fafafa" stroke="#2F6B45"/>
+    <text class="sans" x="460" y="148" fill="#0a0a0a" font-size="13" font-weight="600">Export HN stories to CSV</text>
+    <text class="sans" x="460" y="168" fill="#2F6B45" font-size="12">Just frozen  /  capabilities/</text>
+
+    <rect x="444" y="204" width="232" height="64" rx="10" fill="#fff" stroke="#e5e5e5"/>
+    <text class="sans" x="460" y="230" fill="#0a0a0a" font-size="13" font-weight="600">Backup Postgres to S3</text>
+    <text class="sans" x="460" y="250" fill="#737373" font-size="12">v1.0.0  recipes/</text>
+
+    <rect x="444" y="280" width="232" height="64" rx="10" fill="#fff" stroke="#e5e5e5"/>
+    <text class="sans" x="460" y="306" fill="#0a0a0a" font-size="13" font-weight="600">Rotate production API keys</text>
+    <text class="sans" x="460" y="326" fill="#737373" font-size="12">v1.0.0  recipes/</text>
+
+    <text class="sans" x="444" y="380" fill="#737373" font-size="12">Commit the YAML. That is the asset.</text>
+
+    <path d="M712 220 l16 8 -16 8" fill="none" stroke="#a1a1aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <text class="sans" x="748" y="32" fill="#737373" font-size="13" font-weight="600">3  Replay for $0</text>
+    <rect x="740" y="48" width="360" height="360" rx="12" fill="#0a0a0a" fill-opacity="0.94"/>
+    <circle cx="760" cy="70" r="5" fill="#2F6B45"/>
+    <circle cx="776" cy="70" r="5" fill="#52525b"/>
+    <circle cx="792" cy="70" r="5" fill="#52525b"/>
+    <text class="sans" x="812" y="74" fill="#a1a1aa" font-size="11">your Node</text>
+
+    <text class="sans" x="760" y="112" fill="#a1a1aa" font-size="13">$</text>
+    <text class="sans" x="776" y="112" fill="#fafafa" font-size="13" font-weight="600">doppels run export-hn-stories</text>
+    <text class="sans" x="760" y="140" fill="#737373" font-size="13">-&gt; Validating Recipe</text>
+    <text class="sans" x="760" y="164" fill="#737373" font-size="13">-&gt; Running Steps on your Node</text>
+    <text class="sans" x="760" y="196" fill="#78A96B" font-size="13" font-weight="600">Done  0 tokens</text>
+
+    <rect x="760" y="228" width="320" height="1" fill="#27272a"/>
+    <text class="sans" x="760" y="260" fill="#a1a1aa" font-size="12">Same inputs -&gt; same Steps.</text>
+    <text class="sans" x="760" y="282" fill="#a1a1aa" font-size="12">Credentials stay on the host.</text>
+    <text class="sans" x="760" y="316" fill="#fafafa" font-size="14" font-weight="600">$0.54 once  -&gt;  $0 forever</text>
+    <text class="sans" x="760" y="344" fill="#737373" font-size="12">No model. No re-prompt. Local execution.</text>
+    <text class="sans" x="760" y="376" fill="#52525b" font-size="11">.doppels/runs/  logs, artifacts</text>
   </g>
-
-  <text class="sans" x="432" y="32" fill="#737373" font-size="13" font-weight="600">2  Saved on your Git</text>
-  <rect x="424" y="48" width="272" height="360" rx="12" fill="#fff" stroke="#e5e5e5"/>
-  <text class="sans" x="444" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Your repo</text>
-  <text class="sans" x="444" y="98" fill="#737373" font-size="12">Plain YAML. Review it in a PR.</text>
-
-  <rect x="444" y="120" width="232" height="72" rx="10" fill="#fff" stroke="#2F6B45"/>
-  <text class="sans" x="460" y="148" fill="#0a0a0a" font-size="13" font-weight="600">hn-top-stories</text>
-  <text class="sans" x="460" y="168" fill="#2F6B45" font-size="12">Just frozen  /  capabilities/</text>
-
-  <rect x="444" y="204" width="232" height="64" rx="10" fill="#fff" stroke="#e5e5e5"/>
-  <text class="sans" x="460" y="230" fill="#0a0a0a" font-size="13" font-weight="600">postgres-backup</text>
-  <text class="sans" x="460" y="250" fill="#737373" font-size="12">v1.0.0  recipes/</text>
-
-  <rect x="444" y="280" width="232" height="64" rx="10" fill="#fff" stroke="#e5e5e5"/>
-  <text class="sans" x="460" y="306" fill="#0a0a0a" font-size="13" font-weight="600">rotate-keys</text>
-  <text class="sans" x="460" y="326" fill="#737373" font-size="12">v1.0.0  recipes/</text>
-
-  <text class="sans" x="444" y="380" fill="#737373" font-size="12">Commit the YAML. That is the asset.</text>
-
-  <path d="M712 220 l16 8 -16 8" fill="none" stroke="#a1a1aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-
-  <text class="sans" x="748" y="32" fill="#737373" font-size="13" font-weight="600">3  Replay for $0</text>
-  <rect x="740" y="48" width="360" height="360" rx="12" fill="#0a0a0a"/>
-  <circle cx="760" cy="70" r="5" fill="#2F6B45"/>
-  <circle cx="776" cy="70" r="5" fill="#52525b"/>
-  <circle cx="792" cy="70" r="5" fill="#52525b"/>
-  <text class="sans" x="812" y="74" fill="#a1a1aa" font-size="11">your Node</text>
-
-  <text class="sans" x="760" y="112" fill="#a1a1aa" font-size="13">$</text>
-  <text class="sans" x="776" y="112" fill="#fafafa" font-size="13" font-weight="600">doppels run hn-top-stories</text>
-  <text class="sans" x="760" y="140" fill="#737373" font-size="13">-&gt; Validating Recipe</text>
-  <text class="sans" x="760" y="164" fill="#737373" font-size="13">-&gt; Running Steps on your Node</text>
-  <text class="sans" x="760" y="196" fill="#78A96B" font-size="13" font-weight="600">Done  0 tokens</text>
-
-  <rect x="760" y="228" width="320" height="1" fill="#27272a"/>
-  <text class="sans" x="760" y="260" fill="#a1a1aa" font-size="12">Same inputs -&gt; same Steps.</text>
-  <text class="sans" x="760" y="282" fill="#a1a1aa" font-size="12">Credentials stay on the host.</text>
-  <text class="sans" x="760" y="316" fill="#fafafa" font-size="14" font-weight="600">$0.54 once  -&gt;  $0 forever</text>
-  <text class="sans" x="760" y="344" fill="#737373" font-size="12">No model. No re-prompt. Local execution.</text>
-  <text class="sans" x="760" y="376" fill="#52525b" font-size="11">.doppels/runs/  logs, artifacts</text>
 </svg>
