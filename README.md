@@ -1,8 +1,4 @@
 <p align="center">
-  <img src="docs/images/hero-grove.jpg" alt="Doppels — living green valley freezing into glacier" width="100%">
-</p>
-
-<p align="center">
   <img src="docs/images/mark.svg" width="40" height="40" alt="Doppels mark">
 </p>
 
@@ -23,6 +19,10 @@
   <img src="https://img.shields.io/badge/status-pre--alpha-737373?style=flat-square" alt="pre-alpha">
 </p>
 
+<p align="center">
+  <img src="docs/images/hero-freeze.svg" alt="Freeze an agent session into Capability YAML, commit it, then doppels run replays it locally for zero tokens" width="100%">
+</p>
+
 You explore with an agent. You get something that works once. Next week you re-prompt and hope.
 
 Doppels turns that session into a **Capability** (the public contract) and a **Recipe** (how it runs on *your* machine)—typed, validated, replayable. Execution never leaves the host. Credentials stay where they already are (`aws`, `gcloud`, `psql`, SSH, VPN). Replay costs **zero tokens**.
@@ -38,10 +38,6 @@ Doppels is the freeze button:
 1. **Freeze once** — agent (or you) captures the working path as YAML.
 2. **Commit it** — Capability + Recipe live in your repo, reviewed like any other source.
 3. **Replay for $0** — `doppels run` executes locally. Same inputs → same Steps → auditable result.
-
-<p align="center">
-  <img src="docs/images/freeze-flow.jpg" alt="Session freezes into a Capability, then a local Run" width="100%">
-</p>
 
 ## How it works
 
@@ -194,7 +190,7 @@ schemas/               JSON Schema contracts (source of truth)
 skills/doppel-freeze/  Agent skill for Cursor / Claude / Codex
 skills/doppel-use/     Draft — blocked on MCP
 examples/quickstart/   Local Space you can run offline
-docs/images/           README artwork
+docs/images/           README diagram (Session → Capability → Run)
 install.sh             curl installer
 ```
 
