@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 428" role="img" aria-labelledby="title desc">
+  <title id="title">How Doppels works</title>
+  <desc id="desc">Freeze an agent session into a Capability YAML, commit it, then replay locally with doppels run for zero tokens.</desc>
+  <defs>
+    <style>
+      .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    </style>
+  </defs>
+  <rect width="1120" height="428" rx="16" fill="#fafafa"/>
+
+  <text class="sans" x="28" y="32" fill="#737373" font-size="13" font-weight="600">1  Freeze once</text>
+  <rect x="20" y="48" width="332" height="360" rx="12" fill="#fff" stroke="#e5e5e5"/>
+  <text class="sans" x="40" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Session</text>
+  <text class="sans" x="108" y="78" fill="#737373" font-size="12">Cursor / Claude / Codex</text>
+
+  <rect x="40" y="96" width="28" height="28" rx="14" fill="#0a0a0a"/>
+  <text class="sans" x="47" y="114" fill="#fff" font-size="9" font-weight="600">You</text>
+  <rect x="76" y="96" width="256" height="44" rx="8" fill="#f4f4f5"/>
+  <text class="sans" x="88" y="114" fill="#0a0a0a" font-size="12">Build a CLI to fetch top HN</text>
+  <text class="sans" x="88" y="130" fill="#0a0a0a" font-size="12">stories into a CSV.</text>
+
+  <rect x="40" y="152" width="28" height="28" rx="14" fill="#2F6B45"/>
+  <text class="sans" x="46" y="170" fill="#fff" font-size="9" font-weight="600">AI</text>
+  <rect x="76" y="152" width="256" height="44" rx="8" fill="#f4f4f5"/>
+  <text class="sans" x="88" y="170" fill="#0a0a0a" font-size="12">Done - CLI writes stories.csv.</text>
+  <text class="sans" x="88" y="186" fill="#737373" font-size="12">48,639 tokens  $0.54 once</text>
+
+  <rect x="40" y="208" width="28" height="28" rx="14" fill="#0a0a0a"/>
+  <text class="sans" x="47" y="226" fill="#fff" font-size="9" font-weight="600">You</text>
+  <rect x="76" y="208" width="256" height="40" rx="8" fill="#DDE9D8"/>
+  <text class="sans" x="88" y="233" fill="#0a0a0a" font-size="12">doppel freeze - capture this.</text>
+
+  <rect x="40" y="264" width="292" height="124" rx="8" fill="#fafafa" stroke="#e5e5e5"/>
+  <text class="sans" x="56" y="288" fill="#737373" font-size="11">Capability  hn-top-stories.yaml</text>
+  <text class="sans" x="56" y="314" fill="#2F6B45" font-size="12" font-weight="600">name</text>
+  <text class="sans" x="98" y="314" fill="#0a0a0a" font-size="12">: hn-top-stories</text>
+  <text class="sans" x="56" y="334" fill="#2F6B45" font-size="12" font-weight="600">version</text>
+  <text class="sans" x="114" y="334" fill="#0a0a0a" font-size="12">: 1.0.0</text>
+  <text class="sans" x="56" y="354" fill="#2F6B45" font-size="12" font-weight="600">steps</text>
+  <text class="sans" x="56" y="374" fill="#737373" font-size="12">  - uses: http.get   parse.hn</text>
+
+  <circle cx="384" cy="228" r="22" fill="#2F6B45"/>
+  <g transform="rotate(45 384 228)">
+    <rect x="372" y="216" width="24" height="24" rx="6" fill="#0a0a0a"/>
+    <rect x="377" y="221" width="14" height="14" rx="2" fill="none" stroke="#fff" stroke-width="2"/>
+  </g>
+
+  <text class="sans" x="432" y="32" fill="#737373" font-size="13" font-weight="600">2  Saved on your Git</text>
+  <rect x="424" y="48" width="272" height="360" rx="12" fill="#fff" stroke="#e5e5e5"/>
+  <text class="sans" x="444" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Your repo</text>
+  <text class="sans" x="444" y="98" fill="#737373" font-size="12">Plain YAML. Review it in a PR.</text>
+
+  <rect x="444" y="120" width="232" height="72" rx="10" fill="#fff" stroke="#2F6B45"/>
+  <text class="sans" x="460" y="148" fill="#0a0a0a" font-size="13" font-weight="600">hn-top-stories</text>
+  <text class="sans" x="460" y="168" fill="#2F6B45" font-size="12">Just frozen  /  capabilities/</text>
+
+  <rect x="444" y="204" width="232" height="64" rx="10" fill="#fff" stroke="#e5e5e5"/>
+  <text class="sans" x="460" y="230" fill="#0a0a0a" font-size="13" font-weight="600">postgres-backup</text>
+  <text class="sans" x="460" y="250" fill="#737373" font-size="12">v1.0.0  recipes/</text>
+
+  <rect x="444" y="280" width="232" height="64" rx="10" fill="#fff" stroke="#e5e5e5"/>
+  <text class="sans" x="460" y="306" fill="#0a0a0a" font-size="13" font-weight="600">rotate-keys</text>
+  <text class="sans" x="460" y="326" fill="#737373" font-size="12">v1.0.0  recipes/</text>
+
+  <text class="sans" x="444" y="380" fill="#737373" font-size="12">Commit the YAML. That is the asset.</text>
+
+  <path d="M712 220 l16 8 -16 8" fill="none" stroke="#a1a1aa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <text class="sans" x="748" y="32" fill="#737373" font-size="13" font-weight="600">3  Replay for $0</text>
+  <rect x="740" y="48" width="360" height="360" rx="12" fill="#0a0a0a"/>
+  <circle cx="760" cy="70" r="5" fill="#2F6B45"/>
+  <circle cx="776" cy="70" r="5" fill="#52525b"/>
+  <circle cx="792" cy="70" r="5" fill="#52525b"/>
+  <text class="sans" x="812" y="74" fill="#a1a1aa" font-size="11">your Node</text>
+
+  <text class="sans" x="760" y="112" fill="#a1a1aa" font-size="13">$</text>
+  <text class="sans" x="776" y="112" fill="#fafafa" font-size="13" font-weight="600">doppels run hn-top-stories</text>
+  <text class="sans" x="760" y="140" fill="#737373" font-size="13">-&gt; Validating Recipe</text>
+  <text class="sans" x="760" y="164" fill="#737373" font-size="13">-&gt; Running Steps on your Node</text>
+  <text class="sans" x="760" y="196" fill="#78A96B" font-size="13" font-weight="600">Done  0 tokens</text>
+
+  <rect x="760" y="228" width="320" height="1" fill="#27272a"/>
+  <text class="sans" x="760" y="260" fill="#a1a1aa" font-size="12">Same inputs -&gt; same Steps.</text>
+  <text class="sans" x="760" y="282" fill="#a1a1aa" font-size="12">Credentials stay on the host.</text>
+  <text class="sans" x="760" y="316" fill="#fafafa" font-size="14" font-weight="600">$0.54 once  -&gt;  $0 forever</text>
+  <text class="sans" x="760" y="344" fill="#737373" font-size="12">No model. No re-prompt. Local execution.</text>
+  <text class="sans" x="760" y="376" fill="#52525b" font-size="11">.doppels/runs/  logs, artifacts</text>
+</svg>
