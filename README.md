@@ -1,10 +1,31 @@
-# Doppels
+<p align="center">
+  <img src="docs/images/hero-grove.jpg" alt="Doppels — living green valley freezing into glacier" width="100%">
+</p>
 
-**Freeze Cursor, Claude, and Codex sessions into local deterministic recipes.**
+<p align="center">
+  <img src="docs/images/mark.svg" width="40" height="40" alt="Doppels mark">
+</p>
 
-You explore with an agent. You get something that works once. Next week you re-prompt and hope. Doppels turns that session into a **Capability** (the contract) and a **Recipe** (how it runs on *your* machine)—typed, validated, replayable. Execution never leaves the host. Credentials stay where they already are (`aws`, `gcloud`, `psql`, SSH, VPN).
+<h1 align="center">Doppels</h1>
 
-Apache-2.0.
+<p align="center"><strong>Freeze your AI operations</strong></p>
+
+<p align="center">Turn AI processes into deterministic local Capabilities.</p>
+
+<p align="center">
+  <a href="https://doppels.so">Website</a> ·
+  <a href="https://docs.doppels.so">Docs</a> ·
+  <a href="LICENSE">Apache-2.0</a>
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/license-Apache%202.0-2F6B45?style=flat-square" alt="Apache 2.0">
+  <img src="https://img.shields.io/badge/status-pre--alpha-737373?style=flat-square" alt="pre-alpha">
+</p>
+
+You explore with an agent. You get something that works once. Next week you re-prompt and hope.
+
+Doppels turns that session into a **Capability** (the public contract) and a **Recipe** (how it runs on *your* machine)—typed, validated, replayable. Execution never leaves the host. Credentials stay where they already are (`aws`, `gcloud`, `psql`, SSH, VPN). Replay costs **zero tokens**.
 
 > **Status:** pre-alpha. Latest tagged build is a **prerelease** (`v0.0.0-dev.*`) to exercise the release pipeline — not a product launch.
 
@@ -14,9 +35,13 @@ Coding agents are great at discovery and terrible at memory. Scripts in chat die
 
 Doppels is the freeze button:
 
-1. Agent (or you) captures the working path.
-2. CLI validates the contract and runs it locally.
-3. Same inputs → same Steps → auditable result.
+1. **Freeze once** — agent (or you) captures the working path as YAML.
+2. **Commit it** — Capability + Recipe live in your repo, reviewed like any other source.
+3. **Replay for $0** — `doppels run` executes locally. Same inputs → same Steps → auditable result.
+
+<p align="center">
+  <img src="docs/images/freeze-flow.jpg" alt="Session freezes into a Capability, then a local Run" width="100%">
+</p>
 
 ## How it works
 
@@ -47,13 +72,13 @@ Cursor / Claude / Codex          Your repo
 
 Pick one. Binary name is **`doppels`** (not `doppel`).
 
-### curl (GitHub Releases)
+### curl
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/doppelshq/doppels/main/install.sh | sh
+curl -fsSL https://doppels.so/install.sh | sh
 ```
 
-Same script will also be served at `https://doppels.so/install.sh` once that host is deployed with the static file.
+Same script from GitHub: `https://raw.githubusercontent.com/doppelshq/doppels/main/install.sh`.
 
 Defaults to `~/.local/bin/doppels`. If that directory is not on `PATH`:
 
@@ -64,7 +89,7 @@ export PATH="$HOME/.local/bin:$PATH"
 Pin a tag (useful while only prereleases exist):
 
 ```console
-curl -fsSL https://raw.githubusercontent.com/doppelshq/doppels/main/install.sh \
+curl -fsSL https://doppels.so/install.sh \
   | DOPPELS_VERSION=v0.0.0-dev.1 sh
 ```
 
@@ -169,12 +194,14 @@ schemas/               JSON Schema contracts (source of truth)
 skills/doppel-freeze/  Agent skill for Cursor / Claude / Codex
 skills/doppel-use/     Draft — blocked on MCP
 examples/quickstart/   Local Space you can run offline
-install.sh             curl installer from GitHub Releases
+docs/images/           README artwork
+install.sh             curl installer
 ```
 
 ## Links
 
 - [doppels.so](https://doppels.so)
+- [docs.doppels.so](https://docs.doppels.so)
 - [Homebrew tap](https://github.com/doppelshq/homebrew-tap)
 - [CONTRIBUTING.md](CONTRIBUTING.md) (DCO + CLA)
 - [LICENSE](LICENSE) and [NOTICE](NOTICE) — Apache-2.0
