@@ -64,6 +64,10 @@
 
     <!-- content -->
     <text class="sans" x="28" y="32" fill="#737373" font-size="13" font-weight="600">1  Freeze once</text>
+    <rect x="136" y="18" width="212" height="22" rx="11" fill="#fafafa" stroke="#e5e5e5"/>
+    <text class="sans" x="336" y="33" text-anchor="end" fill="#737373" font-size="10.5" font-weight="500">
+      <tspan>48,639 tokens · </tspan><tspan fill="#b42318" font-weight="600">$0.54</tspan><tspan> once</tspan>
+    </text>
     <rect x="20" y="48" width="332" height="360" rx="12" fill="#fff" fill-opacity="0.96" stroke="#e5e5e5"/>
     <text class="sans" x="40" y="78" fill="#0a0a0a" font-size="14" font-weight="600">Session</text>
     <text class="sans" x="108" y="78" fill="#737373" font-size="12">Cursor / Claude / Codex</text>
@@ -71,8 +75,8 @@
     <rect x="40" y="96" width="28" height="28" rx="14" fill="#0a0a0a"/>
     <text class="sans" x="47" y="114" fill="#fff" font-size="9" font-weight="600">You</text>
     <rect x="76" y="96" width="256" height="44" rx="8" fill="#f4f4f5"/>
-    <text class="sans" x="88" y="114" fill="#0a0a0a" font-size="12">Build a CLI to fetch top HN</text>
-    <text class="sans" x="88" y="130" fill="#0a0a0a" font-size="12">stories into a CSV.</text>
+    <text class="sans" x="88" y="114" fill="#0a0a0a" font-size="12">Give me today's top Hacker News</text>
+    <text class="sans" x="88" y="130" fill="#0a0a0a" font-size="12">stories as a brief report.</text>
 
     <circle cx="54" cy="166" r="14" fill="#f4f4f5"/>
     <g transform="translate(54 166)">
@@ -81,8 +85,8 @@
       </g>
     </g>
     <rect x="76" y="152" width="256" height="44" rx="8" fill="#f4f4f5"/>
-    <text class="sans" x="88" y="170" fill="#0a0a0a" font-size="12">Done - CLI writes stories.csv.</text>
-    <text class="sans" x="88" y="186" fill="#737373" font-size="12">48,639 tokens  $0.54 once</text>
+    <text class="sans" x="88" y="170" fill="#0a0a0a" font-size="12">Done - here's today's top stories,</text>
+    <text class="sans" x="88" y="186" fill="#0a0a0a" font-size="12">ranked with titles and scores.</text>
 
     <rect x="40" y="208" width="28" height="28" rx="14" fill="#0a0a0a"/>
     <text class="sans" x="47" y="226" fill="#fff" font-size="9" font-weight="600">You</text>
