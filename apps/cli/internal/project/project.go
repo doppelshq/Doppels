@@ -12,7 +12,11 @@ import (
 	"doppels.so/cli/internal/manifest"
 )
 
+// Directory is the single dot-directory that owns all Doppels artefacts.
 const Directory = ".doppels"
+
+// runsDir and lockFile live inside Directory and are gitignored.
+const runsSubdir = "runs"
 
 var ErrNotFound = errors.New("no local Space found")
 
@@ -24,8 +28,8 @@ type Discovery struct {
 
 func DefaultDiscovery() Discovery {
 	return Discovery{
-		Capabilities: []string{"capabilities"},
-		Recipes:      []string{"recipes"},
+		Capabilities: []string{Directory + "/capabilities"},
+		Recipes:      []string{Directory + "/recipes"},
 	}
 }
 
@@ -46,27 +50,42 @@ func FindRoot(start string) (string, error) {
 	}
 }
 
-// Init creates the default user manifest dirs and the runtime .doppels/ marker.
+// Init creates the .doppels/ working tree (capabilities/, recipes/, runs/)
+// and a .doppels/.gitignore that excludes runtime state.
 func Init(root string) ([]string, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
 		return nil, err
 	}
+	doppelsDir := filepath.Join(absolute, Directory)
 	paths := []string{
-		filepath.Join(absolute, "capabilities"),
-		filepath.Join(absolute, "recipes"),
-		filepath.Join(absolute, Directory),
+		filepath.Join(doppelsDir, "capabilities"),
+		filepath.Join(doppelsDir, "recipes"),
+		filepath.Join(doppelsDir, runsSubdir),
 	}
 	for _, path := range paths {
 		if err := os.MkdirAll(path, 0o755); err != nil {
 			return nil, err
 		}
 	}
+	if err := writeGitignore(doppelsDir); err != nil {
+		return nil, err
+	}
 	return paths, nil
 }
 
-// WriteSpaceManifest creates doppels.<space>.yaml when missing. Returns path and
-// whether a new file was written.
+// writeGitignore creates .doppels/.gitignore that ignores runtime state only.
+func writeGitignore(doppelsDir string) error {
+	path := filepath.Join(doppelsDir, ".gitignore")
+	if _, err := os.Stat(path); err == nil {
+		return nil // already exists, don't overwrite
+	}
+	content := "# Doppels runtime state — do not commit\nruns/\n*.lock\n"
+	return os.WriteFile(path, []byte(content), 0o644)
+}
+
+// WriteSpaceManifest creates .doppels/<space>.yaml when missing. Returns path
+// and whether a new file was written.
 func WriteSpaceManifest(root, space string) (string, bool, error) {
 	space = strings.TrimSpace(space)
 	if space == "" {
@@ -79,20 +98,23 @@ func WriteSpaceManifest(root, space string) (string, bool, error) {
 	if err != nil {
 		return "", false, err
 	}
-	path := filepath.Join(absolute, "doppels."+space+".yaml")
+	doppelsDir := filepath.Join(absolute, Directory)
+	if err := os.MkdirAll(doppelsDir, 0o755); err != nil {
+		return "", false, err
+	}
+	path := filepath.Join(doppelsDir, space+".space.yaml")
 	if _, err := os.Stat(path); err == nil {
 		return path, false, nil
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", false, err
 	}
-	display := space
 	body := fmt.Sprintf(`apiVersion: doppels.so/v1alpha1
 kind: Space
 
 metadata:
   name: %s
   displayName: %s
-`, space, display)
+`, space, space)
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		return "", false, err
 	}
@@ -231,11 +253,12 @@ func resolveUnderRoot(root, relative string) (string, error) {
 }
 
 // FindSpaceManifest resolves the optional mutable configuration for the
-// selected Space. Capability and Recipe discovery remains independent.
+// selected Space. Looks inside .doppels/<space>.yaml.
 func FindSpaceManifest(root, space string) (string, bool, error) {
+	doppelsDir := filepath.Join(root, Directory)
 	var matches []string
 	for _, extension := range []string{".yaml", ".yml", ".json"} {
-		path := filepath.Join(root, "doppels."+space+extension)
+		path := filepath.Join(doppelsDir, space+".space"+extension)
 		info, err := os.Stat(path)
 		switch {
 		case errors.Is(err, os.ErrNotExist):
@@ -258,16 +281,18 @@ func FindSpaceManifest(root, space string) (string, bool, error) {
 }
 
 func listSpaceManifestPaths(root string) ([]string, error) {
+	doppelsDir := filepath.Join(root, Directory)
 	var matches []string
 	for _, extension := range []string{".yaml", ".yml", ".json"} {
-		pattern := filepath.Join(root, "doppels.*"+extension)
+		pattern := filepath.Join(doppelsDir, "*.space"+extension)
 		found, err := filepath.Glob(pattern)
 		if err != nil {
 			return nil, err
 		}
 		for _, path := range found {
 			base := filepath.Base(path)
-			name := strings.TrimSuffix(strings.TrimPrefix(base, "doppels."), extension)
+			suffix := ".space" + extension
+			name := strings.TrimSuffix(base, suffix)
 			if name == "" || strings.Contains(name, ".") {
 				continue
 			}
@@ -286,11 +311,7 @@ func listSpaceManifestPaths(root string) ([]string, error) {
 
 func isProjectRoot(path string) bool {
 	info, err := os.Stat(filepath.Join(path, Directory))
-	if err == nil && info.IsDir() {
-		return true
-	}
-	matches, err := listSpaceManifestPaths(path)
-	return err == nil && len(matches) > 0
+	return err == nil && info.IsDir()
 }
 
 // IsWorkingTree reports whether path is a Space working tree root.

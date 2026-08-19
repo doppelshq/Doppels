@@ -85,7 +85,10 @@ func TestPreviewAndApplyDiscoverProjectAndWriteLockAfterSuccess(t *testing.T) {
 	root := t.TempDir()
 	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
 	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
-	if err := os.WriteFile(filepath.Join(root, "doppels.platform.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+	if err := os.MkdirAll(filepath.Join(root, ".doppels"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".doppels", "platform.space.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
 kind: Space
 metadata:
   name: platform
@@ -163,14 +166,14 @@ outputs: {answer: {type: string}}
 		t.Fatalf("stderr/calls = %s / %d", stderr.String(), reconciles.Load())
 	}
 	for _, filename := range []string{"other-v1.yaml", "other-v2.yaml"} {
-		if err := os.Remove(filepath.Join(root, "capabilities", filename)); err != nil {
+		if err := os.Remove(filepath.Join(root, ".doppels", "capabilities", filename)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	// Reusing an immutable version with changed bytes is rejected locally before
 	// another network request.
-	capabilityPath := filepath.Join(root, "capabilities", "greet.yaml")
+	capabilityPath := filepath.Join(root, ".doppels", "capabilities", "greet.yaml")
 	data, err := os.ReadFile(capabilityPath)
 	if err != nil {
 		t.Fatal(err)

@@ -154,17 +154,22 @@ func (app *App) usage(writer io.Writer) {
 	writeUsageSection(writer, style, "Tooling", []usageLine{
 		{"doppels update", "update to the latest release"},
 		{"doppels telemetry accept|reject|status", "anonymous product analytics"},
-		{"doppels experimental on|off|status", "enable preview features"},
+		{"doppels experimental on|off|status", "enable preview features (cloud)"},
 	})
 
 	if app.experimentalEnabled() {
-		writeUsageSectionDimTitle(writer, style, "Preview · Cloud", []usageLine{
+		fmt.Fprintln(writer, style.dim("Preview · Cloud"))
+		writeUsageSubsection(writer, style, "Share", []usageLine{
 			{"doppels share capability/<name>[@ver]", "create share link (--input · --yes)"},
 			{"doppels listen", "fulfill incoming Requests"},
+		})
+		writeUsageSubsection(writer, style, "Identity", []usageLine{
 			{"doppels login|logout|whoami", "device login"},
 			{"doppels organizations|orgs [list]", "cloud Orgs"},
 			{"doppels org use · space use", "select Org / Space"},
 			{"doppels context [show]", "current binding"},
+		})
+		writeUsageSubsection(writer, style, "Registry", []usageLine{
 			{"doppels preview|apply [-f …]", "reconcile Space with cloud"},
 			{"doppels publish capability/<name>", "list on Hub (--yes)"},
 			{"doppels unpublish capability/<name>", "unlist from Hub"},
@@ -174,12 +179,27 @@ func (app *App) usage(writer io.Writer) {
 	}
 
 	fmt.Fprintln(writer, style.dim("Most commands accept --json.  doppels <cmd> --help for details."))
+	fmt.Fprintln(writer, style.dim("Docs and community at doppels.so"))
 	fmt.Fprintln(writer)
 }
 
 type usageLine struct {
 	cmd  string
 	hint string
+}
+
+func writeUsageSubsection(writer io.Writer, style termStyle, title string, lines []usageLine) {
+	fmt.Fprintln(writer, "  "+style.dim("· "+title))
+	const cmdWidth = 42
+	for _, line := range lines {
+		cmd := "    " + line.cmd
+		pad := cmdWidth - visibleLen(cmd)
+		if pad < 2 {
+			pad = 2
+		}
+		fmt.Fprintf(writer, "%s%s%s\n", cmd, strings.Repeat(" ", pad), style.dim(line.hint))
+	}
+	fmt.Fprintln(writer)
 }
 
 func writeUsageSectionDimTitle(writer io.Writer, style termStyle, title string, lines []usageLine) {
@@ -426,6 +446,19 @@ func diagnosticsExitCode(diagnostics []manifest.Diagnostic) int {
 		}
 	}
 	return ExitOperational
+}
+
+// isTTY reports whether Stdout is an interactive terminal.
+func (app *App) isTTY() bool {
+	f, ok := app.Stdout.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
 }
 
 func (app *App) writeJSON(value any) {

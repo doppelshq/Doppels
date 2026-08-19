@@ -5,7 +5,7 @@ metadata:
   name: env-check
   version: 1.0.0
   displayName: Environment check
-  summary: Validates that required host environment variables are present and readable.
+  summary: Validates that a host environment variable is present.
   impact: low
   tags: [dev, test]
 

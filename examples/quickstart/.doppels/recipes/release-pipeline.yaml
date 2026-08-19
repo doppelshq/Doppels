@@ -5,7 +5,7 @@ metadata:
   name: release-pipeline-shell
   version: 1.0.0
   displayName: Release pipeline (shell)
-  summary: Four short Steps (1–3s) to exercise the live run timeline.
+  summary: Four steps (1–3s each) to exercise the run timeline.
   impact: low
 
 provides: [release-pipeline]
