@@ -34,3 +34,23 @@ changelog:
 release:
   prerelease: auto
   name_template: "{{.Tag}}"
+
+brews:
+  - name: doppels
+    repository:
+      owner: doppelshq
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: github-actions[bot]
+      email: 41898282+github-actions[bot]@users.noreply.github.com
+    commit_msg_template: "chore(brew): update doppels to {{ .Tag }}"
+    directory: Formula
+    homepage: "https://doppels.so"
+    description: "Freeze agent sessions into local deterministic recipes"
+    license: "Apache-2.0"
+    install: |
+      bin.install "doppels"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/doppels --version")
