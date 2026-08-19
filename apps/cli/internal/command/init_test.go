@@ -11,7 +11,7 @@ import (
 func TestInitDefaultCreatesLocalSpace(t *testing.T) {
 	root := t.TempDir()
 	app, stdout, stderr := testApp(root)
-	if code := app.Run([]string{"init", "--dir", root}); code != ExitSuccess {
+	if code := app.Run([]string{"init"}); code != ExitSuccess {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
 	for _, sub := range []string{"capabilities", "recipes", ".doppels"} {
@@ -35,7 +35,7 @@ func TestInitDefaultCreatesLocalSpace(t *testing.T) {
 func TestInitExplicitName(t *testing.T) {
 	root := t.TempDir()
 	app, stdout, stderr := testApp(root)
-	if code := app.Run([]string{"init", "platform", "--dir", root}); code != ExitSuccess {
+	if code := app.Run([]string{"init", "platform"}); code != ExitSuccess {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "doppels.platform.yaml")); err != nil {
@@ -49,11 +49,11 @@ func TestInitExplicitName(t *testing.T) {
 func TestInitIdempotentExistingManifest(t *testing.T) {
 	root := t.TempDir()
 	app, _, stderr := testApp(root)
-	if code := app.Run([]string{"init", "myspace", "--dir", root}); code != ExitSuccess {
+	if code := app.Run([]string{"init", "myspace"}); code != ExitSuccess {
 		t.Fatalf("first exit = %d, stderr = %s", code, stderr.String())
 	}
 	app2, stdout2, stderr2 := testApp(root)
-	if code := app2.Run([]string{"init", "myspace", "--dir", root}); code != ExitSuccess {
+	if code := app2.Run([]string{"init", "myspace"}); code != ExitSuccess {
 		t.Fatalf("second exit = %d, stderr = %s", code, stderr2.String())
 	}
 	if !strings.Contains(stdout2.String(), "Kept") {
@@ -64,7 +64,7 @@ func TestInitIdempotentExistingManifest(t *testing.T) {
 func TestInitJSON(t *testing.T) {
 	root := t.TempDir()
 	app, stdout, stderr := testApp(root)
-	if code := app.Run([]string{"init", "eng", "--dir", root, "--json"}); code != ExitSuccess {
+	if code := app.Run([]string{"init", "eng", "--json"}); code != ExitSuccess {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
 	var payload struct {
@@ -89,7 +89,7 @@ func TestInitJSON(t *testing.T) {
 func TestInitInvalidName(t *testing.T) {
 	root := t.TempDir()
 	app, _, stderr := testApp(root)
-	if code := app.Run([]string{"init", "Bad Name", "--dir", root}); code != ExitContract {
+	if code := app.Run([]string{"init", "Bad Name"}); code != ExitContract {
 		t.Fatalf("exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
 	}
 }
@@ -97,7 +97,7 @@ func TestInitInvalidName(t *testing.T) {
 func TestInitTooManyArgs(t *testing.T) {
 	root := t.TempDir()
 	app, _, stderr := testApp(root)
-	if code := app.Run([]string{"init", "foo", "bar", "--dir", root}); code != ExitContract {
+	if code := app.Run([]string{"init", "foo", "bar"}); code != ExitContract {
 		t.Fatalf("exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
 	}
 }

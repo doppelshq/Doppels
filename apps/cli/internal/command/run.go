@@ -33,6 +33,7 @@ func (app *App) runLocal(arguments []string) int {
 	flags.Var(&rawOutputs, "output", "manual output as name=value (repeatable)")
 	flags.Var(&rawEvidence, "evidence", "manual evidence as name=value (repeatable)")
 	recipeName := flags.String("recipe", "", "compatible Recipe name[@version]")
+	yes := flags.Bool("yes", false, "auto-approve all approval steps without prompting")
 	detach := false
 	flags.BoolVar(&detach, "detach", false, "run in the background and print the Run id")
 	flags.BoolVar(&detach, "d", false, "run in the background and print the Run id")
@@ -56,6 +57,7 @@ func (app *App) runLocal(arguments []string) int {
 	}
 
 	interaction := newInteraction(app.Stdin, app.Stderr)
+	interaction.autoYes = *yes
 	capabilityRef := ""
 	if flags.NArg() == 1 {
 		capabilityRef = flags.Arg(0)
@@ -333,6 +335,7 @@ type interaction struct {
 	reader     *bufio.Reader
 	output     io.Writer
 	promptable bool
+	autoYes    bool
 }
 
 func newInteraction(input io.Reader, output io.Writer) *interaction {
@@ -389,6 +392,11 @@ func (interaction *interaction) approve(_ context.Context, request execution.App
 	name := request.StepID
 	if request.Name != "" {
 		name = request.Name
+	}
+	if interaction.autoYes {
+		style := newTermStyle(interaction.output)
+		fmt.Fprintf(interaction.output, "  %s  %s\n", style.field("Approve"), name)
+		return true, nil
 	}
 	style := newTermStyle(interaction.output)
 	answer, err := interaction.read(fmt.Sprintf("  %s  %s? [y/N] ", style.field("Approve"), name))

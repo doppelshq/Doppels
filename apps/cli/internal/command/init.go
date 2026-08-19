@@ -11,7 +11,6 @@ import (
 
 func (app *App) runInit(arguments []string) int {
 	flags := app.flagSet("init")
-	dir := flags.String("dir", "", "directory for the Space working tree (default: cwd)")
 	jsonOutput := flags.Bool("json", false, "write a machine-readable response")
 	if err := flags.Parse(resourceFirst(arguments)); err != nil {
 		return ExitContract
@@ -20,14 +19,10 @@ func (app *App) runInit(arguments []string) int {
 		fmt.Fprintln(app.Stderr, "init accepts at most one Space name (e.g. doppels init myspace)")
 		return ExitContract
 	}
-	target := strings.TrimSpace(*dir)
-	if target == "" {
-		cwd, err := app.Getwd()
-		if err != nil {
-			fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
-			return ExitOperational
-		}
-		target = cwd
+	target, err := app.Getwd()
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
+		return ExitOperational
 	}
 
 	spaceName := configstore.LocalSpace
@@ -35,14 +30,14 @@ func (app *App) runInit(arguments []string) int {
 		spaceName = strings.TrimSpace(flags.Arg(0))
 	}
 
-	paths, err := project.Init(target)
-	if err != nil {
-		fmt.Fprintf(app.Stderr, "initialize Space working tree: %v\n", err)
-		return ExitOperational
-	}
 	root, err := filepath.Abs(target)
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "resolve Space root: %v\n", err)
+		return ExitOperational
+	}
+	paths, err := project.Init(root)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "initialize Space working tree: %v\n", err)
 		return ExitOperational
 	}
 	manifestPath, manifestCreated, err := project.WriteSpaceManifest(root, spaceName)

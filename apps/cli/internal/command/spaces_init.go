@@ -8,7 +8,9 @@ import (
 	"doppels.so/cli/internal/project"
 )
 
+// runSpacesInit is kept for backward compatibility. New code should use doppels init [name].
 func (app *App) runSpacesInit(arguments []string) int {
+	fmt.Fprintln(app.Stderr, "hint: use 'doppels init [<name>]' instead of 'doppels spaces init'")
 	flags := app.flagSet("spaces init")
 	dir := flags.String("dir", "", "directory for the Space working tree (default: cwd)")
 	jsonOutput := flags.Bool("json", false, "write a machine-readable response")

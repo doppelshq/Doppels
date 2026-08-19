@@ -129,13 +129,12 @@ func (app *App) usage(writer io.Writer) {
 	fmt.Fprintln(writer)
 
 	writeUsageSection(writer, style, "Space", []usageLine{
-		{"doppels init [--dir PATH]", "working tree + local/private"},
-		{"doppels spaces [list]|init …", "Spaces in this tree / add Space"},
+		{"doppels init [<name>]", "working tree + Space (default: private)"},
 		{"doppels validate [-f manifest]", "check manifests"},
 		{"doppels preview|apply [-f …]", "reconcile Space (local or cloud)"},
 	})
 	writeUsageSection(writer, style, "Execute", []usageLine{
-		{"doppels run [capability/<name>]", "pick Cap/Recipe/inputs · -d"},
+		{"doppels run [capability/<name>] [--yes]", "pick Cap/Recipe/inputs · -d"},
 		{"doppels share capability/<name>[@ver]", "share link (--input · --locked · --yes)"},
 		{"doppels listen", "fulfill Requests (does not create Shares)"},
 	})
