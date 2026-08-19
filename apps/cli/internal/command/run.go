@@ -534,11 +534,20 @@ func (app *App) environment() []string {
 func (app *App) experimentalEnabled() bool {
 	for _, entry := range app.environment() {
 		name, value, ok := strings.Cut(entry, "=")
-		if ok && name == "DOPPELS_EXPERIMENTAL" && value == "1" {
-			return true
+		if !ok {
+			continue
+		}
+		if name == "DOPPELS_EXPERIMENTAL" {
+			return value == "1"
 		}
 	}
-	return false
+	// Fall back to persistent flag file written by 'doppels experimental on'.
+	flagFile, err := app.experimentalFlagFile()
+	if err != nil {
+		return false
+	}
+	_, err = os.Stat(flagFile)
+	return err == nil
 }
 
 func (app *App) localIdentity() execution.ActorReference {

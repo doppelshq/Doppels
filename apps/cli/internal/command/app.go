@@ -118,6 +118,10 @@ func (app *App) Run(arguments []string) int {
 		return app.runPrune(arguments[1:])
 	case "telemetry":
 		return app.runTelemetry(arguments[1:])
+	case "update":
+		return app.runUpdate(arguments[1:])
+	case "experimental":
+		return app.runExperimental(arguments[1:])
 	default:
 		fmt.Fprintf(app.Stderr, "unknown command %q\n\n", arguments[0])
 		app.usage(app.Stderr)
@@ -158,6 +162,10 @@ func (app *App) usage(writer io.Writer) {
 		{"doppels org use · space use", "select Org / Space"},
 		{"doppels context [show]", "current binding"},
 		{"doppels telemetry accept|reject|status", "anonymous product analytics opt-in"},
+	})
+	writeUsageSection(writer, style, "Tooling", []usageLine{
+		{"doppels update", "update to the latest release"},
+		{"doppels experimental on|off|status", "enable preview features (DOPPELS_EXPERIMENTAL=1)"},
 	})
 	writeUsageSection(writer, style, "Hub", []usageLine{
 		{"doppels publish capability/<name>", "list Capability+Recipe (--yes)"},
