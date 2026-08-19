@@ -13,7 +13,7 @@
       "manifestSha256": "3e8485b6d578eaba3588833e2353adf642432266600e831c7d32e9c8727b1810",
       "schema": {
         "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
-        "sha256": "97a290a319a56263c5717316f6bcf630d7021961010c18a3dc8c73047e5de367"
+        "sha256": "531ff668bef1930d271f98ddd4d53484dde28b7e3b770df009bb580d1e93967a"
       }
     },
     "capability": {
@@ -67,7 +67,7 @@
       "manifestSha256": "06389291763c058e928718305659b4377de7b56db7fb9de24735cf0a0398196b",
       "schema": {
         "id": "https://doppels.so/schemas/v1alpha1/recipe.schema.json",
-        "sha256": "0cfb744ce46839081f028c372fd840ee80465ba3dc978009dd37c73c2072381c"
+        "sha256": "14cb3191c7ba24b7895ad4f52eb57531a3fe76b4fe8c855eaf1246d28148fa66"
       }
     },
     "sharedBy": {
