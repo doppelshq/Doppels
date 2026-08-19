@@ -57,6 +57,16 @@
       "properties": {
         "type": { "$ref": "#/$defs/scalarType" },
         "description": { "type": "string", "maxLength": 500 },
+        "placeholder": {
+          "description": "Hint text shown in UI/share form when the field is empty. Not a default value.",
+          "type": "string",
+          "maxLength": 200
+        },
+        "sensitive": {
+          "description": "When true, CLI and UI must not log or display the value in plain text.",
+          "type": "boolean",
+          "default": false
+        },
         "required": { "type": "boolean", "default": false },
         "default": { "type": ["string", "integer", "number", "boolean"] },
         "enum": {

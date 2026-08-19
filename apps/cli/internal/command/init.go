@@ -11,39 +11,41 @@ import (
 
 func (app *App) runInit(arguments []string) int {
 	flags := app.flagSet("init")
-	dir := flags.String("dir", "", "directory for the Space working tree (default: cwd)")
 	jsonOutput := flags.Bool("json", false, "write a machine-readable response")
-	if err := flags.Parse(arguments); err != nil {
+	if err := flags.Parse(resourceFirst(arguments)); err != nil {
 		return ExitContract
 	}
-	if flags.NArg() != 0 {
-		fmt.Fprintln(app.Stderr, "init accepts no positional arguments; use doppels spaces init <name> to add Spaces")
+	if flags.NArg() > 1 {
+		fmt.Fprintln(app.Stderr, "init accepts at most one Space name (e.g. doppels init myspace)")
 		return ExitContract
 	}
-	target := strings.TrimSpace(*dir)
-	if target == "" {
-		cwd, err := app.Getwd()
-		if err != nil {
-			fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
-			return ExitOperational
-		}
-		target = cwd
-	}
-	paths, err := project.Init(target)
+	target, err := app.Getwd()
 	if err != nil {
-		fmt.Fprintf(app.Stderr, "initialize Space working tree: %v\n", err)
+		fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
 		return ExitOperational
 	}
+
+	spaceName := configstore.LocalSpace
+	if flags.NArg() == 1 {
+		spaceName = strings.TrimSpace(flags.Arg(0))
+	}
+
 	root, err := filepath.Abs(target)
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "resolve Space root: %v\n", err)
 		return ExitOperational
 	}
-	manifestPath, manifestCreated, err := project.WriteSpaceManifest(root, configstore.LocalSpace)
+	paths, err := project.Init(root)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "initialize Space working tree: %v\n", err)
+		return ExitOperational
+	}
+	manifestPath, manifestCreated, err := project.WriteSpaceManifest(root, spaceName)
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "write Space manifest: %v\n", err)
 		return ExitContract
 	}
+
 	store, err := app.configStore()
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "resolve CLI configuration: %v\n", err)
@@ -53,14 +55,16 @@ func (app *App) runInit(arguments []string) int {
 		fmt.Fprintf(app.Stderr, "set local context: %v\n", err)
 		return ExitOperational
 	}
-	if err := store.SetBinding(configstore.LocalOrganization, configstore.LocalSpace, root); err != nil {
+	if err := store.SetBinding(configstore.LocalOrganization, spaceName, root); err != nil {
 		fmt.Fprintf(app.Stderr, "record Space binding: %v\n", err)
 		return ExitOperational
 	}
+
 	if *jsonOutput {
 		app.writeJSON(map[string]any{
 			"status":          "initialized",
 			"root":            root,
+			"space":           spaceName,
 			"context":         configstore.LocalContext(),
 			"manifest":        manifestPath,
 			"manifestCreated": manifestCreated,
@@ -71,6 +75,7 @@ func (app *App) runInit(arguments []string) int {
 	style := newTermStyle(app.Stdout)
 	fmt.Fprintln(app.Stdout)
 	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Root"), style.value(root))
+	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Space"), spaceName)
 	if manifestCreated {
 		fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Wrote"), filepath.Base(manifestPath))
 	} else {
@@ -78,6 +83,6 @@ func (app *App) runInit(arguments []string) int {
 	}
 	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Context"), configstore.LocalContext().String())
 	fmt.Fprintln(app.Stdout)
-	fmt.Fprintf(app.Stdout, "  %s\n", style.dim("Next: add Capabilities/Recipes, then doppels apply (local) or doppels login for cloud"))
+	fmt.Fprintf(app.Stdout, "  %s\n", style.dim("Next: add Capabilities/Recipes, then doppels validate && doppels run"))
 	return ExitSuccess
 }

@@ -88,7 +88,6 @@ func (app *App) runOrganizations(arguments []string) int {
 func (app *App) runSpaces(arguments []string) int {
 	if isHelp(arguments) {
 		fmt.Fprintln(app.Stdout, "Usage: doppels spaces [list] [--json]")
-		fmt.Fprintln(app.Stdout, "       doppels spaces init [<space-name>] [--dir PATH] [--json]")
 		return ExitSuccess
 	}
 	if rest, ok := pluralDefaultList(arguments); ok {
@@ -96,9 +95,10 @@ func (app *App) runSpaces(arguments []string) int {
 	}
 	switch arguments[0] {
 	case "init":
-		return app.runSpacesInit(arguments[1:])
+		fmt.Fprintln(app.Stderr, "use 'doppels init [<name>]' instead of 'doppels spaces init'")
+		return ExitContract
 	default:
-		fmt.Fprintln(app.Stderr, "spaces requires list or init")
+		fmt.Fprintln(app.Stderr, "spaces requires list")
 		return ExitContract
 	}
 }

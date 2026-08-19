@@ -1,0 +1,25 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: env-check
+  version: 1.0.0
+  displayName: Environment check
+  summary: Validates that required host environment variables are present and readable.
+  impact: low
+  tags: [dev, test]
+
+inputs:
+  var_name:
+    type: string
+    description: Name of the environment variable to verify.
+    placeholder: "e.g. HOME"
+    required: true
+
+outputs:
+  present:
+    type: boolean
+    description: True if the variable is set and non-empty.
+  value_preview:
+    type: string
+    description: First 20 characters of the variable value, or empty string.

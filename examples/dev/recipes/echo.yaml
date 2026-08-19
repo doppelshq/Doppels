@@ -1,0 +1,35 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: echo
+  version: 1.0.0
+  displayName: Echo (shell)
+  summary: Shell echo — validates step execution, env wiring and returns.
+  impact: low
+  author: doppelshq
+
+provides: [echo]
+runtime: shell
+
+requires:
+  commands: [sh]
+
+defaults:
+  approval: never
+
+steps:
+  - id: echo
+    name: Echo text
+    env:
+      TEXT: "{{ inputs.text }}"
+    run:
+      shell: sh
+      script: |
+        printf '%s\n' "$TEXT"
+    produces:
+      result:
+        env: TEXT
+
+returns:
+  result: "{{ steps.echo.result }}"

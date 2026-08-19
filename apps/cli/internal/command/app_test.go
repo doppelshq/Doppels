@@ -56,17 +56,13 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 	for _, want := range []string{
 		"Doppels",
 		"Space",
-		"Execute",
-		"Inspect",
-		"Identity",
+		"Run",
+		"Tooling",
 		"doppels init",
-		"doppels preview|apply",
 		"doppels run",
 		"doppels runs [list]",
 		"doppels capabilities|caps",
-		"doppels organizations|orgs",
-		"doppels publish",
-		"doppels install",
+		"doppels update",
 		"doppels runs [list]",
 		"--json",
 	} {
@@ -107,8 +103,8 @@ func TestHelpStillPrintsUsage(t *testing.T) {
 func TestInitValidateAndDescribe(t *testing.T) {
 	root := t.TempDir()
 	app, stdout, stderr := testApp(root)
-	if code := app.Run([]string{"spaces", "init", "platform", "--dir", root}); code != ExitSuccess {
-		t.Fatalf("spaces init exit = %d, stderr = %s", code, stderr.String())
+	if code := app.Run([]string{"init", "platform"}); code != ExitSuccess {
+		t.Fatalf("init platform exit = %d, stderr = %s", code, stderr.String())
 	}
 	if _, err := os.Stat(filepath.Join(root, "capabilities")); err != nil {
 		t.Fatal(err)
@@ -124,7 +120,7 @@ func TestInitValidateAndDescribe(t *testing.T) {
 	}
 	stdout.Reset()
 	stderr.Reset()
-	if code := app.Run([]string{"init", "--dir", root}); code != ExitSuccess {
+	if code := app.Run([]string{"init"}); code != ExitSuccess {
 		t.Fatalf("init exit = %d, stderr = %s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "local/private") {

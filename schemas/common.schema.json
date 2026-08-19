@@ -57,6 +57,12 @@
           "type": "object",
           "propertyNames": { "pattern": "^[a-z][a-z0-9._/-]{0,253}$" },
           "additionalProperties": { "type": "string" }
+        },
+        "author": {
+          "description": "Who publishes or maintains this manifest. Same convention as npm: name of the person or team responsible for the package, not the end-user running it.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         }
       }
     },

@@ -69,11 +69,11 @@ test -z "${LEAK+x}"
 export OK=true
 `}, Produces: map[string]manifest.Product{"ok": {Env: "OK"}}},
 		},
-		Returns: map[string]string{
+		Returns: manifest.ReturnsFrom(map[string]string{
 			"message": "{{ steps.prepare.message }}", "count": "{{ steps.prepare.count }}",
 			"ratio": "{{ steps.prepare.ratio }}", "receipt": "{{ steps.prepare.receipt }}",
 			"manifest": "{{ steps.prepare.manifest }}", "ok": "{{ steps.verify.ok }}",
-		},
+		}),
 	}
 	var approvals atomic.Int32
 	var stdout, stderr bytes.Buffer
@@ -364,7 +364,7 @@ func TestExecuteRejectsArtifactSymlinkOutsideWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	capability := &manifest.Capability{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Capability"}, Metadata: manifest.Metadata{Name: "artifact", Version: "1.0.0"}, Inputs: map[string]manifest.InputContract{}, Outputs: map[string]manifest.OutputContract{"file": {Type: "artifact"}}}
-	recipe := &manifest.Recipe{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Recipe"}, Metadata: manifest.Metadata{Name: "artifact", Version: "1.0.0"}, Provides: []string{"artifact"}, Runtime: "shell", Defaults: &manifest.Defaults{Approval: "never"}, Steps: []manifest.Step{{ID: "make", Name: "Make", Run: &manifest.Run{Shell: "sh", Script: "true"}, Produces: map[string]manifest.Product{"file": {File: "artifact.txt"}}}}, Returns: map[string]string{"file": "{{ steps.make.file }}"}}
+	recipe := &manifest.Recipe{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Recipe"}, Metadata: manifest.Metadata{Name: "artifact", Version: "1.0.0"}, Provides: []string{"artifact"}, Runtime: "shell", Defaults: &manifest.Defaults{Approval: "never"}, Steps: []manifest.Step{{ID: "make", Name: "Make", Run: &manifest.Run{Shell: "sh", Script: "true"}, Produces: map[string]manifest.Product{"file": {File: "artifact.txt"}}}}, Returns: manifest.ReturnsFrom(map[string]string{"file": "{{ steps.make.file }}"})}
 	result, err := Execute(context.Background(), invocation(root, capability, recipe), Options{Environment: []string{"PATH=" + os.Getenv("PATH")}})
 	if !errors.Is(err, ErrStepFailed) || !strings.Contains(err.Error(), "symlink target escapes") {
 		t.Fatalf("error = %v", err)
@@ -399,7 +399,7 @@ func TestExecuteRejectsWorkingDirectoryTraversalAndScriptInterpolation(t *testin
 func TestExecuteRejectsOneArtifactWithConflictingDeclaredMediaTypes(t *testing.T) {
 	root := t.TempDir()
 	capability := &manifest.Capability{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Capability"}, Metadata: manifest.Metadata{Name: "media", Version: "1.0.0"}, Inputs: map[string]manifest.InputContract{}, Outputs: map[string]manifest.OutputContract{"first": {Type: "artifact", MediaType: "application/one"}, "second": {Type: "artifact", MediaType: "application/two"}}}
-	recipe := &manifest.Recipe{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Recipe"}, Metadata: manifest.Metadata{Name: "media", Version: "1.0.0"}, Provides: []string{"media"}, Runtime: "shell", Defaults: &manifest.Defaults{Approval: "never"}, Steps: []manifest.Step{{ID: "make", Name: "Make", Run: &manifest.Run{Shell: "sh", Script: "printf data > value.bin"}, Produces: map[string]manifest.Product{"file": {File: "value.bin"}}}}, Returns: map[string]string{"first": "{{ steps.make.file }}", "second": "{{ steps.make.file }}"}}
+	recipe := &manifest.Recipe{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Recipe"}, Metadata: manifest.Metadata{Name: "media", Version: "1.0.0"}, Provides: []string{"media"}, Runtime: "shell", Defaults: &manifest.Defaults{Approval: "never"}, Steps: []manifest.Step{{ID: "make", Name: "Make", Run: &manifest.Run{Shell: "sh", Script: "printf data > value.bin"}, Produces: map[string]manifest.Product{"file": {File: "value.bin"}}}}, Returns: manifest.ReturnsFrom(map[string]string{"first": "{{ steps.make.file }}", "second": "{{ steps.make.file }}"})}
 	_, err := Execute(context.Background(), invocation(root, capability, recipe), Options{Environment: []string{"PATH=" + os.Getenv("PATH")}})
 	if err == nil || !strings.Contains(err.Error(), "incompatible media types") {
 		t.Fatalf("error = %v", err)
@@ -602,7 +602,7 @@ export VALUE=ok
 `},
 			Produces: map[string]manifest.Product{"value": {Env: "VALUE"}},
 		}},
-		Returns: map[string]string{"value": "{{ steps.run.value }}"},
+		Returns: manifest.ReturnsFrom(map[string]string{"value": "{{ steps.run.value }}"}),
 	}
 	result, err := Execute(context.Background(), invocation(root, capability, recipe), Options{
 		Environment:    []string{"PATH=" + os.Getenv("PATH")},
@@ -648,7 +648,7 @@ func scalarCapability() *manifest.Capability {
 }
 
 func scalarRecipe(script string) *manifest.Recipe {
-	return &manifest.Recipe{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Recipe"}, Metadata: manifest.Metadata{Name: "scalar-shell", Version: "1.0.0"}, Provides: []string{"scalar"}, Runtime: "shell", Defaults: &manifest.Defaults{Approval: "never", Timeout: "3s"}, Steps: []manifest.Step{{ID: "run", Name: "Run", Run: &manifest.Run{Shell: "sh", Script: script}, Produces: map[string]manifest.Product{"value": {Env: "VALUE"}}}}, Returns: map[string]string{"value": "{{ steps.run.value }}"}}
+	return &manifest.Recipe{TypeMeta: manifest.TypeMeta{APIVersion: APIVersion, Kind: "Recipe"}, Metadata: manifest.Metadata{Name: "scalar-shell", Version: "1.0.0"}, Provides: []string{"scalar"}, Runtime: "shell", Defaults: &manifest.Defaults{Approval: "never", Timeout: "3s"}, Steps: []manifest.Step{{ID: "run", Name: "Run", Run: &manifest.Run{Shell: "sh", Script: script}, Produces: map[string]manifest.Product{"value": {Env: "VALUE"}}}}, Returns: manifest.ReturnsFrom(map[string]string{"value": "{{ steps.run.value }}"})}
 }
 
 func invocation(root string, capability *manifest.Capability, recipe *manifest.Recipe) Invocation {

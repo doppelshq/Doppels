@@ -111,6 +111,8 @@ func DefaultDir() (string, error) {
 
 func New(dir string) *Store { return &Store{dir: dir} }
 
+func (s *Store) Dir() string { return s.dir }
+
 func (s *Store) Login(server, token string, now time.Time) error {
 	if server == "" || token == "" {
 		return errors.New("server and token are required")

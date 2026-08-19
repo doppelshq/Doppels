@@ -62,7 +62,11 @@ func (app *App) Run(arguments []string) int {
 		app.usage(app.Stdout)
 		return ExitSuccess
 	case "version", "-v", "--version":
-		fmt.Fprintf(app.Stdout, "doppels %s\n", version.Version)
+		if app.experimentalEnabled() {
+			fmt.Fprintf(app.Stdout, "doppels %s (experimental)\n", version.Version)
+		} else {
+			fmt.Fprintf(app.Stdout, "doppels %s\n", version.Version)
+		}
 		return ExitSuccess
 	case "init":
 		return app.runInit(arguments[1:])
@@ -114,6 +118,10 @@ func (app *App) Run(arguments []string) int {
 		return app.runPrune(arguments[1:])
 	case "telemetry":
 		return app.runTelemetry(arguments[1:])
+	case "update":
+		return app.runUpdate(arguments[1:])
+	case "experimental":
+		return app.runExperimental(arguments[1:])
 	default:
 		fmt.Fprintf(app.Stderr, "unknown command %q\n\n", arguments[0])
 		app.usage(app.Stderr)
@@ -124,48 +132,68 @@ func (app *App) Run(arguments []string) int {
 func (app *App) usage(writer io.Writer) {
 	style := newTermStyle(writer)
 	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, style.bold("Doppels"))
+	header := style.bold("Doppels") + style.dim("  "+version.Version)
+	if app.experimentalEnabled() {
+		header += "  " + style.bold("[experimental]")
+	}
+	fmt.Fprintln(writer, header)
 	fmt.Fprintln(writer, style.dim("  Local-first execution control plane"))
 	fmt.Fprintln(writer)
 
 	writeUsageSection(writer, style, "Space", []usageLine{
-		{"doppels init [--dir PATH]", "working tree + local/private"},
-		{"doppels spaces [list]|init …", "Spaces in this tree / add Space"},
+		{"doppels init [<name>]", "working tree + Space (default: private)"},
 		{"doppels validate [-f manifest]", "check manifests"},
-		{"doppels preview|apply [-f …]", "reconcile Space (local or cloud)"},
 	})
-	writeUsageSection(writer, style, "Execute", []usageLine{
-		{"doppels run [capability/<name>]", "pick Cap/Recipe/inputs · -d"},
-		{"doppels share capability/<name>[@ver]", "share link (--input · --locked · --yes)"},
-		{"doppels listen", "fulfill Requests (does not create Shares)"},
+	writeUsageSection(writer, style, "Run", []usageLine{
+		{"doppels run [capability/<name>] [--yes]", "execute locally · -d detach"},
+		{"doppels describe (capability|recipe)/…", "inspect a definition"},
+		{"doppels capabilities|caps [list]|show …", "list local Capabilities"},
+		{"doppels recipes [list]|show …", "list local Recipes"},
+		{"doppels runs [list]|show|logs …", "history (default 20)"},
 	})
-	writeUsageSection(writer, style, "Inspect", []usageLine{
-		{"doppels describe (capability|recipe)/…", "one definition"},
-		{"doppels capabilities|caps [list]|show …", "local Capabilities"},
-		{"doppels recipes [list]|show …", "local Recipes"},
-		{"doppels runs [list]|show|logs …", "Runs (list default 20)"},
-	})
-	writeUsageSection(writer, style, "Identity", []usageLine{
-		{"doppels login|logout|whoami", "device login opens Cloud URL"},
-		{"doppels organizations|orgs [list]", "cloud Orgs"},
-		{"doppels org use · space use", "select Org / Space"},
-		{"doppels context [show]", "current binding"},
-		{"doppels telemetry accept|reject|status", "anonymous product analytics opt-in"},
-	})
-	writeUsageSection(writer, style, "Hub", []usageLine{
-		{"doppels publish capability/<name>", "list Capability+Recipe (--yes)"},
-		{"doppels unpublish capability/<name>", "unlist; URL stays unpublished"},
-		{"doppels install @org/name[@ver]", "pin under .doppels/modules/"},
-		{"doppels fork @org/name", "copy YAML into capabilities/ + recipes/"},
+	writeUsageSection(writer, style, "Tooling", []usageLine{
+		{"doppels update", "update to the latest release"},
+		{"doppels telemetry accept|reject|status", "anonymous product analytics"},
+		{"doppels experimental on|off|status", "enable preview features"},
 	})
 
-	fmt.Fprintln(writer, style.dim("Most commands accept --json.  doppels <command> --help for details."))
+	if app.experimentalEnabled() {
+		writeUsageSectionDimTitle(writer, style, "Preview · Cloud", []usageLine{
+			{"doppels share capability/<name>[@ver]", "create share link (--input · --yes)"},
+			{"doppels listen", "fulfill incoming Requests"},
+			{"doppels login|logout|whoami", "device login"},
+			{"doppels organizations|orgs [list]", "cloud Orgs"},
+			{"doppels org use · space use", "select Org / Space"},
+			{"doppels context [show]", "current binding"},
+			{"doppels preview|apply [-f …]", "reconcile Space with cloud"},
+			{"doppels publish capability/<name>", "list on Hub (--yes)"},
+			{"doppels unpublish capability/<name>", "unlist from Hub"},
+			{"doppels install @org/name[@ver]", "pin from Hub"},
+			{"doppels fork @org/name", "copy into local tree"},
+		})
+	}
+
+	fmt.Fprintln(writer, style.dim("Most commands accept --json.  doppels <cmd> --help for details."))
 	fmt.Fprintln(writer)
 }
 
 type usageLine struct {
 	cmd  string
 	hint string
+}
+
+func writeUsageSectionDimTitle(writer io.Writer, style termStyle, title string, lines []usageLine) {
+	fmt.Fprintln(writer, style.dim(title))
+	const cmdWidth = 42
+	for _, line := range lines {
+		cmd := "  " + line.cmd
+		pad := cmdWidth - visibleLen(cmd)
+		if pad < 2 {
+			pad = 2
+		}
+		fmt.Fprintf(writer, "%s%s%s\n", cmd, strings.Repeat(" ", pad), style.dim(line.hint))
+	}
+	fmt.Fprintln(writer)
 }
 
 func writeUsageSection(writer io.Writer, style termStyle, title string, lines []usageLine) {

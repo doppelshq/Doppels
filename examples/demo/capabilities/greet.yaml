@@ -1,0 +1,22 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: greet
+  version: 1.0.0
+  displayName: Greet a person
+  summary: Produce a greeting message. Instant — no sleep.
+  impact: low
+  tags: [demo]
+
+inputs:
+  name:
+    type: string
+    description: Person to greet.
+    placeholder: "e.g. Alice"
+    required: true
+
+outputs:
+  message:
+    type: string
+    description: Generated greeting.
