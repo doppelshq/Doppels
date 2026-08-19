@@ -29,6 +29,10 @@
       "properties": {
         "timeout": { "$ref": "#/$defs/duration" },
         "approval": { "enum": ["never", "required"] },
+        "shell": {
+          "description": "Default shell for all steps. Overridden per-step by run.shell.",
+          "enum": ["bash", "sh"]
+        },
         "workingDirectory": {
           "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
         },
@@ -161,6 +165,12 @@
           "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
         },
         "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "condition": {
+          "description": "Simple boolean expression. Step is skipped when it evaluates to false. Supports {{ inputs.key }} and {{ steps.id.output }} references with ==, !=, and string literals.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
         "approval": { "enum": ["never", "required"] },
         "workingDirectory": {
           "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/relativePath"
@@ -233,8 +243,26 @@
         "$ref": "https://doppels.so/schemas/v1alpha1/common.schema.json#/$defs/identifier"
       },
       "additionalProperties": {
-        "type": "string",
-        "pattern": "^\\{\\{\\s*steps\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\s*\\}\\}$"
+        "oneOf": [
+          {
+            "description": "Short form: step output reference.",
+            "type": "string",
+            "pattern": "^\\{\\{\\s*steps\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\s*\\}\\}$"
+          },
+          {
+            "description": "Long form: step output reference with human-readable description.",
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["from"],
+            "properties": {
+              "from": {
+                "type": "string",
+                "pattern": "^\\{\\{\\s*steps\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\.[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*\\s*\\}\\}$"
+              },
+              "description": { "type": "string", "minLength": 1, "maxLength": 500 }
+            }
+          }
+        ]
       }
     }
   }

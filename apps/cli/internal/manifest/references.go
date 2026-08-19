@@ -5,7 +5,7 @@ package manifest
 // the root file, and never depends on a consumer checkout containing schemas.
 const (
 	CapabilitySchemaID     = "https://doppels.so/schemas/v1alpha1/capability.schema.json"
-	CapabilitySchemaSHA256 = "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+	CapabilitySchemaSHA256 = "531ff668bef1930d271f98ddd4d53484dde28b7e3b770df009bb580d1e93967a"
 	RecipeSchemaID         = "https://doppels.so/schemas/v1alpha1/recipe.schema.json"
-	RecipeSchemaSHA256     = "5a0a4e86be1c5b4589e12d5851a5bef8c362814a199a4b8e3a4fad523a232f0f"
+	RecipeSchemaSHA256     = "14cb3191c7ba24b7895ad4f52eb57531a3fe76b4fe8c855eaf1246d28148fa66"
 )
