@@ -5,7 +5,7 @@ metadata:
   name: greet
   version: 1.0.0
   displayName: Greet a person
-  summary: Produce a greeting message. Instant — no sleep.
+  summary: Produce a greeting message.
   impact: low
   tags: [demo]
 

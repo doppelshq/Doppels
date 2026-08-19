@@ -31,13 +31,12 @@ func testApp(root string) (*App, *bytes.Buffer, *bytes.Buffer) {
 	}, stdout, stderr
 }
 
+// writeManifest writes a YAML file under .doppels/<directory>/<name> and
+// ensures the .doppels marker directory exists so FindRoot succeeds.
 func writeManifest(t *testing.T, root, directory, name, value string) string {
 	t.Helper()
-	path := filepath.Join(root, directory, name)
+	path := filepath.Join(root, ".doppels", directory, name)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(root, ".doppels"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte(value), 0o600); err != nil {
@@ -106,16 +105,13 @@ func TestInitValidateAndDescribe(t *testing.T) {
 	if code := app.Run([]string{"init", "platform"}); code != ExitSuccess {
 		t.Fatalf("init platform exit = %d, stderr = %s", code, stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(root, "capabilities")); err != nil {
-		t.Fatal(err)
+	doppelsDir := filepath.Join(root, ".doppels")
+	for _, sub := range []string{"capabilities", "recipes"} {
+		if _, err := os.Stat(filepath.Join(doppelsDir, sub)); err != nil {
+			t.Fatalf("missing .doppels/%s: %v", sub, err)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(root, "recipes")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, ".doppels")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(root, "doppels.platform.yaml")); err != nil {
+	if _, err := os.Stat(filepath.Join(doppelsDir, "platform.space.yaml")); err != nil {
 		t.Fatal(err)
 	}
 	stdout.Reset()

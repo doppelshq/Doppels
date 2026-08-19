@@ -2,11 +2,12 @@ apiVersion: doppels.so/v1alpha1
 kind: Recipe
 
 metadata:
-  name: greet-with-approval
+  name: greet
   version: 1.0.0
-  displayName: Greet with prior approval
-  summary: Same as greet-with-shell, but the Step requires HITL approval in the CLI.
+  displayName: Greet (instant)
+  summary: Instant greeting.
   impact: low
+  author: doppelshq
 
 provides: [greet]
 runtime: shell
@@ -15,7 +16,7 @@ requires:
   commands: [sh]
 
 defaults:
-  approval: required
+  approval: never
 
 steps:
   - id: greet
@@ -25,15 +26,11 @@ steps:
     run:
       shell: sh
       script: |
-        sleep 10
         export MESSAGE="Hello, $NAME"
-        printf '%s\n' "$MESSAGE" > receipt.txt
+        printf '%s\n' "$MESSAGE"
     produces:
       message:
         env: MESSAGE
-      receipt:
-        file: receipt.txt
 
 returns:
   message: "{{ steps.greet.message }}"
-  receipt: "{{ steps.greet.receipt }}"

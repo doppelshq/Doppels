@@ -1,0 +1,39 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: greet-with-approval
+  version: 1.0.0
+  displayName: Greet with prior approval
+  summary: Same as greet-with-shell, but requires HITL approval before executing.
+  impact: low
+
+provides: [greet]
+runtime: shell
+
+requires:
+  commands: [sh]
+
+defaults:
+  approval: required
+
+steps:
+  - id: greet
+    name: Generate greeting
+    env:
+      NAME: "{{ inputs.name }}"
+    run:
+      shell: sh
+      script: |
+        sleep 10
+        export MESSAGE="Hello, $NAME"
+        printf '%s\n' "$MESSAGE" > receipt.txt
+    produces:
+      message:
+        env: MESSAGE
+      receipt:
+        file: receipt.txt
+
+returns:
+  message: "{{ steps.greet.message }}"
+  receipt: "{{ steps.greet.receipt }}"

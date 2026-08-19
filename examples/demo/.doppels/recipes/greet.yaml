@@ -5,7 +5,7 @@ metadata:
   name: greet
   version: 1.0.0
   displayName: Greet (instant)
-  summary: Instant greeting — no sleep, suitable for demos and CI.
+  summary: Instant greeting.
   impact: low
   author: doppelshq
 

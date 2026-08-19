@@ -5,7 +5,7 @@ metadata:
   name: echo
   version: 1.0.0
   displayName: Echo input
-  summary: Returns the input as-is. Useful for testing CLI plumbing.
+  summary: Returns the input as-is.
   impact: low
   tags: [dev, test]
 
