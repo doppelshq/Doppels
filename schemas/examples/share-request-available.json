@@ -18,7 +18,7 @@
       "manifestSha256": "3e8485b6d578eaba3588833e2353adf642432266600e831c7d32e9c8727b1810",
       "schema": {
         "id": "https://doppels.so/schemas/v1alpha1/capability.schema.json",
-        "sha256": "ff3f2d681a8c724674d040a9e948fbb88710cabcbc37df46092f07f7324959d8"
+        "sha256": "97a290a319a56263c5717316f6bcf630d7021961010c18a3dc8c73047e5de367"
       }
     },
     "inputs": {
