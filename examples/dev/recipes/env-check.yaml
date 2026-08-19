@@ -1,0 +1,45 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: env-check
+  version: 1.0.0
+  displayName: Environment check (shell)
+  summary: Checks host env var presence. Tests requires.hostEnv wiring.
+  impact: low
+  author: doppelshq
+
+provides: [env-check]
+runtime: shell
+
+requires:
+  commands: [sh]
+
+defaults:
+  approval: never
+
+steps:
+  - id: check
+    name: Check variable
+    env:
+      VAR_NAME: "{{ inputs.var_name }}"
+    run:
+      shell: sh
+      script: |
+        VALUE=$(printenv "$VAR_NAME" 2>/dev/null || true)
+        if [ -n "$VALUE" ]; then
+          export PRESENT=true
+          export PREVIEW=$(printf '%s' "$VALUE" | cut -c1-20)
+        else
+          export PRESENT=false
+          export PREVIEW=""
+        fi
+    produces:
+      present:
+        env: PRESENT
+      value_preview:
+        env: PREVIEW
+
+returns:
+  present: "{{ steps.check.present }}"
+  value_preview: "{{ steps.check.value_preview }}"

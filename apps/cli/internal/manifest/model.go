@@ -27,6 +27,7 @@ type Metadata struct {
 	Description string            `yaml:"description,omitempty" json:"description,omitempty"`
 	Impact      string            `yaml:"impact,omitempty" json:"impact,omitempty"`
 	Tags        []string          `yaml:"tags,omitempty" json:"tags,omitempty"`
+	Author      string            `yaml:"author,omitempty" json:"author,omitempty"`
 	Labels      map[string]string `yaml:"labels,omitempty" json:"labels,omitempty"`
 	Annotations map[string]string `yaml:"annotations,omitempty" json:"annotations,omitempty"`
 }
@@ -80,6 +81,8 @@ func (c *Capability) Meta() Metadata { return c.Metadata }
 type InputContract struct {
 	Type        string `yaml:"type" json:"type"`
 	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+	Placeholder string `yaml:"placeholder,omitempty" json:"placeholder,omitempty"`
+	Sensitive   bool   `yaml:"sensitive,omitempty" json:"sensitive,omitempty"`
 	Required    bool   `yaml:"required,omitempty" json:"required,omitempty"`
 	Default     any    `yaml:"default,omitempty" json:"default,omitempty"`
 	Enum        []any  `yaml:"enum,omitempty" json:"enum,omitempty"`
@@ -90,7 +93,10 @@ func (c *InputContract) UnmarshalYAML(node *yaml.Node) error {
 	if node.Kind != yaml.MappingNode {
 		return fmt.Errorf("input contract must be an object")
 	}
-	allowed := map[string]bool{"type": true, "description": true, "required": true, "default": true, "enum": true}
+	allowed := map[string]bool{
+		"type": true, "description": true, "placeholder": true,
+		"sensitive": true, "required": true, "default": true, "enum": true,
+	}
 	for i := 0; i < len(node.Content); i += 2 {
 		name := node.Content[i].Value
 		if !allowed[name] {
@@ -121,7 +127,60 @@ type Recipe struct {
 	Steps     []Step                      `yaml:"steps,omitempty" json:"steps,omitempty"`
 	Procedure *Procedure                  `yaml:"procedure,omitempty" json:"procedure,omitempty"`
 	Evidence  map[string]Evidence         `yaml:"evidence,omitempty" json:"evidence,omitempty"`
-	Returns   map[string]string           `yaml:"returns,omitempty" json:"returns,omitempty"`
+	Returns   map[string]ReturnValue      `yaml:"returns,omitempty" json:"returns,omitempty"`
+}
+
+// ReturnValue is the oneOf value in recipe.returns: either a short string
+// reference ("{{ steps.x.y }}") or a long-form object with From + Description.
+type ReturnValue struct {
+	From        string `yaml:"from,omitempty" json:"from,omitempty"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+}
+
+// Ref returns the step output reference regardless of form.
+func (r ReturnValue) Ref() string {
+	if r.From != "" {
+		return r.From
+	}
+	return ""
+}
+
+func (r *ReturnValue) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		r.From = node.Value
+		return nil
+	case yaml.MappingNode:
+		allowed := map[string]bool{"from": true, "description": true}
+		for i := 0; i < len(node.Content); i += 2 {
+			name := node.Content[i].Value
+			if !allowed[name] {
+				return fmt.Errorf("field %q not found in return value", name)
+			}
+		}
+		type raw ReturnValue
+		return node.Decode((*raw)(r))
+	default:
+		return fmt.Errorf("return value must be a string reference or an object with 'from'")
+	}
+}
+
+// ReturnsFrom builds a map[string]ReturnValue from a plain string map.
+// Convenience for tests and generated code.
+func ReturnsFrom(m map[string]string) map[string]ReturnValue {
+	out := make(map[string]ReturnValue, len(m))
+	for k, v := range m {
+		out[k] = ReturnValue{From: v}
+	}
+	return out
+}
+
+func (r ReturnValue) MarshalJSON() ([]byte, error) {
+	if r.Description == "" {
+		return json.Marshal(r.From)
+	}
+	type obj ReturnValue
+	return json.Marshal(obj(r))
 }
 
 func (r *Recipe) Type() TypeMeta { return r.TypeMeta }
@@ -227,6 +286,7 @@ func (v EnvironmentValue) MarshalJSON() ([]byte, error) {
 type Defaults struct {
 	Timeout               string `yaml:"timeout,omitempty" json:"timeout,omitempty"`
 	Approval              string `yaml:"approval,omitempty" json:"approval,omitempty"`
+	Shell                 string `yaml:"shell,omitempty" json:"shell,omitempty"`
 	WorkingDirectory      string `yaml:"workingDirectory,omitempty" json:"workingDirectory,omitempty"`
 	ArtifactRetentionDays *int   `yaml:"artifactRetentionDays,omitempty" json:"artifactRetentionDays,omitempty"`
 }
@@ -252,6 +312,7 @@ type Evidence struct {
 type Step struct {
 	ID               string                      `yaml:"id" json:"id"`
 	Name             string                      `yaml:"name" json:"name"`
+	Condition        string                      `yaml:"condition,omitempty" json:"condition,omitempty"`
 	Approval         string                      `yaml:"approval,omitempty" json:"approval,omitempty"`
 	WorkingDirectory string                      `yaml:"workingDirectory,omitempty" json:"workingDirectory,omitempty"`
 	Env              map[string]EnvironmentValue `yaml:"env,omitempty" json:"env,omitempty"`

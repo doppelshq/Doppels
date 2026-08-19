@@ -110,7 +110,8 @@ func recipeSemanticDiagnostics(definition RecipeDefinition, catalog *Catalog, se
 		context.results[step.ID] = step.Produces
 	}
 
-	for name, expression := range recipe.Returns {
+	for name, returnVal := range recipe.Returns {
+		expression := returnVal.Ref()
 		field := "returns." + name
 		diagnostics = append(diagnostics, templateDiagnostics(source, field, expression, context)...)
 		output, exists := outputs[name]

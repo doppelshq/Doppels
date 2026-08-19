@@ -97,10 +97,11 @@ func materializeShellReturns(capability *manifest.Capability, recipe *manifest.R
 	returns := make(map[string]any, len(capability.Outputs))
 	declaredMedia := map[string]string{}
 	for name, contract := range capability.Outputs {
-		expression, exists := recipe.Returns[name]
+		returnVal, exists := recipe.Returns[name]
 		if !exists {
 			return nil, fmt.Errorf("Recipe does not return Capability output %q", name)
 		}
+		expression := returnVal.Ref()
 		value, err := resolveExact(expression, available)
 		if err != nil {
 			return nil, fmt.Errorf("return %q: %w", name, err)

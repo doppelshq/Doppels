@@ -1,0 +1,22 @@
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: echo
+  version: 1.0.0
+  displayName: Echo input
+  summary: Returns the input as-is. Useful for testing CLI plumbing.
+  impact: low
+  tags: [dev, test]
+
+inputs:
+  text:
+    type: string
+    description: Text to echo back.
+    placeholder: "any string"
+    required: true
+
+outputs:
+  result:
+    type: string
+    description: The echoed text.

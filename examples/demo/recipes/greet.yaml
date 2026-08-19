@@ -1,0 +1,36 @@
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: greet
+  version: 1.0.0
+  displayName: Greet (instant)
+  summary: Instant greeting — no sleep, suitable for demos and CI.
+  impact: low
+  author: doppelshq
+
+provides: [greet]
+runtime: shell
+
+requires:
+  commands: [sh]
+
+defaults:
+  approval: never
+
+steps:
+  - id: greet
+    name: Generate greeting
+    env:
+      NAME: "{{ inputs.name }}"
+    run:
+      shell: sh
+      script: |
+        export MESSAGE="Hello, $NAME"
+        printf '%s\n' "$MESSAGE"
+    produces:
+      message:
+        env: MESSAGE
+
+returns:
+  message: "{{ steps.greet.message }}"
