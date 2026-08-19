@@ -32,7 +32,7 @@ Coding agents are great at discovery and terrible at memory. Scripts in chat die
 The diagram above is the whole product:
 
 1. **Freeze once** — the agent (or you) captures the working path as YAML. That session costs tokens once (`$0.54` in the example). There is no `doppels freeze` generator; the [skill](skills/doppel-freeze/SKILL.md) writes the files by hand.
-2. **Saved on your Git** — a **Capability** is the public contract (inputs / outputs). A **Recipe** is how it runs on *your* machine (Steps, shell, `requires`, `returns`). Both are plain YAML in `capabilities/` and `recipes/`. Review them in a PR like any other source.
+2. **Saved on your Git** — a **Capability** is the public contract (inputs / outputs). A **Recipe** is how it runs on *your* machine (Steps, shell, `requires`, `returns`). Both are plain YAML inside `.doppels/`. Review them in a PR like any other source.
 3. **Replay for $0** — `doppels run` executes locally on your Node. Same inputs → same Steps → auditable **Run** under `.doppels/` (gitignored). Credentials stay where they already are (`aws`, `gcloud`, `psql`, SSH, VPN). No model. No re-prompt.
 
 > Pre-alpha. Tagged builds are prereleases (`v0.0.0-dev.*`), not a product launch.
@@ -86,22 +86,55 @@ Details: [freeze guide](https://docs.doppels.so/guides/freeze-with-agent) · [`s
 ## Run locally
 
 ```console
-doppels spaces init
+# 1. Create a local Space (default name: private)
+mkdir my-project && cd my-project
+doppels init
+
+# 2. Add Capabilities and Recipes, then validate
 doppels validate
+
+# 3. Run a Capability — auto-approve steps
 doppels run capability/greet --input name=Ada --yes
+
+# 4. Inspect history
 doppels runs list
 ```
 
-Most commands take `--json`. Copy-paste Space in [`examples/quickstart`](examples/quickstart) (`greet`, `release-pipeline`, and a Capability with no Recipe). Schemas: [`schemas/`](schemas/). CLI reference: [docs](https://docs.doppels.so/reference/cli).
+Or try the ready-made demo Space:
 
-## What’s in this repo
+```console
+cd examples/demo
+doppels validate
+doppels run capability/greet --input name=Ada --yes
+```
+
+Schemas live in [`schemas/`](schemas/). CLI reference: [docs](https://docs.doppels.so/reference/cli).
+
+## Commands (alpha)
+
+| Command | What it does |
+|---|---|
+| `doppels init [name]` | Create working tree + Space manifest (default: `private`) |
+| `doppels validate` | Check all Capability and Recipe manifests |
+| `doppels run [cap] [--yes]` | Execute a Recipe locally; `--yes` skips approval prompts |
+| `doppels describe cap/name` | Inspect a Capability or Recipe |
+| `doppels caps / recipes` | List local definitions |
+| `doppels runs list` | Run history |
+| `doppels update` | Update the binary from GitHub Releases |
+| `doppels experimental on` | Enable cloud preview features |
+
+Cloud commands (`share`, `login`, `apply`, …) require `doppels experimental on`.
+
+## What's in this repo
 
 ```text
 apps/cli/              Go runtime (validate, run, local history)
 schemas/               JSON Schema contracts (source of truth)
 skills/doppel-freeze/  Agent skill for Cursor / Claude / Codex
 skills/doppel-use/     Draft — blocked on MCP
-examples/quickstart/   Local Space you can run offline
+examples/demo/         Instant demo Space (no sleep, CI-friendly)
+examples/dev/          Sandbox Space for CLI development
+examples/quickstart/   Full reference Space (approval, manual, pipeline)
 docs/images/           README diagram (Session → Capability → Run)
 install.sh             curl installer
 ```

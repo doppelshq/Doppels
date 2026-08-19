@@ -15,16 +15,22 @@ func TestInitFindRootAndDiscover(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(paths) != 3 {
-		t.Fatalf("Init() returned %d paths", len(paths))
+		t.Fatalf("Init() returned %d paths, want 3", len(paths))
 	}
+	doppelsDir := filepath.Join(root, Directory)
 	for _, want := range []string{
-		filepath.Join(root, "capabilities"),
-		filepath.Join(root, "recipes"),
-		filepath.Join(root, Directory),
+		filepath.Join(doppelsDir, "capabilities"),
+		filepath.Join(doppelsDir, "recipes"),
+		filepath.Join(doppelsDir, "runs"),
 	} {
 		if _, err := os.Stat(want); err != nil {
 			t.Fatalf("missing %s: %v", want, err)
 		}
+	}
+	// .gitignore must exist
+	gi := filepath.Join(doppelsDir, ".gitignore")
+	if _, err := os.Stat(gi); err != nil {
+		t.Fatalf("missing .doppels/.gitignore: %v", err)
 	}
 
 	nested := filepath.Join(root, "src", "nested")
@@ -36,8 +42,8 @@ func TestInitFindRootAndDiscover(t *testing.T) {
 		t.Fatalf("FindRoot() = %q, %v; want %q", found, err, root)
 	}
 
-	capability := filepath.Join(root, "capabilities", "a.yaml")
-	recipe := filepath.Join(root, "recipes", "nested", "b.yml")
+	capability := filepath.Join(doppelsDir, "capabilities", "a.yaml")
+	recipe := filepath.Join(doppelsDir, "recipes", "nested", "b.yml")
 	if err := os.WriteFile(capability, []byte("kind: Capability"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +53,7 @@ func TestInitFindRootAndDiscover(t *testing.T) {
 	if err := os.WriteFile(recipe, []byte("kind: Recipe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "recipes", "README.md"), []byte("ignored"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(doppelsDir, "recipes", "README.md"), []byte("ignored"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	files, err := Discover(root)
@@ -71,11 +77,12 @@ func TestDiscoverUsesSpaceDiscoveryPaths(t *testing.T) {
 	if err := os.WriteFile(sharedCap, []byte("kind: Capability"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	defaultCap := filepath.Join(root, "capabilities", "default.yaml")
+	defaultCap := filepath.Join(root, Directory, "capabilities", "default.yaml")
 	if err := os.WriteFile(defaultCap, []byte("kind: Capability"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, "doppels.platform.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+	// Space manifest inside .doppels/
+	if err := os.WriteFile(filepath.Join(root, Directory, "platform.space.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
 kind: Space
 metadata:
   name: platform
@@ -83,7 +90,7 @@ discovery:
   capabilities:
     - shared/capabilities
   recipes:
-    - recipes
+    - .doppels/recipes
 `), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +148,7 @@ func TestWriteSpaceManifest(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("WriteSpaceManifest = %q, %t, %v", path, created, err)
 	}
-	wanted := filepath.Join(root, "doppels.platform.yaml")
+	wanted := filepath.Join(root, Directory, "platform.space.yaml")
 	if path != wanted {
 		t.Fatalf("path = %q, want %q", path, wanted)
 	}

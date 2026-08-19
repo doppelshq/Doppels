@@ -14,14 +14,15 @@ func TestInitDefaultCreatesLocalSpace(t *testing.T) {
 	if code := app.Run([]string{"init"}); code != ExitSuccess {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
-	for _, sub := range []string{"capabilities", "recipes", ".doppels"} {
-		if _, err := os.Stat(filepath.Join(root, sub)); err != nil {
-			t.Fatalf("missing %s: %v", sub, err)
+	doppelsDir := filepath.Join(root, ".doppels")
+	for _, sub := range []string{"capabilities", "recipes", "runs"} {
+		if _, err := os.Stat(filepath.Join(doppelsDir, sub)); err != nil {
+			t.Fatalf("missing .doppels/%s: %v", sub, err)
 		}
 	}
-	manifest := filepath.Join(root, "doppels.private.yaml")
+	manifest := filepath.Join(doppelsDir, "private.space.yaml")
 	if _, err := os.Stat(manifest); err != nil {
-		t.Fatalf("missing private manifest: %v", err)
+		t.Fatalf("missing .doppels/private.yaml: %v", err)
 	}
 	out := stdout.String()
 	if !strings.Contains(out, "Root") || !strings.Contains(out, root) {
@@ -38,8 +39,8 @@ func TestInitExplicitName(t *testing.T) {
 	if code := app.Run([]string{"init", "platform"}); code != ExitSuccess {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
-	if _, err := os.Stat(filepath.Join(root, "doppels.platform.yaml")); err != nil {
-		t.Fatalf("missing platform manifest: %v", err)
+	if _, err := os.Stat(filepath.Join(root, ".doppels", "platform.space.yaml")); err != nil {
+		t.Fatalf("missing .doppels/platform.yaml: %v", err)
 	}
 	if !strings.Contains(stdout.String(), "platform") {
 		t.Fatalf("stdout missing space name: %q", stdout.String())

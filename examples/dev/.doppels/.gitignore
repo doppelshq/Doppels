@@ -1,0 +1,3 @@
+# Doppels runtime state — do not commit
+runs/
+*.lock

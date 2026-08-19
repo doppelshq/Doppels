@@ -4,6 +4,6 @@ kind: Space
 metadata:
   name: platform
   displayName: Platform
-  summary: Quickstart local de Doppels.
+  summary: Quickstart Space for Doppels.
   labels:
     environment: development

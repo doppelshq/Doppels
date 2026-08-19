@@ -5,7 +5,7 @@ metadata:
   name: release-pipeline
   version: 1.0.0
   displayName: Release pipeline demo
-  summary: Multi-step Capability for timeline demos (prepare → build → test → ship).
+  summary: Multi-step pipeline (prepare → build → test → ship).
   impact: low
   tags: [quickstart, demo]
 

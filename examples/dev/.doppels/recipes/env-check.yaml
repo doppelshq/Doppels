@@ -5,7 +5,7 @@ metadata:
   name: env-check
   version: 1.0.0
   displayName: Environment check (shell)
-  summary: Checks host env var presence. Tests requires.hostEnv wiring.
+  summary: Checks host env var presence.
   impact: low
   author: doppelshq
 

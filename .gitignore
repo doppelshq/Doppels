@@ -7,5 +7,8 @@ node_modules/
 
 /bin/
 /dist/
-**/.doppels/
-/examples/quickstart/receipt.txt
+**/.doppels/runs/
+**/.doppels/*.lock
+**/.doppels/runs.db
+examples/*/receipt.txt
+examples/*/pipeline.log

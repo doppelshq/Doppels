@@ -5,7 +5,7 @@ metadata:
   name: echo
   version: 1.0.0
   displayName: Echo (shell)
-  summary: Shell echo — validates step execution, env wiring and returns.
+  summary: Shell echo — validates step execution and returns.
   impact: low
   author: doppelshq
 
