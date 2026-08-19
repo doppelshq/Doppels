@@ -531,6 +531,16 @@ func (app *App) environment() []string {
 	return os.Environ()
 }
 
+func (app *App) experimentalEnabled() bool {
+	for _, entry := range app.environment() {
+		name, value, ok := strings.Cut(entry, "=")
+		if ok && name == "DOPPELS_EXPERIMENTAL" && value == "1" {
+			return true
+		}
+	}
+	return false
+}
+
 func (app *App) localIdentity() execution.ActorReference {
 	values := map[string]string{}
 	for _, entry := range app.environment() {

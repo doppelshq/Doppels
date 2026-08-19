@@ -62,7 +62,11 @@ func (app *App) Run(arguments []string) int {
 		app.usage(app.Stdout)
 		return ExitSuccess
 	case "version", "-v", "--version":
-		fmt.Fprintf(app.Stdout, "doppels %s\n", version.Version)
+		if app.experimentalEnabled() {
+			fmt.Fprintf(app.Stdout, "doppels %s (experimental)\n", version.Version)
+		} else {
+			fmt.Fprintf(app.Stdout, "doppels %s\n", version.Version)
+		}
 		return ExitSuccess
 	case "init":
 		return app.runInit(arguments[1:])
@@ -124,7 +128,11 @@ func (app *App) Run(arguments []string) int {
 func (app *App) usage(writer io.Writer) {
 	style := newTermStyle(writer)
 	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, style.bold("Doppels"))
+	header := style.bold("Doppels") + style.dim("  "+version.Version)
+	if app.experimentalEnabled() {
+		header += "  " + style.bold("[experimental]")
+	}
+	fmt.Fprintln(writer, header)
 	fmt.Fprintln(writer, style.dim("  Local-first execution control plane"))
 	fmt.Fprintln(writer)
 
