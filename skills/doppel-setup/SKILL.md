@@ -1,9 +1,10 @@
 ---
 name: doppel-setup
 description: >-
-  Onboards Doppels on this machine: install the CLI, install doppel-freeze,
-  run a 10-second smoke freeze (ping→pong). Use when the user asks to set up
-  Doppels, install Doppels, or paste a setup prompt that references doppel-setup.
+  Onboards Doppels on this machine: install the CLI, run a ping→pong smoke
+  Capability/Recipe, then install doppel-freeze for later. Use when the user
+  asks to set up Doppels, install Doppels, or paste a setup prompt that
+  references doppel-setup.
 ---
 
 # doppel-setup
@@ -48,10 +49,10 @@ Do not invent other installers. Do not download random binaries.
 In the current working directory:
 
 ```bash
-doppels init
+doppels init --json
 ```
 
-Current CLI writes the Space and continues. Do not wait for a demo-examples prompt.
+`--json` skips the interactive demo-examples prompt. Do not offer demos unless the user asks.
 
 Write these two files exactly. Do **not** load `doppel-freeze` for this smoke. Do **not** ask what to capture. Do **not** ask confirmation.
 
@@ -118,7 +119,6 @@ returns:
 Then:
 
 ```bash
-printf 'pong\n'
 doppels validate
 doppels run capability/ping --yes
 ```
@@ -131,17 +131,15 @@ Expect `Returns message pong`. If freeze skill instructions conflict, these file
 npx skills add doppelshq/doppels --skill doppel-freeze -g -y
 ```
 
-If the CLI reports no matching skill, copy from this repo into the harness skill dir:
+If `npx skills` fails or reports no matching skill: stop and tell the user to install manually with that command (or open the skills CLI prompts for their harness). Do **not** invent alternate install paths unless the user asks.
+
+Optional last resort only if the user explicitly wants a manual copy from this repo:
 
 ```bash
 git clone --depth 1 --filter=blob:none --sparse https://github.com/doppelshq/doppels.git /tmp/doppels
 git -C /tmp/doppels sparse-checkout set skills/doppel-freeze
-cp -R /tmp/doppels/skills/doppel-freeze ~/.agents/skills/doppel-freeze
+# Copy into the harness skill directory the user confirms (paths vary by agent).
 ```
-
-Also copy to `~/.cursor/skills/doppel-freeze` when the harness is Cursor.
-
-If the harness needs a different agent flag, follow the skills CLI prompts.
 
 ## 4. Confirm ready
 
