@@ -34,15 +34,16 @@ Tras un tag `v*`: binarios en
 ## Space local
 
 ```bash
-doppels spaces init
+doppels init
 ```
 
 ```text
 .
-├── capabilities/
-├── recipes/
-├── doppels.<space>.yaml
-└── .doppels/              # runtime only
+└── .doppels/
+    ├── capabilities/      # commit these
+    ├── recipes/           # commit these
+    ├── <space>.space.yaml
+    └── runs/              # gitignored runtime
 ```
 
 ## Comandos
@@ -61,4 +62,4 @@ doppels <command> --help
 
 `--json` en la mayoría de comandos.
 
-Manifests sueltos: `doppels validate -f ./capabilities/<name>.yaml`
+Manifests sueltos: `doppels validate -f .doppels/capabilities/<name>.yaml`

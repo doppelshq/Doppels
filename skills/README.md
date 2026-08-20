@@ -16,7 +16,7 @@ Agent skills for Doppels, installable via
 Paste into Cursor, Claude Code, Codex, or similar:
 
 ```text
-Install the doppel-setup skill from github.com/doppelshq/doppels and use it to set up Doppels on this machine following best practices.
+Install the doppel-setup skill from github.com/doppelshq/doppels and use it.
 ```
 
 ## Install via skills CLI

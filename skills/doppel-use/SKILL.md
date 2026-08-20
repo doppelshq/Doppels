@@ -1,6 +1,9 @@
 ---
 name: doppel-use
-description: Habilita al agente para consultar, ejecutar o crear Capabilities dentro del scope local o del Space activo, con auditabilidad y aprobación humana. PLACEHOLDER: requiere MCP server de Doppel, todavía no implementado.
+description: >-
+  Habilita al agente para consultar, ejecutar o crear Capabilities dentro
+  del scope local o del Space activo, con auditabilidad y aprobación humana.
+  PLACEHOLDER: requiere MCP server de Doppel, todavía no implementado.
 status: draft
 ---
 

@@ -1,6 +1,13 @@
 ---
 name: doppel-freeze
-description: Convierte la sesión actual del agente en una Capability + Recipe local determinista. Asume que el agente no conoce Doppel y lo guía desde instalación hasta manifest validado. Usar SOLO cuando el usuario pida captura de forma explícita: "doppel freeze", "congelar esto", "guardar este proceso", "hazlo repetible" o "cómo lo vuelvo a ejecutar". No activar por defecto en cada tarea operativa. No preguntar al final de cada operación si persistir.
+description: >-
+  Convierte la sesión actual del agente en una Capability + Recipe local
+  determinista. Asume que el agente no conoce Doppel y lo guía desde
+  instalación hasta manifest validado. Usar SOLO cuando el usuario pida
+  captura de forma explícita: "doppel freeze", "congelar esto", "guardar
+  este proceso", "hazlo repetible" o "cómo lo vuelvo a ejecutar". No
+  activar por defecto en cada tarea operativa. No preguntar al final de
+  cada operación si persistir.
 requires:
   doppels: ">=0.1.0"
 ---
@@ -31,7 +38,7 @@ de instalación de `references/cli-quickstart.md`.
 Si no existe `.doppels/` en el directorio actual:
 
 ```bash
-doppels spaces init
+doppels init
 ```
 
 Si existe:
@@ -85,8 +92,8 @@ nombre propuesto para que pueda ajustarlo antes de persistir.
 Tras cada cambio significativo en el YAML:
 
 ```bash
-doppels validate ./capabilities/<name>.yaml
-doppels validate ./recipes/<name>.yaml   # si hay Recipe
+doppels validate .doppels/capabilities/<name>.yaml
+doppels validate .doppels/recipes/<name>.yaml   # si hay Recipe
 ```
 
 Durante pruebas, ejecutar cuando sea seguro (muta el host):
