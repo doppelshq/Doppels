@@ -35,7 +35,7 @@ release:
   prerelease: auto
   name_template: "{{.Tag}}"
 
-brews:
+homebrew_casks:
   - name: doppels
     repository:
       owner: doppelshq
@@ -46,11 +46,15 @@ brews:
       name: github-actions[bot]
       email: 41898282+github-actions[bot]@users.noreply.github.com
     commit_msg_template: "chore(brew): update doppels to {{ .Tag }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://doppels.so"
     description: "Freeze agent sessions into local deterministic recipes"
     license: "Apache-2.0"
-    install: |
-      bin.install "doppels"
-    test: |
-      assert_match version.to_s, shell_output("#{bin}/doppels --version")
+    binaries:
+      - doppels
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/doppels"]
+          end
