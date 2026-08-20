@@ -44,6 +44,8 @@ brew tap doppelshq/tap && brew trust doppelshq/tap && brew install --cask doppel
 
 Do not invent other installers. Do not download random binaries.
 
+**Windows:** use **WSL2**, open the Linux shell, then run the curl installer above. Native Windows is not supported (Recipes need a POSIX shell).
+
 ## 2. Smoke test (ping → pong)
 
 In the current working directory:

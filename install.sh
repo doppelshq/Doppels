@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
-# Install doppels CLI from GitHub Releases.
+# Install doppels CLI from GitHub Releases (macOS, Linux, Windows via WSL2).
 # Usage:
 #   curl -fsSL https://doppels.so/install.sh | sh
 #   curl -fsSL https://raw.githubusercontent.com/doppelshq/doppels/main/install.sh | sh
 #   DOPPELS_VERSION=v0.1.0-alpha.1 sh install.sh
+# Windows: install WSL2, open a Linux shell, then run the curl line above.
+# Native Windows (.exe / PowerShell) is not supported in alpha.
 set -euo pipefail
 
 REPO="${DOPPELS_REPO:-doppelshq/doppels}"
@@ -59,7 +61,12 @@ case "$arch" in
 esac
 case "$os" in
   linux | darwin) ;;
-  *) fail "unsupported OS: $os (need linux or darwin)" ;;
+  mingw* | msys* | cygwin*)
+    fail "native Windows is not supported — use WSL2, then: curl -fsSL https://doppels.so/install.sh | sh"
+    ;;
+  *)
+    fail "unsupported OS: $os (need linux, darwin, or Windows via WSL2)"
+    ;;
 esac
 
 resolve_version() {

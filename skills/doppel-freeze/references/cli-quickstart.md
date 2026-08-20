@@ -9,6 +9,8 @@ curl -fsSL https://doppels.so/install.sh | sh
 # o: brew tap doppelshq/tap && brew trust doppelshq/tap && brew install --cask doppels
 ```
 
+macOS / Linux nativo. Windows: **WSL2** + el mismo `curl | sh` dentro de la distro Linux. Sin `.exe` nativo en alpha.
+
 Desde fuente (mise):
 
 ```bash

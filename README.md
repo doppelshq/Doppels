@@ -49,6 +49,8 @@ curl -fsSL https://doppels.so/install.sh | sh
 
 Installs to `~/.local/bin/doppels`. Add that directory to `PATH` if needed. Pin a tag with `DOPPELS_VERSION=v0.0.0-dev.1`. Same script: [GitHub Releases](https://github.com/doppelshq/doppels/releases) / `install.sh`.
 
+Supports **macOS**, **Linux**, and **Windows via WSL2** (run the curl installer inside the Linux distro). Native Windows (`.exe` / PowerShell) is not supported in alpha — Recipes assume a POSIX shell.
+
 **Homebrew**
 
 ```console
