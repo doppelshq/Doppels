@@ -54,7 +54,7 @@ Installs to `~/.local/bin/doppels`. Add that directory to `PATH` if needed. Pin 
 ```console
 brew tap doppelshq/tap
 brew trust doppelshq/tap   # Homebrew 6+
-brew install doppels
+brew install --cask doppels
 ```
 
 **From source** ([mise](https://mise.jdx.dev))

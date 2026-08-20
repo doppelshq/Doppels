@@ -44,12 +44,12 @@ func (app *App) runUpdate(arguments []string) int {
 
 	if isManagedByBrew(executable) {
 		if *jsonOutput {
-			app.writeJSON(map[string]any{"status": "brew-managed", "hint": "brew upgrade doppelshq/tap/doppels"})
+			app.writeJSON(map[string]any{"status": "brew-managed", "hint": "brew upgrade --cask doppelshq/tap/doppels"})
 		} else {
 			style := newTermStyle(app.Stdout)
 			fmt.Fprintln(app.Stdout)
 			fmt.Fprintf(app.Stdout, "  %s  installed via Homebrew\n", style.field("Manager"))
-			fmt.Fprintf(app.Stdout, "  %s\n", style.dim("Run: brew upgrade doppelshq/tap/doppels"))
+			fmt.Fprintf(app.Stdout, "  %s\n", style.dim("Run: brew upgrade --cask doppelshq/tap/doppels"))
 			fmt.Fprintln(app.Stdout)
 		}
 		return ExitSuccess
@@ -230,7 +230,9 @@ func replaceExecutable(target, replacement string) error {
 }
 
 func isManagedByBrew(path string) bool {
-	return strings.Contains(path, "/Cellar/") || strings.Contains(path, "/homebrew/")
+	return strings.Contains(path, "/Cellar/") ||
+		strings.Contains(path, "/Caskroom/") ||
+		strings.Contains(path, "/homebrew/")
 }
 
 func (app *App) executable() (string, error) {
