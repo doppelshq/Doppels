@@ -14,31 +14,47 @@ requires:
 
 # doppel freeze
 
-Esta skill guía al agente para capturar una sesión de trabajo en una Capability
-y Recipe locales deterministas. No asume conocimiento previo de Doppel.
+Guía al agente para capturar una sesión en Capability + Recipe locales.
+No asume conocimiento previo de Doppel.
 
-**Cuándo activar (v1):** solo con petición explícita de captura, o si el
-usuario pregunta cómo repetir lo que acaba de funcionar (ofrecer freeze
-**una vez**). Nunca recipe-first. Nunca preguntar al cierre de cada tarea.
+**Cuándo activar (v1):** solo petición explícita de captura, o si el usuario
+pregunta cómo repetir lo que acaba de funcionar (ofrecer freeze **una vez**).
+Nunca recipe-first. Nunca preguntar al cierre de cada tarea.
+
+## Contrato mínimo (leer antes de escribir YAML)
+
+1. Copia el ejemplo **greet** en `references/examples/` (también embebido en
+   `references/manifest-anatomy.md`). Es capability + recipe válidos.
+2. Flujo de datos:
+   `inputs` → `step.env: VAR: "{{ inputs.x }}"` → `export OUT=…` →
+   `produces: { key: { env: OUT } }` → `returns: "{{ steps.id.key }}"`.
+3. Schemas reales:
+   https://raw.githubusercontent.com/doppelshq/doppels/main/schemas/capability.schema.json
+   https://raw.githubusercontent.com/doppelshq/doppels/main/schemas/recipe.schema.json
+   No existe `doppel schema …`. No uses `github.com/doppels/schemas`.
+4. Cwd del Run = raíz del Space (donde está `.doppels/`). `produces.file`
+   escribe ahí relativo — puede ensuciar el repo.
+
+Detalle: `references/manifest-anatomy.md` + `references/schema-discovery.md`.
 
 ## Flujo
 
 ### 1. Verificar entorno
 
 ```bash
+export PATH="$HOME/.local/bin:$PATH"
 doppels --version
-which doppels
 ```
 
-Si `doppels` no está disponible, abortar y mostrar al usuario las instrucciones
-de instalación de `references/cli-quickstart.md`.
+Si falta la CLI: instrucciones en `references/cli-quickstart.md` (o skill
+`doppel-setup`). Binario = **`doppels`** (con s).
 
 ### 2. Inicializar Space local
 
-Si no existe `.doppels/` en el directorio actual:
+Si no existe `.doppels/`:
 
 ```bash
-doppels init
+doppels init --json
 ```
 
 Si existe:
@@ -47,110 +63,80 @@ Si existe:
 doppels capabilities list
 ```
 
-Mostrar al usuario las Capabilities existentes para evitar duplicados.
-
 ### 3. Preguntar intención
-
-Antes de analizar la sesión, preguntar al usuario:
 
 > ¿Qué quieres capturar de esta sesión?
 
-Si la sesión tiene varios logros distintos (por ejemplo, configurar DB y
-desplegar frontend), preguntar si se debe crear una Capability por cada uno.
+Varios logros distintos → preguntar si una Capability por cada uno.
 
 ### 4. Analizar la sesión
 
-Usar las herramientas nativas del agente para inspeccionar:
+Comandos, archivos, deps, inputs, outputs. Ver
+`references/determinism-rules.md`.
 
-- Comandos ejecutados (orden, argumentos, exit codes).
-- Archivos creados o modificados.
-- Dependencias externas usadas (binarios, librerías, APIs).
-- Inputs identificados (variables que el usuario proveyó).
-- Outputs producidos (archivos finales, valores retornados).
+### 5. Escribir YAML a mano
 
-Para análisis profundo, consultar `references/determinism-rules.md`.
+Basarse en el ejemplo greet + `manifest-anatomy.md`. **No** existe un comando
+generador `doppel freeze` / `doppels freeze`.
 
-### 5. Escribir manifest a mano
+Aplicar:
 
-El agente escribe el YAML directamente basándose en
-`references/manifest-anatomy.md`. No invocar `doppel freeze` (no existe);
-usar la CLI solo para validar y probar.
-
-Aplicar siempre:
-
-- Paths POSIX relativos (`references/determinism-rules.md`).
+- Paths POSIX relativos; artefactos relativos al root del Space.
 - Redacción de secretos (`references/secrets-redaction.md`).
-- Versionado semántico si se conoce la versión previa.
+- Tipos/inputs/produces según anatomy (no inventar `type: object` / `enum` como tipo).
+
+Escribir bajo:
+
+```text
+.doppels/capabilities/<name>.yaml
+.doppels/recipes/<name>.yaml
+```
 
 ### 6. Proponer nombre
 
-Proponer nombre basado en la intención del usuario. Mostrar al usuario el
-nombre propuesto para que pueda ajustarlo antes de persistir.
+Mostrar nombre propuesto antes de dar por cerrado el freeze.
 
-### 7. Validar iterativamente
-
-Tras cada cambio significativo en el YAML:
+### 7. Validar y probar
 
 ```bash
-doppels validate .doppels/capabilities/<name>.yaml
-doppels validate .doppels/recipes/<name>.yaml   # si hay Recipe
+doppels validate
+doppels run capability/<name> --input key=value --yes
 ```
 
-Durante pruebas, ejecutar cuando sea seguro (muta el host):
-
-```bash
-doppels run capability/<name> --input ... --yes
-```
-
-Iterar hasta que todo pase. Sin una cadencia fija: el ritmo lo marca la
-configuración del agente y del editor del usuario.
+Si un input tiene `default` y no es required sin valor, se puede omitir
+`--input` para esa clave. Iterar hasta verde.
 
 ### 8. Confirmar con el usuario
 
-Mostrar al usuario, antes de persistir:
-
-- Nombre propuesto (ajustable).
-- Inputs declarados.
-- Outputs declarados.
-- Dependencias (`requires`).
-- Secretos referenciados (nunca valores).
-- Riesgos (`impact`, `approval`).
-
-Pedir confirmación explícita.
+Nombre, inputs, outputs, `requires`, secretos (solo refs), `impact` /
+`approval`. Confirmación explícita.
 
 ### 9. Persistir
 
-El manifest ya está escrito en disco. No crear commit automático: eso es
-decisión del usuario.
+YAML ya en disco. Commit = decisión del usuario (no auto-commit).
 
 ## Restricciones
 
-- El agente NUNCA invoca un comando `doppel freeze` generador (no existe).
-- El agente NUNCA escribe secretos en el YAML; solo referencias (`from:
-  host_env`).
-- El agente NUNCA inicia freeze solo porque la tarea “parecía operativa”.
-- El agente NUNCA pregunta al final de cada operación si persistir.
-- El agente SIEMPRE valida antes de pedir confirmación al usuario.
-- Si la CLI no está disponible, abortar y dar instrucciones.
-- El manifest resultante debe ser YAML legible y editable, no opaco.
+- NUNCA invocar un generador `doppel freeze` (no existe).
+- NUNCA escribir secretos literales; solo `from: host_env`.
+- NUNCA freeze automático al cerrar cada tarea.
+- SIEMPRE `doppels validate` antes de dar por bueno.
+- Si no hay CLI, abortar con quickstart.
 
 ## Edge cases
 
-- **Sesión con errores recuperados**: capturar la versión final corregida, no
-  los intentos fallidos.
-- **Dependencias externas**: `requires.commands` con `version` si Doppel puede
-  detectarla.
-- **Sin resultado claro**: pedir aclaración del output esperado al usuario.
-- **Sesión ruidosa (>50 comandos)**: reducir el scope antes de freezear o
-  pedir aclaración.
-- **Capability existente similar**: avisar al usuario y proponer refactor o
-  nueva Capability.
+- Sesión con errores: capturar la versión final corregida.
+- `requires.commands` con `version: ">=x.y.z"` solo si el formato schema lo
+  admite (regex estricto).
+- Sin output claro: preguntar.
+- Sesión ruidosa: reducir scope.
+- Capability similar existente: avisar.
 
 ## Referencias
 
-- [cli-quickstart.md](references/cli-quickstart.md) — Comandos esenciales.
-- [schema-discovery.md](references/schema-discovery.md) — Cómo encontrar schemas.
-- [manifest-anatomy.md](references/manifest-anatomy.md) — Anatomía de Capability/Recipe.
-- [determinism-rules.md](references/determinism-rules.md) — Reglas de normalización.
-- [secrets-redaction.md](references/secrets-redaction.md) — Redacción y referencias.
-- [examples/](references/examples/) — Manifests completos de referencia.
+- [cli-quickstart.md](references/cli-quickstart.md)
+- [schema-discovery.md](references/schema-discovery.md)
+- [manifest-anatomy.md](references/manifest-anatomy.md) — **incluye ejemplo greet completo**
+- [determinism-rules.md](references/determinism-rules.md)
+- [secrets-redaction.md](references/secrets-redaction.md)
+- [examples/](references/examples/) — mismos YAML greet

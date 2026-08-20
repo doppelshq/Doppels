@@ -1,138 +1,214 @@
 # Anatomía de un manifest
 
-Estructura canónica de Capability y Recipe en Doppel.
+Contrato **v1alpha1** real. Si esto choca con un schema viejo en tu cabeza,
+gana `schemas/*.schema.json` + `doppels validate`.
 
-## Capability
+## Flujo de datos (memorizar)
 
-Define el contrato público: qué hace, qué necesita, qué devuelve.
+```text
+inputs (Capability)
+  → step.env: FOO: "{{ inputs.foo }}"
+  → script: export OUT=… ; usa $FOO
+  → produces: { key: { env: OUT } }   # o file: relative/path
+  → returns: key: "{{ steps.<id>.key }}"
+  → outputs (Capability) con el mismo nombre de clave
+```
+
+Reglas duras:
+
+- Tipos de **input**: solo `string` | `integer` | `number` | `boolean`.
+  `enum` es **propiedad** opcional del input, **no** un `type`.
+- Tipos de **output**: `string` | `integer` | `number` | `boolean` | `artifact`.
+  `object` / `array` **no** son válidos. Si `type: artifact` → `mediaType` **obligatorio**.
+- `produces.env` debe ser nombre de variable **`^[A-Z_][A-Z0-9_]*$`** (MAYÚSCULAS).
+- Interpolación útil de inputs: en **`steps[].env`**, no solo en paths.
+- `requires.commands[].version` (si se declara) sigue regex estricto tipo
+  `>=1.2.3` / `>1.0.0 <2.0.0` (semver con operador). No escribas prosa.
+
+## Ejemplo mínimo completo (copiar)
+
+Capability → `.doppels/capabilities/greet.yaml`:
 
 ```yaml
 apiVersion: doppels.so/v1alpha1
 kind: Capability
 
 metadata:
-  name: <identificador estable>
-  version: <semver>
-  displayName: <título legible>
-  summary: <una frase>
-  description: <párrafo explicativo>
-  impact: low | medium | high | critical
-  tags: [<etiquetas libres>]
-  labels:
-    <clave>: <valor>
-
-documentation:
-  readme: <path relativo al README>
+  name: greet
+  version: 1.0.0
+  displayName: Greet a person
+  summary: Produce a greeting message.
+  impact: low
+  tags: [demo]
 
 inputs:
-  <nombre>:
-    type: string | number | boolean | enum | object | array
-    description: <texto>
-    required: true | false
-    default: <valor>
-    enum: [<valores>]
-    # según tipo: minimum, maximum, pattern, etc.
+  name:
+    type: string
+    description: Person to greet.
+    placeholder: "e.g. Alice"
+    required: true
 
 outputs:
-  <nombre>:
-    type: string | number | boolean | artifact | object
-    description: <texto>
-    mediaType: <MIME si artifact>
+  message:
+    type: string
+    description: Generated greeting.
 ```
 
-### Campos obligatorios
-
-- `apiVersion`
-- `kind: Capability`
-- `metadata.name`
-- `metadata.version`
-- `inputs` (al menos uno declarado o `{}`)
-- `outputs` (al menos uno declarado o `{}`)
-
-### Campos opcionales pero recomendados
-
-- `metadata.summary`
-- `metadata.description`
-- `metadata.impact`
-- `documentation.readme`
-
-## Recipe
-
-Define cómo se ejecuta localmente una Capability.
+Recipe → `.doppels/recipes/greet.yaml`:
 
 ```yaml
 apiVersion: doppels.so/v1alpha1
 kind: Recipe
 
 metadata:
-  name: <identificador estable>
+  name: greet
+  version: 1.0.0
+  displayName: Greet (instant)
+  summary: Instant greeting.
+  impact: low
+
+provides: [greet]
+runtime: shell
+
+requires:
+  commands: [sh]
+
+defaults:
+  approval: never
+
+steps:
+  - id: greet
+    name: Generate greeting
+    env:
+      NAME: "{{ inputs.name }}"
+    run:
+      shell: sh
+      script: |
+        export MESSAGE="Hello, $NAME"
+        printf '%s\n' "$MESSAGE"
+    produces:
+      message:
+        env: MESSAGE
+
+returns:
+  message: "{{ steps.greet.message }}"
+```
+
+Probar:
+
+```bash
+doppels validate
+doppels run capability/greet --input name=Ada --yes
+```
+
+Mismos archivos en `references/examples/` y en
+`examples/demo/.doppels/` del repo.
+
+## Capability (campos)
+
+```yaml
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: <identificador>
   version: <semver>
-  displayName: <título legible>
+  displayName: <título>
   summary: <una frase>
-  description: <párrafo>
+  impact: low | medium | high | critical
+  tags: []
+
+inputs:
+  <nombre>:
+    type: string | integer | number | boolean
+    description: <texto>
+    required: true | false
+    default: <scalar del mismo tipo>
+    enum: [<scalars>]          # opcional; no es un type
+    placeholder: <texto>       # opcional (UI share)
+
+outputs:
+  <nombre>:
+    type: string | integer | number | boolean | artifact
+    description: <texto>
+    mediaType: <MIME>          # obligatorio si type=artifact
+```
+
+Obligatorios: `apiVersion`, `kind`, `metadata.name`, `metadata.version`,
+`inputs`, `outputs` (pueden ser `{}`).
+
+## Recipe (campos)
+
+```yaml
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: <identificador>
+  version: <semver>
+  displayName: <título>
+  summary: <frase>
   impact: low | medium | high | critical
 
-provides: [<lista de Capabilities que implementa>]
-
+provides: [<capability names>]
 runtime: shell
 
 requires:
   commands:
-    - <binario>
-    - name: <binario>
-      version: "<rango semver>"
-  hostEnv:
-    - <nombre de variable>
-  files:
-    - <path relativo>
+    - sh
+    - name: node
+      version: ">=22.0.0"
+  hostEnv: [TOKEN_NAME]
+  files: [relative/path]
 
 defaults:
-  timeout: 15m
   approval: never | required
-  workingDirectory: .
-
-env:
-  <nombre>: <valor o expresión>
+  timeout: 15m
+  workingDirectory: .          # relativo al root del Space
 
 steps:
-  - id: <único en el Recipe>
+  - id: <id>
     name: <legible>
-    approval: never | required
     env:
-      <nombre>: <expresión o referencia>
+      FOO: "{{ inputs.foo }}"
     run:
-      shell: sh | bash
+      shell: sh
       script: |
-        <script multilínea>
+        export RESULT="…"
     produces:
-      <clave>:
-        file: <path relativo>
-        # o
-        env: <nombre de variable>
+      out:
+        env: RESULT
+      # o archivo:
+      # report:
+      #   file: report.json
 
 returns:
-  <clave>: "{{ steps.<id>.<clave> }}"
+  out: "{{ steps.<id>.out }}"
 ```
 
-### Campos obligatorios
+### Working directory y artefactos
 
-- `apiVersion`
-- `kind: Recipe`
-- `metadata.name`
-- `metadata.version`
-- `provides: [<al menos una Capability>]`
-- `runtime`
-- `steps: [<al menos uno>]`
+- El **cwd del Run** es la **raíz del Space** (el directorio que contiene
+  `.doppels/`), no el cwd del agente ni `runs/`.
+- `produces.file: stories.json` crea/escribe `stories.json` **en esa raíz**
+  (ensucia el working tree). Prefiere un subdir (`out/stories.json`) o limpia
+  en el script si no debe quedar trackeado.
+- Paths de `file:`: relativos POSIX (`/`), nunca absolutos del host.
 
-### Reglas clave
+### Inputs en `doppels run`
 
-- Una Recipe implementa **una o varias Capabilities** mediante `provides`.
-- Los Steps son **secuenciales** según el orden en el YAML.
-- Cada Step corre en **shell nuevo**; no comparte estado entre Steps.
-- Los outputs de Steps previos se referencian como
-  `{{ steps.<id>.<clave> }}`.
-- Secretos vía `from: host_env`; nunca valores literales.
+- `--input key=value` fija un input.
+- Si el Capability declara `default` y no pasas `--input` para esa clave, la
+  CLI usa el default.
+- Si `required: true` y no hay valor ni default → el run falla en validación.
 
-## Ejemplos completos
+### Secretos
 
-Ver `examples/capability-simple.yaml` y `examples/recipe-simple.yaml`.
+```yaml
+env:
+  DEPLOY_TOKEN:
+    from: host_env
+    name: DEPLOY_TOKEN
+```
+
+Nunca valores literales de secretos en el YAML.

@@ -6,10 +6,12 @@ Binario: **`doppels`** (no `doppel`).
 
 ```bash
 curl -fsSL https://doppels.so/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"
 # o: brew tap doppelshq/tap && brew trust doppelshq/tap && brew install --cask doppels
 ```
 
-macOS / Linux nativo. Windows: **WSL2** + el mismo `curl | sh` dentro de la distro Linux. Sin `.exe` nativo en alpha.
+macOS / Linux nativo. Windows: **WSL2** + el mismo `curl | sh` dentro de la
+distro Linux. Sin `.exe` nativo en alpha.
 
 Desde fuente (mise):
 
@@ -21,22 +23,12 @@ task setup
 task build:cli          # → ./bin/doppels
 ```
 
-Con el hook de mise, `bin/` entra en `PATH`. Comprueba:
-
-```bash
-doppels --version
-which doppels
-```
-
-Si no está en PATH: usa `./bin/doppels` desde la raíz de este repo.
-
-Tras un tag `v*`: binarios en
-[GitHub Releases](https://github.com/doppelshq/doppels/releases).
+Comprueba: `doppels --version`.
 
 ## Space local
 
 ```bash
-doppels init
+doppels init --json
 ```
 
 ```text
@@ -48,7 +40,10 @@ doppels init
     └── runs/              # gitignored runtime
 ```
 
-## Comandos
+El **cwd de `doppels run`** es la raíz del Space (este `.`), no
+`.doppels/runs/`. Archivos de `produces.file` se crean relativos a esa raíz.
+
+## Comandos útiles para freeze
 
 ```bash
 doppels validate
@@ -59,9 +54,31 @@ doppels runs list
 doppels runs show <run-id>
 doppels runs logs <run-id>
 doppels --help
-doppels <command> --help
 ```
 
 `--json` en la mayoría de comandos.
 
-Manifests sueltos: `doppels validate -f .doppels/capabilities/<name>.yaml`
+Manifests sueltos:
+
+```bash
+doppels validate -f .doppels/capabilities/<name>.yaml
+```
+
+## Inputs en run
+
+- `--input name=Ada` fija `inputs.name`.
+- Si el Capability declara `default` y omites `--input`, se usa el default.
+- `required: true` sin valor ni default → error.
+
+## No existen
+
+- `doppel` (sin s) como binario oficial.
+- `doppels schema list` / `doppels schema describe`.
+- Generador `doppels freeze`.
+
+Schemas: ver `schema-discovery.md` (raw JSON en `doppelshq/doppels`).
+
+## Cloud (fuera del freeze local)
+
+`doppels preview` / `apply` son flujos cloud/org — **no** hace falta para
+freeze + `run` local.

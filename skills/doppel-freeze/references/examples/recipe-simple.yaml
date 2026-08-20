@@ -2,41 +2,34 @@ apiVersion: doppels.so/v1alpha1
 kind: Recipe
 
 metadata:
-  name: curl-query
+  name: greet
   version: 1.0.0
-  displayName: Consultar endpoint con curl
-  summary: Ejecuta curl contra un endpoint y guarda la respuesta.
+  displayName: Greet (instant)
+  summary: Instant greeting.
   impact: low
 
-provides: [query-endpoint]
-
+provides: [greet]
 runtime: shell
 
 requires:
-  commands: [curl]
+  commands: [sh]
 
 defaults:
-  timeout: 30s
   approval: never
-  # Optional: Object Storage TTL for Share returns (1 | 7 | 14 | 30). Default 7.
-  # artifactRetentionDays: 7
 
 steps:
-  - id: fetch
-    name: Realizar petición
+  - id: greet
+    name: Generate greeting
     env:
-      ENDPOINT: "{{ inputs.endpoint }}"
-      METHOD: "{{ inputs.method }}"
+      NAME: "{{ inputs.name }}"
     run:
       shell: sh
       script: |
-        curl --fail --silent --show-error \
-          --request "$METHOD" \
-          "$ENDPOINT" \
-          --output response.json
+        export MESSAGE="Hello, $NAME"
+        printf '%s\n' "$MESSAGE"
     produces:
-      response:
-        file: response.json
+      message:
+        env: MESSAGE
 
 returns:
-  response: "{{ steps.fetch.response }}"
+  message: "{{ steps.greet.message }}"
