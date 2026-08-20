@@ -2,27 +2,21 @@ apiVersion: doppels.so/v1alpha1
 kind: Capability
 
 metadata:
-  name: query-endpoint
+  name: greet
   version: 1.0.0
-  displayName: Consultar endpoint
-  summary: Realiza una petición HTTP a un endpoint configurable.
-  description: Llama a un endpoint y devuelve la respuesta como artefacto.
+  displayName: Greet a person
+  summary: Produce a greeting message.
   impact: low
-  tags: [http, query]
+  tags: [demo]
 
 inputs:
-  endpoint:
+  name:
     type: string
-    description: URL del endpoint a consultar.
+    description: Person to greet.
+    placeholder: "e.g. Alice"
     required: true
-  method:
-    type: string
-    enum: [GET, POST]
-    default: GET
-    description: Método HTTP.
 
 outputs:
-  response:
-    type: artifact
-    description: Cuerpo de la respuesta.
-    mediaType: application/json
+  message:
+    type: string
+    description: Generated greeting.

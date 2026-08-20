@@ -8,12 +8,15 @@ Una Capability o Recipe congelada debe ser reproducible. Aplicar siempre:
 - **Sin paths absolutos** del host (`/Users/...`, `/home/...`).
 - **Sin `~`**; usar paths relativos al workspace o al Recipe.
 - **Sin `./` redundante** salvo al inicio del path.
+- **Cwd del Run = raíz del Space** (directorio con `.doppels/`).
+  `produces.file: stories.json` escribe `./stories.json` ahí — ensucia el
+  working tree. Prefiere `out/…` o bórralo en el script si no debe quedar.
 
 Bueno:
 
 ```yaml
 file: "release-{{ inputs.version }}.tgz"
-file: dist/backup.sql.gz
+file: out/backup.sql.gz
 ```
 
 Malo:
@@ -50,7 +53,8 @@ env:
 
 ## Dependencias detectadas
 
-- Si Doppel detecta la versión de una dependencia, declararla:
+- Si Doppel detecta la versión de una dependencia, declararla con el formato
+  estricto del schema (operador + semver; se pueden encadenar con espacio):
 
 ```yaml
 requires:
@@ -87,10 +91,11 @@ requires:
 
 Antes de pedir confirmación al usuario, verificar:
 
-- [ ] Paths POSIX relativos.
+- [ ] Paths POSIX relativos; artefactos conscientes del cwd (Space root).
 - [ ] Sin secretos literales.
 - [ ] Sin IDs dinámicos hardcodeados.
-- [ ] Dependencias declaradas con versión si conocida.
+- [ ] Dependencias declaradas; `version` solo si cumple el regex del schema.
 - [ ] `approval` coherente con `impact`.
 - [ ] `doppels validate` pasa.
-- [ ] `doppels preview` pasa (si hay Context Org/Space).
+- [ ] `doppels run … --yes` smoke OK (local). No hace falta `doppels preview`
+  para freeze local.
