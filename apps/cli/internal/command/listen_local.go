@@ -2,24 +2,31 @@ package command
 
 import (
 	"fmt"
+	"io"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/project"
+	"doppels.so/cli/internal/projectlock"
 )
 
 type listenProjectEntry struct {
-	Root    string
-	Space   string
-	Label   string
-	Catalog *manifest.Catalog
+	Root     string
+	Space    string
+	Label    string
+	Branch   string
+	Worktree string
+	Catalog  *manifest.Catalog
 }
 
 type listenLocalIndex struct {
 	Entries []listenProjectEntry
 	Merged  *manifest.Catalog
+	Host    manifest.Host
 }
 
 func (app *App) listenLocalIndex() (listenLocalIndex, int) {
@@ -28,43 +35,23 @@ func (app *App) listenLocalIndex() (listenLocalIndex, int) {
 		fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
 		return listenLocalIndex{}, ExitOperational
 	}
-	rootSet := map[string]struct{}{}
-	var roots []string
-	discovered, err := project.DiscoverListenRoots(workingDirectory)
+	cwd, err := filepath.Abs(workingDirectory)
 	if err != nil {
-		if err != project.ErrNotFound {
-			fmt.Fprintf(app.Stderr, "discover local Spaces for listen: %v\n", err)
-			return listenLocalIndex{}, ExitOperational
-		}
-	} else {
-		for _, root := range discovered {
-			if _, ok := rootSet[root]; ok {
-				continue
-			}
-			rootSet[root] = struct{}{}
-			roots = append(roots, root)
-		}
+		fmt.Fprintf(app.Stderr, "resolve working directory: %v\n", err)
+		return listenLocalIndex{}, ExitOperational
 	}
-	if store, storeErr := app.configStore(); storeErr == nil {
-		if profile, profileErr := store.Profile(); profileErr == nil {
-			for _, binding := range profile.Bindings {
-				if _, ok := rootSet[binding.Path]; ok {
-					continue
-				}
-				if project.IsWorkingTree(binding.Path) {
-					rootSet[binding.Path] = struct{}{}
-					roots = append(roots, binding.Path)
-				}
-			}
-		}
+	roots, err := discoverNodeRoots(cwd)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "discover local Spaces: %v\n", err)
+		return listenLocalIndex{}, ExitOperational
 	}
 	if len(roots) == 0 {
-		fmt.Fprintln(app.Stderr, missingLocalSpaceMessage()+" or apply a Space on this Node first")
+		writeNodeMissingSpace(app.Stderr, cwd)
 		return listenLocalIndex{}, ExitContract
 	}
 	sort.Strings(roots)
 
-	index := listenLocalIndex{Entries: make([]listenProjectEntry, 0, len(roots))}
+	index := listenLocalIndex{Entries: make([]listenProjectEntry, 0, len(roots)), Host: app.Host}
 	var allDocuments []manifest.Loaded
 	for _, root := range roots {
 		paths, err := project.Discover(root)
@@ -100,16 +87,78 @@ func (app *App) listenLocalIndex() (listenLocalIndex, int) {
 			}
 		}
 		entry := listenProjectEntry{
-			Root:    root,
-			Space:   spaceHint,
-			Label:   label,
-			Catalog: validation.Catalog,
+			Root:     root,
+			Space:    spaceHint,
+			Label:    label,
+			Catalog:  validation.Catalog,
+			Branch:   "—",
+			Worktree: "—",
+		}
+		if branch, worktree := inspectGitWorktree(root); branch != "" || worktree != "" {
+			if branch != "" {
+				entry.Branch = branch
+			}
+			if worktree != "" {
+				entry.Worktree = worktree
+			}
 		}
 		index.Entries = append(index.Entries, entry)
 		allDocuments = append(allDocuments, validation.Catalog.Documents...)
 	}
 	index.Merged = manifest.NewCatalog(workingDirectory, allDocuments)
 	return index, ExitSuccess
+}
+
+func (index listenLocalIndex) localTrees() []listenLocalTreeView {
+	trees := make([]listenLocalTreeView, 0, len(index.Entries))
+	for _, entry := range index.Entries {
+		path := entry.Root
+		if abs, err := filepath.Abs(entry.Root); err == nil {
+			path = abs
+		}
+		root := path
+		lock, _ := projectlock.Load(entry.Root)
+		trees = append(trees, listenLocalTreeView{
+			Path:         path,
+			Space:        entry.Space,
+			Branch:       entry.Branch,
+			Worktree:     entry.Worktree,
+			Capabilities: listLocalCapabilityViews(entry.Catalog, root, index.Host, lock),
+		})
+	}
+	return trees
+}
+
+func inspectGitWorktree(root string) (branch, worktree string) {
+	branch = strings.TrimSpace(gitC(root, "branch", "--show-current"))
+	if branch == "" {
+		branch = strings.TrimSpace(gitC(root, "rev-parse", "--abbrev-ref", "HEAD"))
+	}
+	toplevel := strings.TrimSpace(gitC(root, "rev-parse", "--show-toplevel"))
+	gitDir := strings.TrimSpace(gitC(root, "rev-parse", "--git-dir"))
+	if branch == "" && toplevel == "" {
+		return "", ""
+	}
+	if gitDir != "" && strings.Contains(filepath.ToSlash(gitDir), "/worktrees/") {
+		if toplevel == "" {
+			return branch, "worktree"
+		}
+		return branch, toplevel
+	}
+	if branch == "" {
+		branch = "HEAD"
+	}
+	return branch, "primary"
+}
+
+func gitC(root string, args ...string) string {
+	command := exec.Command("git", append([]string{"-C", root, "--no-optional-locks"}, args...)...)
+	command.Env = append(command.Environ(), "GIT_TERMINAL_PROMPT=0")
+	out, err := command.Output()
+	if err != nil {
+		return ""
+	}
+	return string(out)
 }
 
 func listenSpaceHint(root string) string {
@@ -172,4 +221,46 @@ func (index listenLocalIndex) resolve(capability, space string) (string, *manife
 		names = append(names, entry.Label)
 	}
 	return "", nil, fmt.Errorf("Capability %q found in multiple local Spaces (%s); listen from one Space or narrow --space", capability, strings.Join(names, ", "))
+}
+
+func discoverNodeRoots(cwd string) ([]string, error) {
+	if project.IsWorkingTree(cwd) {
+		return []string{cwd}, nil
+	}
+	entries, err := os.ReadDir(cwd)
+	if err != nil {
+		return nil, err
+	}
+	var children []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		child := filepath.Join(cwd, entry.Name())
+		if project.IsWorkingTree(child) {
+			children = append(children, child)
+		}
+	}
+	sort.Strings(children)
+	return children, nil
+}
+
+func writeNodeMissingSpace(writer io.Writer, cwd string) {
+	style := newTermStyle(writer)
+	path := cwd
+	if abs, err := filepath.Abs(cwd); err == nil {
+		path = abs
+	}
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "  "+style.bold("No Space working tree in this directory."))
+	fmt.Fprintln(writer)
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("cwd"), style.value(path))
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "  "+style.dim("A Space is a folder with .doppels/ (capabilities/, recipes/, runtime)"))
+	fmt.Fprintln(writer, "  "+style.dim("and doppels.<name>.yaml. Override paths with discovery: in that stub."))
+	fmt.Fprintln(writer, "  "+style.dim("A workspace is a parent whose immediate children are Spaces."))
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "  "+style.dim("cd into a Space or that workspace parent, or create one:"))
+	fmt.Fprintln(writer, "    doppels init")
+	fmt.Fprintln(writer)
 }

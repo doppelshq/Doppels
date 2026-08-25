@@ -35,7 +35,14 @@ func testApp(root string) (*App, *bytes.Buffer, *bytes.Buffer) {
 // ensures the .doppels marker directory exists so FindRoot succeeds.
 func writeManifest(t *testing.T, root, directory, name, value string) string {
 	t.Helper()
-	path := filepath.Join(root, ".doppels", directory, name)
+	if err := os.MkdirAll(filepath.Join(root, ".doppels"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	base := directory
+	if directory == "capabilities" || directory == "recipes" {
+		base = filepath.Join(".doppels", directory)
+	}
+	path := filepath.Join(root, base, name)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -85,6 +92,62 @@ func TestPlanIsUnknownCommand(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), `unknown command "plan"`) {
 		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestListenIsUnknownCommand(t *testing.T) {
+	root := t.TempDir()
+	app, _, stderr := testApp(root)
+	app.Environment = []string{"DOPPELS_EXPERIMENTAL=1"}
+	if code := app.Run([]string{"listen"}); code != ExitContract {
+		t.Fatalf("listen exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), `unknown command "listen"`) {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestNodeWithoutSubcommandPrintsUsage(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	if code := app.Run([]string{"node"}); code != ExitContract {
+		t.Fatalf("node exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "doppels node up") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestNodeUpRequiresLogin(t *testing.T) {
+	root := t.TempDir()
+	app, _, stderr := testApp(root)
+	if code := app.Run([]string{"node", "up"}); code == ExitSuccess {
+		t.Fatalf("node up succeeded without login: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "login or DOPPELS_API_TOKEN is required for node up") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestExperimentalHelpShowsNodeUpNotListen(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	app.Environment = []string{"DOPPELS_EXPERIMENTAL=1"}
+	if code := app.Run([]string{"help"}); code != ExitSuccess {
+		t.Fatalf("help exit = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "doppels node up") {
+		t.Fatalf("help missing node up:\n%s", out)
+	}
+	if strings.Contains(out, "doppels listen") {
+		t.Fatalf("help still advertises listen:\n%s", out)
+	}
+	if !strings.Contains(out, "· Node") {
+		t.Fatalf("help missing Node section:\n%s", out)
 	}
 }
 
@@ -178,8 +241,12 @@ func TestValidateContractAndHostExitCodes(t *testing.T) {
 		if code != ExitOperational {
 			t.Fatalf("exit = %d, want %d; %s", code, ExitOperational, stderr.String())
 		}
-		if !strings.Contains(stderr.String(), "host.command-missing") {
-			t.Fatalf("stderr = %s", stderr.String())
+		out := stderr.String()
+		if !strings.Contains(out, "Recipe not ready") || !strings.Contains(out, "missing-tool") {
+			t.Fatalf("stderr missing host presentation:\n%s", out)
+		}
+		if strings.Contains(out, "host.command-missing") || strings.Contains(out, "requires.commands[0]") {
+			t.Fatalf("stderr still dumps validator noise:\n%s", out)
 		}
 	})
 }

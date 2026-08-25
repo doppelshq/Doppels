@@ -1,0 +1,9 @@
+apiVersion: doppels.so/v1alpha1
+kind: Space
+
+metadata:
+  name: platform
+  displayName: Platform
+  summary: Quickstart Space for Doppels.
+  labels:
+    environment: development

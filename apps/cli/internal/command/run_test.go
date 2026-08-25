@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/manifest"
+	"doppels.so/cli/internal/projectlock"
 )
 
 func TestRunResourceFirstKeepsJSONStdoutMachineReadable(t *testing.T) {
@@ -103,7 +107,7 @@ func TestRunPrintsLiveTimeline(t *testing.T) {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
 	progress := stderr.String()
-	for _, want := range []string{"Cap", "greet@", "Recipe", "validated", "Greet"} {
+	for _, want := range []string{"Cap", "greet", "Recipe", "validated", "Greet"} {
 		if !strings.Contains(progress, want) {
 			t.Fatalf("timeline missing %q in stderr:\n%s", want, progress)
 		}
@@ -200,6 +204,59 @@ func TestRunRequiresCapabilityWithoutPromptableStdin(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "run requires capability/") {
 		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestRunStrictBlocksStaleLockPin(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	writeStaleCapabilityLock(t, root)
+
+	app, _, stderr := testApp(root)
+	app.Environment = []string{"PATH=" + os.Getenv("PATH"), "DOPPELS_IDENTITY=tester"}
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--yes", "--strict", "--json"})
+	if code != ExitContract {
+		t.Fatalf("strict stale exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "version bump") {
+		t.Fatalf("strict stale stderr = %s", out)
+	}
+}
+
+func TestRunWithoutStrictWarnsOnStaleLockPin(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	writeStaleCapabilityLock(t, root)
+
+	app, stdout, stderr := testApp(root)
+	app.Environment = []string{"PATH=" + os.Getenv("PATH"), "DOPPELS_IDENTITY=tester"}
+	app.Hostname = func() (string, error) { return "test-node", nil }
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--yes", "--json"})
+	if code != ExitSuccess {
+		t.Fatalf("stale without --strict exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "stale") {
+		t.Fatalf("expected stale warning, stderr = %s", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status": "succeeded"`) && !strings.Contains(stdout.String(), `"status":"succeeded"`) {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func writeStaleCapabilityLock(t *testing.T, root string) {
+	t.Helper()
+	if err := projectlock.Write(root, projectlock.New([]projectlock.Entry{{
+		Kind:            "Capability",
+		SourceAuthority: "manifest",
+		Revision: execution.DefinitionReference{
+			Name: "greet", Version: "1.0.0", ManifestSHA256: strings.Repeat("ab", 32),
+			Schema: execution.SchemaReference{ID: manifest.CapabilitySchemaID, SHA256: manifest.CapabilitySchemaSHA256},
+		},
+	}})); err != nil {
+		t.Fatal(err)
 	}
 }
 

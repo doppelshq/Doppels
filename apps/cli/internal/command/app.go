@@ -78,8 +78,8 @@ func (app *App) Run(arguments []string) int {
 		return app.runLocal(arguments[1:])
 	case "share":
 		return app.runShare(arguments[1:])
-	case "listen":
-		return app.runListen(arguments[1:])
+	case "node":
+		return app.runNode(arguments[1:])
 	case "capabilities", "caps":
 		return app.runCapabilities(arguments[1:])
 	case "recipes":
@@ -145,7 +145,7 @@ func (app *App) usage(writer io.Writer) {
 		{"doppels validate [-f manifest]", "check manifests"},
 	})
 	writeUsageSection(writer, style, "Run", []usageLine{
-		{"doppels run [capability/<name>] [--yes]", "execute locally · -d detach"},
+		{"doppels run [capability/<name>] [--yes] [--strict]", "execute locally · -d detach"},
 		{"doppels describe (capability|recipe)/…", "inspect a definition"},
 		{"doppels capabilities|caps [list]|show …", "list local Capabilities"},
 		{"doppels recipes [list]|show …", "list local Recipes"},
@@ -159,9 +159,11 @@ func (app *App) usage(writer io.Writer) {
 
 	if app.experimentalEnabled() {
 		fmt.Fprintln(writer, style.dim("Preview · Cloud"))
+		writeUsageSubsection(writer, style, "Node", []usageLine{
+			{"doppels node up", "this host online · approve / reject / skip inbox"},
+		})
 		writeUsageSubsection(writer, style, "Share", []usageLine{
 			{"doppels share capability/<name>[@ver]", "create share link (--input · --yes)"},
-			{"doppels listen", "fulfill incoming Requests"},
 		})
 		writeUsageSubsection(writer, style, "Identity", []usageLine{
 			{"doppels login|logout|whoami", "device login"},
@@ -292,7 +294,11 @@ func (app *App) runValidate(arguments []string) int {
 	} else if len(diagnostics) == 0 {
 		writeValidateReport(app.Stdout, root, paths, documents, items)
 	} else {
+		wroteHost := writeCatalogHostFailures(app.Stderr, result.Catalog, app.Host)
 		for _, diagnostic := range diagnostics {
+			if wroteHost && strings.HasPrefix(diagnostic.Code, "host.") {
+				continue
+			}
 			fmt.Fprintln(app.Stderr, diagnostic.Error())
 		}
 		style := newTermStyle(app.Stderr)

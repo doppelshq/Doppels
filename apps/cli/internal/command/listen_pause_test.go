@@ -49,12 +49,12 @@ func TestListenStatusPausedDuringDecision(t *testing.T) {
 	}
 
 	mu.Lock()
-	writeListenDecisionPrompt(&out, request, created, 0, now)
+	writeListenDecisionPrompt(&out, request, created, listenPromptQueue{Index: 1, Total: 1}, now)
 	mu.Unlock()
 
-	ok, err := interaction.decideFulfillment()
-	if err != nil || !ok {
-		t.Fatalf("decide: ok=%v err=%v", ok, err)
+	got, err := interaction.decideFulfillment()
+	if err != nil || got != fulfillApprove {
+		t.Fatalf("decide: got=%v err=%v", got, err)
 	}
 	pause.Store(false)
 	<-done

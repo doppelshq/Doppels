@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -17,13 +16,14 @@ var spinnerFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 
 // runTimeline prints a live execution progress stream as RunEvents arrive.
 type runTimeline struct {
-	writer    io.Writer
-	style     termStyle
-	capName   string
-	capVer    string
-	recipe    string
-	stepNames map[string]string
-	header    bool
+	writer      io.Writer
+	style       termStyle
+	capName     string
+	capVer      string
+	recipe      string
+	stepNames   map[string]string
+	header      bool
+	hideCatalog bool
 
 	mu          sync.Mutex
 	spinStop    chan struct{}
@@ -42,7 +42,7 @@ func newRunTimeline(writer io.Writer, invocation execution.Invocation) *runTimel
 		stepNames: map[string]string{},
 	}
 	if invocation.Recipe != nil {
-		timeline.recipe = invocation.Recipe.Metadata.Name + "@" + invocation.Recipe.Metadata.Version
+		timeline.recipe = revisionLabel(invocation.Recipe.Metadata.Name, invocation.Recipe.Metadata.Version)
 		for _, step := range invocation.Recipe.Steps {
 			label := strings.TrimSpace(step.Name)
 			if label == "" {
@@ -122,9 +122,11 @@ func (t *runTimeline) writeHeader(runID string) {
 	t.header = true
 	t.runStarted = time.Now()
 	fmt.Fprintln(t.writer)
-	fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Run"), t.style.shortIDPrimary(runID))
-	fmt.Fprintf(t.writer, "  %s  %s@%s\n", t.style.field("Cap"), t.style.bold(t.capName), t.capVer)
-	fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Recipe"), t.recipe)
+	fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Run"), t.style.value(shortRunID(runID)))
+	if !t.hideCatalog {
+		fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Cap"), t.style.bold(t.capName))
+		fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Recipe"), t.recipe)
+	}
 	fmt.Fprintln(t.writer)
 }
 
@@ -184,7 +186,7 @@ func (t *runTimeline) stopSpinner() {
 	close(stop)
 	<-done
 	t.mu.Lock()
-	fmt.Fprint(t.writer, "\r"+strings.Repeat(" ", 80)+"\r")
+	fmt.Fprint(t.writer, "\r\x1b[2K")
 	t.mu.Unlock()
 }
 
@@ -312,7 +314,7 @@ func writeLocalRunSummary(writer io.Writer, result execution.Result, elapsed tim
 		fmt.Fprintf(writer, "  %s  %s%s\n", style.field("Status"), style.value(status), timing)
 	}
 	if result.StateDir != "" {
-		fmt.Fprintf(writer, "  %s  %s\n", style.field("State"), style.dim(shortStateDir(result.StateDir)))
+		fmt.Fprintf(writer, "  %s  %s\n", style.field("State"), style.filePath(runStateFile(result.StateDir)))
 	}
 	if len(result.Returns) == 0 && len(result.Evidence) == 0 {
 		return
@@ -349,14 +351,6 @@ func ellipsisMark(style termStyle) string {
 	return ".."
 }
 
-func shortStateDir(path string) string {
-	cleaned := filepath.Clean(path)
-	if i := strings.Index(cleaned, ".doppels"+string(filepath.Separator)); i >= 0 {
-		return cleaned[i:]
-	}
-	return cleaned
-}
-
 func shortSHA(value string) string {
 	if len(value) <= 16 {
 		return value
@@ -391,7 +385,7 @@ func writeNamedResultMap(writer io.Writer, style termStyle, values map[string]an
 		case execution.ArtifactReference:
 			path := value.Filename
 			if value.LocalPath != "" {
-				path = shortStateDir(value.LocalPath)
+				path = style.filePath(value.LocalPath)
 			}
 			fmt.Fprintf(writer, "    %s%s  %s\n", style.cyan(name), pad, path)
 			fmt.Fprintf(writer, "    %s%s  %s · sha256 %s\n", strings.Repeat(" ", len(name)), pad,

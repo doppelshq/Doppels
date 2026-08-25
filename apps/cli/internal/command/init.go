@@ -129,10 +129,9 @@ func (app *App) offerDemoExamples(root string) bool {
 	return true
 }
 
-// seedDemoExamples copies the embedded demo capability and recipe into
-// .doppels/capabilities/ and .doppels/recipes/ under root.
+// seedDemoExamples copies the embedded demo Capability and Recipe into
+// .doppels/capabilities and .doppels/recipes.
 func seedDemoExamples(root string) error {
-	doppelsDir := filepath.Join(root, ".doppels")
 	return fs.WalkDir(initExamplesFS, "initexamples", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -144,7 +143,7 @@ func seedDemoExamples(root string) error {
 		if rel == "." {
 			return nil
 		}
-		dst := filepath.Join(doppelsDir, rel)
+		dst := filepath.Join(root, project.Directory, rel)
 		if d.IsDir() {
 			return os.MkdirAll(dst, 0o755)
 		}
