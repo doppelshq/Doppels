@@ -220,8 +220,51 @@ func TestRunStrictBlocksStaleLockPin(t *testing.T) {
 		t.Fatalf("strict stale exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
 	}
 	out := stderr.String()
-	if !strings.Contains(out, "stale") || !strings.Contains(out, "version bump") {
+	if !strings.Contains(out, "PIN stale") || !strings.Contains(out, "metadata.version") {
 		t.Fatalf("strict stale stderr = %s", out)
+	}
+	if strings.Contains(out, "warning:") {
+		t.Fatalf("raw warning prefix still present: %s", out)
+	}
+	if strings.Contains(out, "Changed") || strings.Contains(out, "Pinned") {
+		t.Fatalf("unstable diff/digest still shown: %s", out)
+	}
+	if !strings.Contains(out, "File") {
+		t.Fatalf("missing File, stderr = %s", out)
+	}
+}
+
+func TestRunStrictRefusesUnreadableLock(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	if err := os.WriteFile(filepath.Join(root, "doppels.lock"), []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app, _, stderr := testApp(root)
+	app.Environment = []string{"PATH=" + os.Getenv("PATH"), "DOPPELS_IDENTITY=tester"}
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--yes", "--strict", "--json"})
+	if code != ExitContract {
+		t.Fatalf("strict corrupt lock exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "doppels.lock") {
+		t.Fatalf("stderr = %s", stderr.String())
+	}
+}
+
+func TestRunStrictAllowsUnpinned(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	app, stdout, stderr := testApp(root)
+	app.Environment = []string{"PATH=" + os.Getenv("PATH"), "DOPPELS_IDENTITY=tester"}
+	app.Hostname = func() (string, error) { return "test-node", nil }
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--yes", "--strict", "--json"})
+	if code != ExitSuccess {
+		t.Fatalf("strict unpinned exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"status": "succeeded"`) && !strings.Contains(stdout.String(), `"status":"succeeded"`) {
+		t.Fatalf("stdout = %s", stdout.String())
 	}
 }
 
@@ -238,10 +281,35 @@ func TestRunWithoutStrictWarnsOnStaleLockPin(t *testing.T) {
 	if code != ExitSuccess {
 		t.Fatalf("stale without --strict exit = %d, stderr = %s", code, stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "stale") {
-		t.Fatalf("expected stale warning, stderr = %s", stderr.String())
+	if !strings.Contains(stderr.String(), "PIN stale") || strings.Contains(stderr.String(), "warning:") {
+		t.Fatalf("expected PIN stale card, stderr = %s", stderr.String())
 	}
 	if !strings.Contains(stdout.String(), `"status": "succeeded"`) && !strings.Contains(stdout.String(), `"status":"succeeded"`) {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+}
+
+func TestRunHumanTimelineShowsStaleRecipePin(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	writeStaleRecipeLock(t, root)
+
+	app, stdout, stderr := testApp(root)
+	app.Environment = []string{"PATH=" + os.Getenv("PATH"), "DOPPELS_IDENTITY=tester"}
+	app.Hostname = func() (string, error) { return "test-node", nil }
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--yes"})
+	if code != ExitSuccess {
+		t.Fatalf("stale recipe exit = %d, stderr = %s", code, stderr.String())
+	}
+	progress := stderr.String()
+	if !strings.Contains(progress, "PIN stale") || strings.Contains(progress, "warning:") {
+		t.Fatalf("missing PIN stale card, stderr = %s", progress)
+	}
+	if !strings.Contains(progress, "Recipe greet-shell@1.0.0") && !strings.Contains(progress, "greet-shell@1.0.0") {
+		t.Fatalf("missing Recipe identity, stderr = %s", progress)
+	}
+	if !strings.Contains(stdout.String(), "Succeeded") {
 		t.Fatalf("stdout = %s", stdout.String())
 	}
 }
@@ -254,6 +322,20 @@ func writeStaleCapabilityLock(t *testing.T, root string) {
 		Revision: execution.DefinitionReference{
 			Name: "greet", Version: "1.0.0", ManifestSHA256: strings.Repeat("ab", 32),
 			Schema: execution.SchemaReference{ID: manifest.CapabilitySchemaID, SHA256: manifest.CapabilitySchemaSHA256},
+		},
+	}})); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeStaleRecipeLock(t *testing.T, root string) {
+	t.Helper()
+	if err := projectlock.Write(root, projectlock.New([]projectlock.Entry{{
+		Kind:            "Recipe",
+		SourceAuthority: "manifest",
+		Revision: execution.DefinitionReference{
+			Name: "greet-shell", Version: "1.0.0", ManifestSHA256: strings.Repeat("cd", 32),
+			Schema: execution.SchemaReference{ID: manifest.RecipeSchemaID, SHA256: manifest.RecipeSchemaSHA256},
 		},
 	}})); err != nil {
 		t.Fatal(err)
@@ -286,6 +368,35 @@ func TestFormatDuration(t *testing.T) {
 	}
 	if got := formatDurationLive(400 * time.Millisecond); got != "0s" {
 		t.Fatalf("formatDurationLive(400ms) = %q", got)
+	}
+}
+
+func TestRunFailedStepExitsOperational(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", strings.ReplaceAll(runRecipeFixture, `        printf 'step-noise\n'
+        export MESSAGE="Hello $NAME"`, "        exit 1"))
+	app, stdout, stderr := testApp(root)
+	app.Environment = []string{"PATH=" + os.Getenv("PATH"), "DOPPELS_IDENTITY=tester"}
+	app.Hostname = func() (string, error) { return "test-node", nil }
+
+	if code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--json"}); code != ExitOperational {
+		t.Fatalf("json exit = %d want %d stderr=%s stdout=%s", code, ExitOperational, stderr.String(), stdout.String())
+	}
+	if !strings.Contains(stdout.String(), `"status": "failed"`) || !strings.Contains(stdout.String(), `"error"`) {
+		t.Fatalf("json = %s", stdout.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada", "--yes"}); code != ExitOperational {
+		t.Fatalf("human exit = %d want %d stderr=%s", code, ExitOperational, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Failed") {
+		t.Fatalf("stdout = %s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "failed") || !strings.Contains(stderr.String(), "run failed:") {
+		t.Fatalf("stderr = %s", stderr.String())
 	}
 }
 

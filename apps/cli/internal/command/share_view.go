@@ -57,6 +57,41 @@ func writeShareUploadProgress(writer io.Writer, filename string, sizeBytes int64
 	fmt.Fprintf(writer, "  %s  %s  %s\n", style.field("Upload"), style.value(filename), style.dim(formatByteSize(sizeBytes)))
 }
 
+func writeLockPinCard(writer io.Writer, issues []lockPinIssue, strict bool) {
+	if len(issues) == 0 {
+		return
+	}
+	style := newTermStyle(writer)
+	fmt.Fprintln(writer)
+	if strict {
+		fmt.Fprintf(writer, "  %s  %s\n", style.boldRed("✗"), style.bold("PIN stale"))
+	} else {
+		fmt.Fprintf(writer, "  %s  %s\n", style.boldYellow("!"), style.bold("PIN stale"))
+	}
+	fmt.Fprintln(writer)
+	for index, issue := range issues {
+		if index > 0 {
+			fmt.Fprintln(writer)
+		}
+		kind := "Cap"
+		if issue.Kind == "Recipe" {
+			kind = "Recipe"
+		}
+		fmt.Fprintf(writer, "  %s  %s@%s\n", style.field(kind), style.value(issue.Name), issue.Version)
+		if rel := listenRelPath(issue.Root, issue.Path); rel != "" {
+			fmt.Fprintf(writer, "  %s  %s\n", style.field("File"), style.fileLink(issue.Path, rel))
+		}
+		fmt.Fprintf(writer, "  %s  %s\n", style.field("Why"), "changed without a version bump")
+	}
+	fmt.Fprintln(writer)
+	next := "bump metadata.version and re-apply"
+	if strict {
+		next += ", or omit --strict"
+	}
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Next"), next)
+	fmt.Fprintln(writer)
+}
+
 func writeHostNotReady(writer io.Writer, recipeName, relPath string, missing []string) {
 	style := newTermStyle(writer)
 	fmt.Fprintln(writer)

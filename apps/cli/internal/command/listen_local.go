@@ -153,7 +153,7 @@ func inspectGitWorktree(root string) (branch, worktree string) {
 
 func gitC(root string, args ...string) string {
 	command := exec.Command("git", append([]string{"-C", root, "--no-optional-locks"}, args...)...)
-	command.Env = append(command.Environ(), "GIT_TERMINAL_PROMPT=0")
+	command.Env = append(command.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_PAGER=cat")
 	out, err := command.Output()
 	if err != nil {
 		return ""

@@ -67,10 +67,10 @@ func TestWriteListenBanner(t *testing.T) {
 		"Applied",
 		"payments-prod — Payments Prod",
 		"greet@1.0.0",
-		"greet-shell",
+		"greet-shell@1.0.0",
 		"capabilities/greet.yaml",
 		"recipes/greet-shell.yaml",
-		"manual-review",
+		"manual-review@1.0.0",
 		"Inbox",
 		"req_01",
 		"guest",
@@ -87,7 +87,7 @@ func TestWriteListenBanner(t *testing.T) {
 	if !strings.Contains(out, "└── payments-prod") && !strings.Contains(out, "├── payments-prod") {
 		t.Fatalf("catalog space should be a tree parent:\n%s", out)
 	}
-	if !strings.Contains(out, "├── greet  ") && !strings.Contains(out, "└── greet  ") {
+	if !strings.Contains(out, "├── greet@1.0.0") && !strings.Contains(out, "└── greet@1.0.0") {
 		t.Fatalf("catalog capability should be a tree leaf:\n%s", out)
 	}
 	if strings.Contains(out, "Capabilities (local)") {
@@ -139,8 +139,8 @@ func TestWriteListenBannerEmptyExplainsLocalMismatch(t *testing.T) {
 		"None of these local Capabilities are applied here.",
 		"Local",
 		"├── engineering",
-		"├── greet",
-		"└── manual-review",
+		"├── greet@1.0.0",
+		"└── manual-review@1.0.0",
 		"└── engineering",
 		"hotfix/export",
 		"capabilities/greet.yaml",
@@ -157,6 +157,82 @@ func TestWriteListenBannerEmptyExplainsLocalMismatch(t *testing.T) {
 	}
 	if strings.Contains(out, "space     engineering") {
 		t.Fatalf("nested tree fields still present:\n%s", out)
+	}
+}
+
+func TestWriteListenLocalTreesAnnotatesCatalog(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	writeListenLocalTrees(&buf, newTermStyle(&buf), []listenLocalTreeView{{
+		Path:  "/ws/private",
+		Space: "private",
+		Capabilities: []listenLocalCapabilityView{{
+			Label:  "greet@1.0.0",
+			Path:   "capabilities/greet.yaml",
+			Origin: "pinned",
+			Recipes: []listenLocalRecipeView{{
+				Label:   "greet-with-approval@1.0.0",
+				Path:    "recipes/greet-with-approval.yaml",
+				Origin:  "stale",
+				Runtime: "shell",
+				Checked: true,
+				Ready:   true,
+			}, {
+				Label:   "greet-with-shell@1.0.0",
+				Path:    "recipes/greet.yaml",
+				Origin:  "pinned",
+				Runtime: "shell",
+				Checked: true,
+				Ready:   true,
+			}},
+		}, {
+			Label:  "manual-review@1.0.0",
+			Path:   "capabilities/manual-review.yaml",
+			Origin: "pinned",
+		}, {
+			Label:  "release-pipeline@1.0.0",
+			Path:   "capabilities/release-pipeline.yaml",
+			Origin: "pinned",
+			Recipes: []listenLocalRecipeView{{
+				Label:   "release-pipeline-shell@1.0.0",
+				Path:    "recipes/release-pipeline.yaml",
+				Origin:  "pinned",
+				Runtime: "shell",
+				Checked: true,
+				Ready:   false,
+				Missing: []string{"command helm"},
+			}},
+		}},
+	}})
+	out := buf.String()
+	for _, want := range []string{
+		"private",
+		"3 caps · 3 recipes · 1 blocked",
+		"! greet-with-approval@1.0.0",
+		"stale",
+		"manual",
+		"manual-review@1.0.0",
+		"shell",
+		"✓ greet-with-shell@1.0.0",
+		"✗ release-pipeline-shell@1.0.0",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "manual-review") && !strings.Contains(line, "manual") {
+			t.Fatalf("manual Capability missing mode:\n%s", line)
+		}
+		if strings.Contains(line, "greet-with-approval") && !strings.Contains(line, "!") {
+			t.Fatalf("stale Recipe missing warn mark:\n%s", line)
+		}
+		if strings.Contains(line, "greet-with-shell@1.0.0") && !strings.Contains(line, "shell") {
+			t.Fatalf("Recipe missing runtime:\n%s", line)
+		}
+		if strings.Contains(line, "greet-with-shell@1.0.0") && strings.Contains(line, "!") {
+			t.Fatalf("pinned Recipe should not warn:\n%s", line)
+		}
 	}
 }
 
@@ -201,17 +277,19 @@ func TestWriteListenBannerEmptyOrgListsLocalCatalog(t *testing.T) {
 	for _, want := range []string{
 		"Local",
 		"└── finance",
-		"├── close-month",
+		"2 caps · 2 recipes · 1 blocked",
+		"├── close-month@1.1.0",
 		"capabilities/close-month.yaml",
 		"✓",
+		"close-month-ledger@1.1.0",
 		"recipes/close-month-ledger.yaml",
 		"✗",
 		"command stripe",
 		"env STRIPE_API_KEY",
-		"└── sync-invoices",
+		"└── sync-invoices@1.1.0",
 		"Status",
 		"not ready",
-		"sync-invoices-stripe",
+		"sync-invoices-stripe@1.1.0",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)

@@ -68,6 +68,28 @@ func TestPluralDefinitionCommandsAreLocal(t *testing.T) {
 	}
 }
 
+func TestRecipesListShowsCapabilityCount(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	app, stdout, stderr := testApp(root)
+	if code := app.Run([]string{"recipes", "--json"}); code != ExitSuccess {
+		t.Fatalf("json exit = %d, stderr = %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"capabilities": 1`) {
+		t.Fatalf("json missing capabilities count: %s", stdout.String())
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"recipes"}); code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "CAPS") || strings.Contains(out, "PROVIDES") {
+		t.Fatalf("human recipes table = %s", out)
+	}
+}
+
 func TestRunsListShowAndLogsReadLocalState(t *testing.T) {
 	root := t.TempDir()
 	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
@@ -258,12 +280,18 @@ func TestCapabilitiesListUsesWorkspaceDiscovery(t *testing.T) {
 	}
 	recipesOut := stdout.String()
 	for _, want := range []string{
-		"SPACE", "NAME", "VERSION", "RUNTIME", "PIN", "HOST", "PROVIDES", "RUNS", "LAST", "FILE",
+		"SPACE", "NAME", "VERSION", "RUNTIME", "PIN", "HOST", "CAPS", "RUNS", "LAST", "FILE",
 		"engineering", "greet-shell", "unpinned",
 	} {
 		if !strings.Contains(recipesOut, want) {
 			t.Fatalf("recipes missing %q in:\n%s", want, recipesOut)
 		}
+	}
+	if !strings.Contains(recipesOut, "CAPS") {
+		t.Fatalf("recipes missing CAPS count column:\n%s", recipesOut)
+	}
+	if strings.Contains(recipesOut, "PROVIDES") {
+		t.Fatalf("recipes still uses PROVIDES names:\n%s", recipesOut)
 	}
 	if strings.Contains(recipesOut, "├──") || strings.Contains(recipesOut, "└──") {
 		t.Fatalf("recipes tree still rendered:\n%s", recipesOut)

@@ -68,6 +68,7 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 		"doppels run",
 		"doppels runs [list]",
 		"doppels capabilities|caps",
+		"doppels tree",
 		"doppels update",
 		"doppels runs [list]",
 		"--json",
@@ -249,6 +250,37 @@ func TestValidateContractAndHostExitCodes(t *testing.T) {
 			t.Fatalf("stderr still dumps validator noise:\n%s", out)
 		}
 	})
+}
+
+func TestNewConstructsRunnableApp(t *testing.T) {
+	app := New()
+	if app == nil || app.Stdout == nil || app.Stderr == nil || app.Getwd == nil {
+		t.Fatalf("New() missing defaults: %#v", app)
+	}
+}
+
+func TestDescribeRecipeHumanAndJSON(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	app, stdout, stderr := testApp(root)
+	if code := app.Run([]string{"describe", "recipe/greet-shell"}); code != ExitSuccess {
+		t.Fatalf("exit = %d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	for _, want := range []string{"Recipe", "greet-shell@1.0.0", "Runtime", "shell", "Provides", "greet"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
+	}
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"describe", "--json", "recipe/greet-shell"}); code != ExitSuccess {
+		t.Fatalf("json exit = %d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"kind": "RecipeDescription"`) {
+		t.Fatalf("json = %s", stdout.String())
+	}
 }
 
 func TestDescribeShowsAmbiguousRecipesWithoutSelectingOne(t *testing.T) {

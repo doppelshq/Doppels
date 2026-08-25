@@ -810,7 +810,10 @@ func TestShareStrictBlocksStaleLockPin(t *testing.T) {
 		t.Fatalf("strict stale share exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
 	}
 	out := stderr.String()
-	if !strings.Contains(out, "stale") || !strings.Contains(out, "version bump") {
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "metadata.version") {
 		t.Fatalf("strict stale share stderr = %s", out)
+	}
+	if strings.Contains(out, "warning:") {
+		t.Fatalf("raw warning prefix still present: %s", out)
 	}
 }

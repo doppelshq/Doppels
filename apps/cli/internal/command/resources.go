@@ -109,15 +109,16 @@ func (app *App) listCapabilities(arguments []string) int {
 }
 
 type recipeListItem struct {
-	Space      string   `json:"space,omitempty"`
-	Name       string   `json:"name"`
-	Version    string   `json:"version"`
-	Runtime    string   `json:"runtime"`
-	Pin        string   `json:"pin,omitempty"`
-	Provides   []string `json:"provides"`
-	Runs       int      `json:"runs"`
-	LastRun    string   `json:"lastRun,omitempty"`
-	SourcePath string   `json:"source"`
+	Space        string   `json:"space,omitempty"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Runtime      string   `json:"runtime"`
+	Pin          string   `json:"pin,omitempty"`
+	Provides     []string `json:"provides"`
+	Capabilities int      `json:"capabilities"`
+	Runs         int      `json:"runs"`
+	LastRun      string   `json:"lastRun,omitempty"`
+	SourcePath   string   `json:"source"`
 }
 
 func (app *App) listRecipes(arguments []string) int {
@@ -229,15 +230,16 @@ func recipeListItems(trees []listenLocalTreeView, stats map[string]catalogRunSta
 				name, version := splitRevision(recipe.Label)
 				stat := stats[catalogListKey(tree.Space, name, version)]
 				items = append(items, recipeListItem{
-					Space:      tree.Space,
-					Name:       name,
-					Version:    version,
-					Runtime:    recipe.Runtime,
-					Pin:        pinOrUnpinned(recipe.Origin),
-					Provides:   append([]string(nil), recipe.Provides...),
-					Runs:       stat.Count,
-					LastRun:    stat.Last,
-					SourcePath: recipe.Path,
+					Space:        tree.Space,
+					Name:         name,
+					Version:      version,
+					Runtime:      recipe.Runtime,
+					Pin:          pinOrUnpinned(recipe.Origin),
+					Provides:     append([]string(nil), recipe.Provides...),
+					Capabilities: len(recipe.Provides),
+					Runs:         stat.Count,
+					LastRun:      stat.Last,
+					SourcePath:   recipe.Path,
 				})
 			}
 		}
@@ -291,7 +293,7 @@ func writeCapabilityList(writer io.Writer, trees []listenLocalTreeView, items []
 func writeRecipeList(writer io.Writer, trees []listenLocalTreeView, items []recipeListItem) {
 	style := newTermStyle(writer)
 	showSpace := catalogListShowSpace(trees)
-	header := []string{style.dim("NAME"), style.dim("VERSION"), style.dim("RUNTIME"), style.dim("PIN"), style.dim("HOST"), style.dim("PROVIDES"), style.dim("RUNS"), style.dim("LAST"), style.dim("FILE")}
+	header := []string{style.dim("NAME"), style.dim("VERSION"), style.dim("RUNTIME"), style.dim("PIN"), style.dim("HOST"), style.dim("CAPS"), style.dim("RUNS"), style.dim("LAST"), style.dim("FILE")}
 	if showSpace {
 		header = append([]string{style.dim("SPACE")}, header...)
 	}
@@ -304,7 +306,7 @@ func writeRecipeList(writer io.Writer, trees []listenLocalTreeView, items []reci
 			last = "—"
 		}
 		row := []string{
-			item.Name, item.Version, item.Runtime, item.Pin, host, strings.Join(item.Provides, ","),
+			item.Name, item.Version, item.Runtime, item.Pin, host, fmt.Sprintf("%d", item.Capabilities),
 			fmt.Sprintf("%d", item.Runs), last, catalogFileCell(style, trees, item.Space, item.SourcePath),
 		}
 		if showSpace {

@@ -145,9 +145,12 @@ func (app *App) runLocal(arguments []string) int {
 			fmt.Fprintln(app.Stderr, "--detach only supports shell Recipes")
 			return ExitContract
 		}
-		if code := app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict); code != ExitSuccess {
-			return code
-		}
+	}
+	issues, code := app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict)
+	if code != ExitSuccess {
+		return code
+	}
+	if detach {
 		if code := app.checkRecipeDrift(recipeDefinition); code != ExitSuccess {
 			return code
 		}
@@ -156,9 +159,6 @@ func (app *App) runLocal(arguments []string) int {
 			recipeRef = recipeDefinition.Value.Metadata.Name + "@" + recipeDefinition.Value.Metadata.Version
 		}
 		return app.startDetachedRun(root, buildDetachedRunArgs(capabilityRef, recipeRef, inputs, *jsonOutput), *jsonOutput)
-	}
-	if code := app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict); code != ExitSuccess {
-		return code
 	}
 	if code := app.checkRecipeDrift(recipeDefinition); code != ExitSuccess {
 		return code
@@ -204,6 +204,9 @@ func (app *App) runLocal(arguments []string) int {
 	var timeline *runTimeline
 	if !*jsonOutput {
 		timeline = newRunTimeline(app.Stderr, invocation)
+		if len(issues) > 0 {
+			timeline.pinWarnings = []string{"stale"}
+		}
 		options.OnEvent = timeline.onEvent
 	}
 	result, runErr := execution.Execute(app.context(), invocation, options)

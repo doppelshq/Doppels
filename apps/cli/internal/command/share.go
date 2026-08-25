@@ -219,9 +219,12 @@ func (app *App) runShare(arguments []string) int {
 		fmt.Fprintln(app.Stderr, "--output and --evidence are only valid for manual fulfillment")
 		return ExitContract
 	}
+	var pinIssues []lockPinIssue
 	if hasLocal {
-		if code := app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict); code != ExitSuccess {
-			return code
+		var pinCode int
+		pinIssues, pinCode = app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict)
+		if pinCode != ExitSuccess {
+			return pinCode
 		}
 		if code := app.validateShareHost(root, catalog, recipeDefinition); code != ExitSuccess {
 			return code
@@ -348,6 +351,9 @@ func (app *App) runShare(arguments []string) int {
 	if !*jsonOutput {
 		timeline = newRunTimeline(app.Stderr, invocation)
 		timeline.hideCatalog = true
+		if len(pinIssues) > 0 {
+			timeline.pinWarnings = []string{"stale"}
+		}
 		options.OnEvent = func(callbackContext context.Context, event execution.RunEvent) error {
 			if err := timeline.onEvent(callbackContext, event); err != nil {
 				return err

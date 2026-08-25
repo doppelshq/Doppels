@@ -84,6 +84,8 @@ func (app *App) Run(arguments []string) int {
 		return app.runCapabilities(arguments[1:])
 	case "recipes":
 		return app.runRecipes(arguments[1:])
+	case "tree":
+		return app.runTree(arguments[1:])
 	case "runs":
 		return app.runRuns(arguments[1:])
 	case "organizations", "orgs":
@@ -149,6 +151,7 @@ func (app *App) usage(writer io.Writer) {
 		{"doppels describe (capability|recipe)/…", "inspect a definition"},
 		{"doppels capabilities|caps [list]|show …", "list local Capabilities"},
 		{"doppels recipes [list]|show …", "list local Recipes"},
+		{"doppels tree [--json]", "Spaces → Capabilities → Recipes"},
 		{"doppels runs [list]|show|logs …", "history (default 20)"},
 	})
 	writeUsageSection(writer, style, "Tooling", []usageLine{

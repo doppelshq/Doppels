@@ -2,11 +2,13 @@ package command
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/manifest"
 )
 
 func TestWriteLocalRunSummaryStatePathOpensRunJSON(t *testing.T) {
@@ -69,5 +71,37 @@ func TestPrefixLinesIndentsStepOutput(t *testing.T) {
 	}
 	if got := buf.String(); got != "    mock escalate-ticket\n" {
 		t.Fatalf("prefixLines = %q", got)
+	}
+}
+
+func TestRunTimelineStepFailedAndRunFailed(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	timeline := newRunTimeline(&buf, execution.Invocation{
+		Capability: &manifest.Capability{Metadata: manifest.Metadata{Name: "greet", Version: "1.0.0"}},
+		Recipe: &manifest.Recipe{
+			Metadata: manifest.Metadata{Name: "greet-shell", Version: "1.0.0"},
+			Steps:    []manifest.Step{{ID: "greet", Name: "Greet"}},
+		},
+	})
+	if err := timeline.onEvent(context.Background(), execution.RunEvent{Type: "run_created", RunID: "runfail01"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.onEvent(context.Background(), execution.RunEvent{Type: "step_started", StepID: "greet"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.onEvent(context.Background(), execution.RunEvent{
+		Type: "step_failed", StepID: "greet", Data: map[string]any{"error": "exit 1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := timeline.onEvent(context.Background(), execution.RunEvent{Type: "run_failed"}); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Greet", "exit 1", "failed"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("missing %q in:\n%s", want, out)
+		}
 	}
 }

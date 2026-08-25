@@ -21,6 +21,7 @@ type runTimeline struct {
 	capName     string
 	capVer      string
 	recipe      string
+	pinWarnings []string
 	stepNames   map[string]string
 	header      bool
 	hideCatalog bool
@@ -126,6 +127,9 @@ func (t *runTimeline) writeHeader(runID string) {
 	if !t.hideCatalog {
 		fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Cap"), t.style.bold(t.capName))
 		fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("Recipe"), t.recipe)
+	}
+	for range t.pinWarnings {
+		fmt.Fprintf(t.writer, "  %s  %s\n", t.style.field("PIN"), t.style.boldYellow("stale"))
 	}
 	fmt.Fprintln(t.writer)
 }
@@ -394,20 +398,4 @@ func writeNamedResultMap(writer io.Writer, style termStyle, values map[string]an
 			fmt.Fprintf(writer, "    %s%s  %v\n", style.cyan(name), pad, value)
 		}
 	}
-}
-
-func writeLocalRun(writer io.Writer, result execution.Result) {
-	if result.Run.ID == "" {
-		return
-	}
-	style := newTermStyle(writer)
-	fmt.Fprintf(writer, "  %s  %s\n", style.field("Run"), style.shortIDPrimary(result.Run.ID))
-	var elapsed time.Duration
-	if !result.Run.CreatedAt.IsZero() {
-		elapsed = time.Since(result.Run.CreatedAt)
-		if elapsed < 0 {
-			elapsed = 0
-		}
-	}
-	writeLocalRunSummary(writer, result, elapsed)
 }

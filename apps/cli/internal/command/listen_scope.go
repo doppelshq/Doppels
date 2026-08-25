@@ -431,6 +431,8 @@ func writeListenTree(writer io.Writer, style termStyle, indent string, items []l
 			mark = style.boldGreen("✓") + " "
 		case "fail":
 			mark = style.boldRed("✗") + " "
+		case "warn":
+			mark = style.boldYellow("!") + " "
 		}
 		name := item.Label
 		if item.Dim {
@@ -462,11 +464,33 @@ func recipeRequireMarks(checked, ready bool, missing []string) string {
 	return "fail"
 }
 
-func listenRecipeTreeItem(label, path, origin string, checked, ready bool, missing []string) listenTreeItem {
+func catalogPinMark(origin, hostMark string) string {
+	if hostMark == "fail" {
+		return "fail"
+	}
+	if origin == "stale" {
+		return "warn"
+	}
+	return hostMark
+}
+
+func catalogTreeHint(parts ...string) string {
+	var out []string
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		out = append(out, part)
+	}
+	return strings.Join(out, "  ")
+}
+
+func listenRecipeTreeItem(label, path, origin, runtime string, checked, ready bool, missing []string) listenTreeItem {
 	item := listenTreeItem{
-		Label:  listenDisplayName(label),
-		Mark:   recipeRequireMarks(checked, ready, missing),
-		Hint:   origin,
+		Label:  label,
+		Mark:   catalogPinMark(origin, recipeRequireMarks(checked, ready, missing)),
+		Hint:   catalogTreeHint(runtime, pinOrUnpinned(origin)),
 		Suffix: path,
 	}
 	for _, need := range missing {
@@ -501,13 +525,13 @@ func catalogTreeItems(view listenScopeView) []listenTreeItem {
 		item := listenTreeItem{Label: label}
 		for _, capability := range grouped[space] {
 			child := listenTreeItem{
-				Label:  listenDisplayName(capability.Label),
-				Hint:   "applied",
+				Label:  capability.Label,
+				Hint:   catalogTreeHint(catalogTreeModeHint(capability.HasRecipe && capability.RecipeName != ""), "applied"),
 				Suffix: capability.CapabilityPath,
 			}
 			if capability.HasRecipe && capability.RecipeName != "" {
 				child.Children = append(child.Children, listenRecipeTreeItem(
-					capability.RecipeName, capability.RecipePath, "applied",
+					capability.RecipeName, capability.RecipePath, "applied", "",
 					capability.Checked, capability.Ready, capability.Missing,
 				))
 			}
@@ -536,13 +560,14 @@ func writeListenLocalTrees(writer io.Writer, style termStyle, trees []listenLoca
 		}
 		for _, capability := range tree.Capabilities {
 			child := listenTreeItem{
-				Label:  listenDisplayName(capability.Label),
-				Hint:   capability.Origin,
+				Label:  capability.Label,
+				Mark:   catalogPinMark(capability.Origin, ""),
+				Hint:   catalogTreeHint(catalogTreeModeHint(len(capability.Recipes) > 0), pinOrUnpinned(capability.Origin)),
 				Suffix: capability.Path,
 			}
 			for _, recipe := range capability.Recipes {
 				child.Children = append(child.Children, listenRecipeTreeItem(
-					recipe.Label, recipe.Path, recipe.Origin, recipe.Checked, recipe.Ready, recipe.Missing,
+					recipe.Label, recipe.Path, recipe.Origin, recipe.Runtime, recipe.Checked, recipe.Ready, recipe.Missing,
 				))
 			}
 			item.Children = append(item.Children, child)
@@ -568,8 +593,50 @@ func listenLocalRootLabel(trees []listenLocalTreeView) string {
 	return filepath.Base(parent)
 }
 
+func listenLocalTreeStats(tree listenLocalTreeView) (caps, recipes, blocked int) {
+	caps = len(tree.Capabilities)
+	for _, capability := range tree.Capabilities {
+		recipes += len(capability.Recipes)
+		for _, recipe := range capability.Recipes {
+			if recipe.Checked && !recipe.Ready {
+				blocked++
+			}
+		}
+	}
+	return caps, recipes, blocked
+}
+
+func listenLocalTreeCounts(tree listenLocalTreeView) string {
+	caps, recipes, blocked := listenLocalTreeStats(tree)
+	parts := []string{
+		listenCount(caps, "cap", "caps"),
+		listenCount(recipes, "recipe", "recipes"),
+	}
+	if blocked > 0 {
+		parts = append(parts, listenCount(blocked, "blocked", "blocked"))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func catalogTreeMode(hasRecipe bool) string {
+	if hasRecipe {
+		return "recipe"
+	}
+	return "manual"
+}
+
+func catalogTreeModeHint(hasRecipe bool) string {
+	if hasRecipe {
+		return ""
+	}
+	return "manual"
+}
+
 func listenLocalTreeExtra(tree listenLocalTreeView) string {
 	var parts []string
+	if counts := listenLocalTreeCounts(tree); counts != "" {
+		parts = append(parts, counts)
+	}
 	if branch := strings.TrimSpace(tree.Branch); branch != "" && branch != "—" && branch != "main" && branch != "master" {
 		parts = append(parts, branch)
 	}
@@ -627,7 +694,7 @@ func writeListenBannerStatus(writer io.Writer, style termStyle, view listenScope
 		fmt.Fprintln(writer, "    "+strings.Join(parts, "  ·  "))
 	}
 	for _, recipe := range blockedRecipes {
-		line := "    " + style.boldRed("✗") + " " + style.value(valueOrDash(recipe.Space)+"/"+listenDisplayName(recipe.Label))
+		line := "    " + style.boldRed("✗") + " " + style.value(valueOrDash(recipe.Space)+"/"+recipe.Label)
 		if len(recipe.Missing) > 0 {
 			line += "  " + style.dim(strings.Join(recipe.Missing, " · "))
 		}
@@ -685,26 +752,46 @@ func resourceOrigin(lock *projectlock.File, kind, name, version, digest string) 
 	return "unpinned"
 }
 
-func (app *App) checkLockPin(root string, capability manifest.CapabilityDefinition, recipe *manifest.RecipeDefinition, strict bool) int {
-	lock, err := projectlock.Load(root)
-	if err != nil {
-		fmt.Fprintf(app.Stderr, "warning: load %s: %v\n", projectlock.Filename, err)
-		return ExitSuccess
-	}
-	stale := false
+type lockPinIssue struct {
+	Kind    string
+	Name    string
+	Version string
+	Path    string
+	Root    string
+}
+
+func collectLockPinIssues(root string, lock *projectlock.File, capability manifest.CapabilityDefinition, recipe *manifest.RecipeDefinition) []lockPinIssue {
+	var issues []lockPinIssue
 	if resourceOrigin(lock, "Capability", capability.Value.Metadata.Name, capability.Value.Metadata.Version, capability.Source.SHA256) == "stale" {
-		fmt.Fprintf(app.Stderr, "Capability %s@%s changed without a version bump (PIN stale)\n", capability.Value.Metadata.Name, capability.Value.Metadata.Version)
-		stale = true
+		issues = append(issues, lockPinIssue{
+			Kind: "Capability", Name: capability.Value.Metadata.Name, Version: capability.Value.Metadata.Version,
+			Path: capability.Source.Path, Root: root,
+		})
 	}
 	if recipe != nil && resourceOrigin(lock, "Recipe", recipe.Value.Metadata.Name, recipe.Value.Metadata.Version, recipe.Source.SHA256) == "stale" {
-		fmt.Fprintf(app.Stderr, "Recipe %s@%s changed without a version bump (PIN stale)\n", recipe.Value.Metadata.Name, recipe.Value.Metadata.Version)
-		stale = true
+		issues = append(issues, lockPinIssue{
+			Kind: "Recipe", Name: recipe.Value.Metadata.Name, Version: recipe.Value.Metadata.Version,
+			Path: recipe.Source.Path, Root: root,
+		})
 	}
-	if !stale || !strict {
-		return ExitSuccess
+	return issues
+}
+
+func (app *App) checkLockPin(root string, capability manifest.CapabilityDefinition, recipe *manifest.RecipeDefinition, strict bool) ([]lockPinIssue, int) {
+	lock, err := projectlock.Load(root)
+	if err != nil {
+		fmt.Fprintf(app.Stderr, "load %s: %v\n", projectlock.Filename, err)
+		if strict {
+			return nil, ExitContract
+		}
+		return nil, ExitSuccess
 	}
-	fmt.Fprintln(app.Stderr, "hint: bump metadata.version and re-apply, or omit --strict")
-	return ExitContract
+	issues := collectLockPinIssues(root, lock, capability, recipe)
+	writeLockPinCard(app.Stderr, issues, strict)
+	if len(issues) == 0 || !strict {
+		return issues, ExitSuccess
+	}
+	return issues, ExitContract
 }
 
 func writeListenField(writer io.Writer, style termStyle, label, value string) {
