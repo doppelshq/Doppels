@@ -31,6 +31,31 @@ type listenJob struct {
 	space        string
 }
 
+func (app *App) runNode(arguments []string) int {
+	if isHelp(arguments) {
+		writeNodeUsage(app.Stdout)
+		return ExitSuccess
+	}
+	if len(arguments) == 0 {
+		writeNodeUsage(app.Stderr)
+		return ExitContract
+	}
+	switch arguments[0] {
+	case "up":
+		return app.runListen(arguments[1:])
+	default:
+		fmt.Fprintf(app.Stderr, "unknown node subcommand %q\n", arguments[0])
+		writeNodeUsage(app.Stderr)
+		return ExitContract
+	}
+}
+
+func writeNodeUsage(writer io.Writer) {
+	fmt.Fprintln(writer, "Usage: doppels node up [--org …] [--space …] [--capability …] [--yes] [--json]")
+	fmt.Fprintln(writer, "Bring this Node online in the foreground. Ctrl-C stops it.")
+	fmt.Fprintln(writer, "On each Request: [a]pprove  [r]eject  [s]kip  [b]ackground")
+}
+
 // runListen attaches to Shares already created by this Identity (console or
 // `doppels share`). It never creates Shares — Share stays one-shot.
 func (app *App) runListen(arguments []string) int {
@@ -53,7 +78,7 @@ func (app *App) runListen(arguments []string) int {
 	sessionServer := ""
 	if apiToken == "" {
 		if store == nil {
-			fmt.Fprintln(app.Stderr, "login or DOPPELS_API_TOKEN is required for listen")
+			fmt.Fprintln(app.Stderr, "login or DOPPELS_API_TOKEN is required for node up")
 			return ExitOperational
 		}
 		session, sessionErr := store.Session()
@@ -65,7 +90,7 @@ func (app *App) runListen(arguments []string) int {
 				defaultServer = session.Profile.Server
 			}
 		case errors.Is(sessionErr, configstore.ErrNotLoggedIn), errors.Is(sessionErr, configstore.ErrNotConfigured):
-			fmt.Fprintln(app.Stderr, "login or DOPPELS_API_TOKEN is required for listen")
+			fmt.Fprintln(app.Stderr, "login or DOPPELS_API_TOKEN is required for node up")
 			return ExitOperational
 		default:
 			fmt.Fprintf(app.Stderr, "load login: %v\n", sessionErr)
@@ -76,7 +101,7 @@ func (app *App) runListen(arguments []string) int {
 		defaultServer = "https://doppels.so"
 	}
 
-	flags := app.flagSet("listen")
+	flags := app.flagSet("node up")
 	server := flags.String("server", defaultServer, "Doppels control-plane URL")
 	pollEvery := flags.Duration("poll", 2*time.Second, "inbox poll interval")
 	approveAll := flags.Bool("yes", false, "auto-fulfill Requests and approve required Steps")
@@ -91,7 +116,7 @@ func (app *App) runListen(arguments []string) int {
 		return ExitContract
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(app.Stderr, "listen takes no positional args; use --org, --space, and --capability to filter")
+		fmt.Fprintln(app.Stderr, "node up takes no positional args; use --org, --space, and --capability to filter")
 		return ExitContract
 	}
 	filters := listenFilters{Organization: *org, Space: *space, Capability: *capability}
@@ -135,6 +160,7 @@ func (app *App) runListen(arguments []string) int {
 		fmt.Fprintf(app.Stderr, "resolve listen scope: %v\n", err)
 		return ExitOperational
 	}
+	scopeView.LocalTrees = index.localTrees()
 	scopeView.LocalProjects = index.projectLabels()
 	if !*jsonOutput {
 		writeListenBanner(app.Stderr, scopeView)
@@ -159,173 +185,260 @@ func (app *App) runListen(arguments []string) int {
 		errCh:       producerErr,
 	})
 
-	for {
-		select {
-		case <-ctx.Done():
-			if !*jsonOutput {
-				clearListenStatus(app.Stderr)
-				fmt.Fprintln(app.Stderr, "Listening stopped.")
-			}
-			drainListenJobs(jobs)
-			return shareCommandExitCode(ctx, ctx.Err())
-		case err := <-producerErr:
-			drainListenJobs(jobs)
-			if err == nil || errors.Is(err, context.Canceled) {
-				if !*jsonOutput {
-					clearListenStatus(app.Stderr)
-					fmt.Fprintln(app.Stderr, "Listening stopped.")
-				}
-				return shareCommandExitCode(ctx, ctx.Err())
-			}
+	var background sync.WaitGroup
+	var held []listenJob
+	decisionN := 0
+	stopNode := func(message string, err error) int {
+		background.Wait()
+		if !*jsonOutput {
 			clearListenStatus(app.Stderr)
-			fmt.Fprintf(app.Stderr, "Unable to keep listening: %v\n", err)
-			return shareCommandExitCode(ctx, err)
-		case job, ok := <-jobs:
-			if !ok {
-				return ExitSuccess
+			if message != "" {
+				fmt.Fprintln(app.Stderr, message)
 			}
-			queued := len(jobs)
-			if *jsonOutput {
-				payload := map[string]any{
-					"kind":    "ListenRequest",
-					"origin":  job.origin,
-					"request": job.request,
-					"queued":  queued,
+		}
+		drainListenJobs(jobs)
+		for _, extra := range held {
+			if extra.channel != nil {
+				extra.channel.Close()
+			}
+		}
+		if err != nil {
+			return shareCommandExitCode(ctx, err)
+		}
+		return ExitSuccess
+	}
+
+	for {
+		var job listenJob
+		if len(held) > 0 {
+			job, held = held[0], held[1:]
+		} else {
+			select {
+			case <-ctx.Done():
+				return stopNode("Node offline.", ctx.Err())
+			case err := <-producerErr:
+				if err == nil || errors.Is(err, context.Canceled) {
+					return stopNode("Node offline.", ctx.Err())
 				}
+				clearListenStatus(app.Stderr)
+				fmt.Fprintf(app.Stderr, "Unable to keep Node online: %v\n", err)
+				background.Wait()
+				drainListenJobs(jobs)
+				return shareCommandExitCode(ctx, err)
+			case next, ok := <-jobs:
+				if !ok {
+					return stopNode("", nil)
+				}
+				job = next
+			}
+		}
+		for {
+			select {
+			case extra, ok := <-jobs:
+				if !ok {
+					jobs = nil
+				} else {
+					held = append(held, extra)
+					continue
+				}
+			default:
+			}
+			break
+		}
+
+		decisionN++
+		queue := listenPromptQueue{Index: decisionN, Total: decisionN + len(held)}
+		for _, extra := range held {
+			name := ""
+			if extra.request != nil {
+				name = extra.request.Capability.Name
+			}
+			if name != "" {
+				queue.Queued = append(queue.Queued, name)
+			}
+		}
+
+		if *jsonOutput {
+			payload := map[string]any{
+				"kind":    "ListenRequest",
+				"origin":  job.origin,
+				"request": job.request,
+				"queued":  len(held),
+			}
+			if job.created != nil {
+				payload["shareId"] = job.created.Share.ID
+			}
+			if job.organization != "" {
+				payload["organization"] = job.organization
+				payload["space"] = job.space
+			}
+			app.writeJSON(payload)
+		} else {
+			pauseStatus.Store(true)
+			clearListenStatus(app.Stderr)
+			writeListenJobPrompt(app.Stderr, *job.request, job, queue, app.now())
+		}
+
+		if job.origin == "share" && job.created != nil {
+			if pending, pendingErr := client.Pending(ctx, job.created.Share.ID, job.created.RunnerToken); pendingErr == nil && pending.Request != nil {
+				job.request = pending.Request
+			}
+		}
+
+		decision := fulfillApprove
+		if !*approveAll {
+			switch strings.ToLower(strings.TrimSpace(job.request.OperatorDecision)) {
+			case "approve":
+				decision = fulfillApprove
+				if !*jsonOutput {
+					style := newTermStyle(app.Stderr)
+					fmt.Fprintln(app.Stderr, "  "+style.dim("Console already approved this Request."))
+				}
+			case "reject":
+				decision = fulfillReject
+				if !*jsonOutput {
+					style := newTermStyle(app.Stderr)
+					fmt.Fprintln(app.Stderr, "  "+style.dim("Console already rejected this Request."))
+				}
+			default:
+				got, decideErr := interaction.decideFulfillment()
+				if decideErr != nil {
+					pauseStatus.Store(false)
+					if job.channel != nil {
+						job.channel.Close()
+					}
+					return stopNode("", decideErr)
+				}
+				decision = got
+			}
+		}
+
+		if decision == fulfillSkip {
+			pauseStatus.Store(false)
+			if !*jsonOutput {
+				style := newTermStyle(app.Stderr)
+				fmt.Fprintln(app.Stderr)
+				fmt.Fprintln(app.Stderr, "  "+style.dim("→ Skipped.")+" "+style.dim("Left pending; next Request…"))
+				fmt.Fprintln(app.Stderr)
+			} else {
+				payload := map[string]any{"kind": "ListenSkipped", "requestId": job.request.ID, "origin": job.origin}
 				if job.created != nil {
 					payload["shareId"] = job.created.Share.ID
 				}
-				if job.organization != "" {
-					payload["organization"] = job.organization
-					payload["space"] = job.space
-				}
 				app.writeJSON(payload)
-			} else {
-				pauseStatus.Store(true)
-				clearListenStatus(app.Stderr)
-				writeListenJobPrompt(app.Stderr, *job.request, job, queued, app.now())
 			}
-
-			if job.origin == "share" && job.created != nil {
-				if pending, pendingErr := client.Pending(ctx, job.created.Share.ID, job.created.RunnerToken); pendingErr == nil && pending.Request != nil {
-					job.request = pending.Request
-				}
-			}
-
-			fulfill := *approveAll
-			if !fulfill {
-				switch strings.ToLower(strings.TrimSpace(job.request.OperatorDecision)) {
-				case "approve":
-					fulfill = true
-					if !*jsonOutput {
-						style := newTermStyle(app.Stderr)
-						fmt.Fprintln(app.Stderr, "  "+style.dim("Console already approved this Request."))
-					}
-				case "reject":
-					fulfill = false
-					if !*jsonOutput {
-						style := newTermStyle(app.Stderr)
-						fmt.Fprintln(app.Stderr, "  "+style.dim("Console already rejected this Request."))
-					}
-				default:
-					decision, decideErr := interaction.decideFulfillment()
-					if decideErr != nil {
-						pauseStatus.Store(false)
-						if job.channel != nil {
-							job.channel.Close()
-						}
-						drainListenJobs(jobs)
-						return sharePromptExitCode(decideErr)
-					}
-					fulfill = decision
-				}
-			}
-
-			if !fulfill {
-				pauseStatus.Store(false)
-				if job.origin == "share" {
-					if rejectErr := submitOperatorRejected(ctx, job.channel, job.created, job.request, app.localNodeID(), app.now); rejectErr != nil {
-						fmt.Fprintf(app.Stderr, "Unable to reject: %v\n", rejectErr)
-						if job.channel != nil {
-							job.channel.Close()
-						}
-						return shareCommandExitCode(ctx, rejectErr)
-					}
-				} else if registry != nil {
-					if _, rejectErr := registry.DecideRequest(ctx, apiToken, job.organization, job.space, job.request.ID, "reject"); rejectErr != nil {
-						fmt.Fprintf(app.Stderr, "Unable to reject: %v\n", rejectErr)
-						return shareCommandExitCode(ctx, rejectErr)
-					}
-				}
-				if !*jsonOutput {
-					style := newTermStyle(app.Stderr)
-					fmt.Fprintln(app.Stderr)
-					fmt.Fprintln(app.Stderr, "  "+style.boldRed("→ Rejected.")+" "+style.dim("The recipient will see the Request cancelled."))
-					fmt.Fprintln(app.Stderr)
-				} else {
-					payload := map[string]any{"kind": "ListenRejected", "requestId": job.request.ID, "origin": job.origin}
-					if job.created != nil {
-						payload["shareId"] = job.created.Share.ID
-					}
-					app.writeJSON(payload)
-				}
-				if job.channel != nil {
-					job.channel.Close()
-				}
-				continue
-			}
-
-			if !*jsonOutput {
-				style := newTermStyle(app.Stderr)
-				fmt.Fprintln(app.Stderr)
-				fmt.Fprintln(app.Stderr, "  "+style.boldGreen("→ Approved.")+" "+style.dim("Running on this machine…"))
-				fmt.Fprintln(app.Stderr)
-			}
-
-			var code int
-			capabilityName := ""
-			if job.request != nil {
-				capabilityName = job.request.Capability.Name
-			} else if job.created != nil {
-				capabilityName = job.created.Share.CapabilityRevision.Name
-			}
-			root, catalog, resolveErr := index.resolve(capabilityName, job.space)
-			if resolveErr != nil {
-				fmt.Fprintln(app.Stderr, resolveErr)
-				pauseStatus.Store(false)
-				if job.channel != nil {
-					job.channel.Close()
-				}
-				drainListenJobs(jobs)
-				return ExitContract
-			}
-			switch job.origin {
-			case "space":
-				if registry != nil && strings.ToLower(strings.TrimSpace(job.request.OperatorDecision)) != "approve" {
-					if _, err := registry.DecideRequest(ctx, apiToken, job.organization, job.space, job.request.ID, "approve"); err != nil {
-						fmt.Fprintf(app.Stderr, "Unable to approve: %v\n", err)
-						pauseStatus.Store(false)
-						return shareCommandExitCode(ctx, err)
-					}
-				}
-				code = app.fulfillSpaceListenJob(ctx, registry, apiToken, scopeView.Header.Identity, root, catalog, job, *approveAll, interaction, outputValues, evidenceValues, *jsonOutput)
-			default:
-				code = app.fulfillListenJob(ctx, client, root, catalog, job, *approveAll, interaction, outputValues, evidenceValues, *jsonOutput)
-			}
-			pauseStatus.Store(false)
 			if job.channel != nil {
 				job.channel.Close()
 			}
-			if code != ExitSuccess {
-				drainListenJobs(jobs)
-				return code
+			continue
+		}
+
+		if decision == fulfillReject {
+			pauseStatus.Store(false)
+			if job.origin == "share" {
+				if rejectErr := submitOperatorRejected(ctx, job.channel, job.created, job.request, app.localNodeID(), app.now); rejectErr != nil {
+					fmt.Fprintf(app.Stderr, "Unable to reject: %v\n", rejectErr)
+					if job.channel != nil {
+						job.channel.Close()
+					}
+					background.Wait()
+					return shareCommandExitCode(ctx, rejectErr)
+				}
+			} else if registry != nil {
+				if _, rejectErr := registry.DecideRequest(ctx, apiToken, job.organization, job.space, job.request.ID, "reject"); rejectErr != nil {
+					fmt.Fprintf(app.Stderr, "Unable to reject: %v\n", rejectErr)
+					background.Wait()
+					return shareCommandExitCode(ctx, rejectErr)
+				}
 			}
 			if !*jsonOutput {
 				style := newTermStyle(app.Stderr)
 				fmt.Fprintln(app.Stderr)
-				fmt.Fprintln(app.Stderr, "  "+style.boldGreen("→ Done.")+" "+style.dim("Back to listening…"))
+				fmt.Fprintln(app.Stderr, "  "+style.boldRed("→ Rejected.")+" "+style.dim("The recipient will see the Request cancelled."))
 				fmt.Fprintln(app.Stderr)
+			} else {
+				payload := map[string]any{"kind": "ListenRejected", "requestId": job.request.ID, "origin": job.origin}
+				if job.created != nil {
+					payload["shareId"] = job.created.Share.ID
+				}
+				app.writeJSON(payload)
 			}
+			if job.channel != nil {
+				job.channel.Close()
+			}
+			continue
+		}
+
+		backgroundRun := decision == fulfillBackground
+		stepApprove := *approveAll || backgroundRun
+		if !*jsonOutput {
+			style := newTermStyle(app.Stderr)
+			fmt.Fprintln(app.Stderr)
+			if backgroundRun {
+				fmt.Fprintln(app.Stderr, "  "+style.boldGreen("→ Approved (background).")+" "+style.dim("Required Steps auto-approved. Next Request…"))
+			} else {
+				fmt.Fprintln(app.Stderr, "  "+style.boldGreen("→ Approved.")+" "+style.dim("Running on this machine…"))
+			}
+			fmt.Fprintln(app.Stderr)
+		}
+
+		runJob := func(current listenJob, autoSteps bool) int {
+			capabilityName := ""
+			if current.request != nil {
+				capabilityName = current.request.Capability.Name
+			} else if current.created != nil {
+				capabilityName = current.created.Share.CapabilityRevision.Name
+			}
+			root, catalog, resolveErr := index.resolve(capabilityName, current.space)
+			if resolveErr != nil {
+				fmt.Fprintln(app.Stderr, resolveErr)
+				if current.channel != nil {
+					current.channel.Close()
+				}
+				return ExitContract
+			}
+			var code int
+			switch current.origin {
+			case "space":
+				if registry != nil && strings.ToLower(strings.TrimSpace(current.request.OperatorDecision)) != "approve" {
+					if _, err := registry.DecideRequest(ctx, apiToken, current.organization, current.space, current.request.ID, "approve"); err != nil {
+						fmt.Fprintf(app.Stderr, "Unable to approve: %v\n", err)
+						return shareCommandExitCode(ctx, err)
+					}
+				}
+				code = app.fulfillSpaceListenJob(ctx, registry, apiToken, scopeView.Header.Identity, root, catalog, current, autoSteps, interaction, outputValues, evidenceValues, *jsonOutput)
+			default:
+				code = app.fulfillListenJob(ctx, client, root, catalog, current, autoSteps, interaction, outputValues, evidenceValues, *jsonOutput)
+			}
+			if current.channel != nil {
+				current.channel.Close()
+			}
+			return code
+		}
+
+		if backgroundRun {
+			current := job
+			background.Add(1)
+			go func() {
+				defer background.Done()
+				_ = runJob(current, true)
+			}()
+			pauseStatus.Store(false)
+			continue
+		}
+
+		code := runJob(job, stepApprove)
+		pauseStatus.Store(false)
+		if code != ExitSuccess {
+			background.Wait()
+			drainListenJobs(jobs)
+			return code
+		}
+		if !*jsonOutput {
+			style := newTermStyle(app.Stderr)
+			fmt.Fprintln(app.Stderr)
+			fmt.Fprintln(app.Stderr, "  "+style.boldGreen("→ Done.")+" "+style.dim("Waiting for Requests…"))
+			fmt.Fprintln(app.Stderr)
 		}
 	}
 }
@@ -384,7 +497,7 @@ func (app *App) listenInboxProducer(ctx context.Context, cfg listenInboxConfig) 
 
 	poll := func() error {
 		if cfg.registry == nil {
-			return errors.New("registry client is required for listen")
+			return errors.New("registry client is required for node up")
 		}
 		inbox, err := cfg.registry.ListenInbox(ctx, cfg.apiToken, registryclient.ListenFilters{
 			Organization: cfg.filters.Organization,
@@ -576,6 +689,8 @@ func (app *App) fulfillSpaceListenJob(
 	runtimeStdout := app.Stdout
 	if jsonOutput {
 		runtimeStdout = app.Stderr
+	} else {
+		runtimeStdout = prefixLines(runtimeStdout, "    ")
 	}
 	options := execution.Options{
 		ApproveAll:  approveAll,
@@ -643,49 +758,28 @@ func resolveSpaceListenFulfillment(catalog *manifest.Catalog, request execution.
 	}
 }
 
-func writeListenJobPrompt(writer io.Writer, request execution.RequestRecord, job listenJob, queued int, now time.Time) {
+func writeListenJobPrompt(writer io.Writer, request execution.RequestRecord, job listenJob, queue listenPromptQueue, now time.Time) {
 	if job.origin == "share" && job.created != nil {
-		writeListenDecisionPrompt(writer, request, job.created, queued, now)
+		writeListenDecisionPrompt(writer, request, job.created, queue, now)
 		return
 	}
-	writeListenSpaceDecisionPrompt(writer, request, job.organization, job.space, queued, now)
+	writeListenSpaceDecisionPrompt(writer, request, job.organization, job.space, queue, now)
 }
 
-func writeListenSpaceDecisionPrompt(writer io.Writer, request execution.RequestRecord, organization, space string, queued int, now time.Time) {
+func writeListenSpaceDecisionPrompt(writer io.Writer, request execution.RequestRecord, organization, space string, queue listenPromptQueue, now time.Time) {
 	style := newTermStyle(writer)
 	rule := style.cyan("════════════════════════════════════════")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, rule)
-	fmt.Fprintf(writer, "  %s  %s\n", style.field("Request"), style.boldCyan(fmt.Sprintf("%s@%s", request.Capability.Name, request.Capability.Version)))
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Request"), style.boldCyan(formatListenRequestTitle(request, queue)))
 	fmt.Fprintln(writer, rule)
 	fmt.Fprintln(writer)
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("From"), style.value(listenRequester(request.RequestedBy)))
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Id"), style.value(shortListenID(request.ID)))
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Scope"), style.value(organization+"/"+space))
-	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, "  "+style.bold("Inputs"))
-	fmt.Fprintln(writer, "  "+style.dim("──────"))
-	names := make([]string, 0, len(request.Inputs))
-	for name := range request.Inputs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		fmt.Fprintln(writer, "    "+style.dim("(none)"))
-	}
-	width := 8
-	for _, name := range names {
-		if len(name) > width {
-			width = len(name)
-		}
-	}
-	for _, name := range names {
-		fmt.Fprintf(writer, "    %s  %s\n", style.label(fmt.Sprintf("%-*s", width, name)), style.value(formatListenInput(request.Inputs[name])))
-	}
-	if queued > 0 {
-		fmt.Fprintln(writer)
-		fmt.Fprintf(writer, "  %s\n", style.dim(fmt.Sprintf("(%s queued after this)", listenCount(queued, "Request", "Requests"))))
-	}
+	writeListenInputBlock(writer, style, request)
+	writeListenQueueFooter(writer, style, queue)
+	_ = now
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, rule)
 	fmt.Fprintln(writer)
@@ -731,6 +825,8 @@ func (app *App) fulfillListenJob(
 	runtimeStdout := app.Stdout
 	if jsonOutput {
 		runtimeStdout = app.Stderr
+	} else {
+		runtimeStdout = prefixLines(runtimeStdout, "    ")
 	}
 	options := execution.Options{
 		ApproveAll: approveAll,
@@ -934,18 +1030,34 @@ func writeListenAttached(writer io.Writer, item shareclient.InboxItem, now time.
 	}
 }
 
-func writeListenDecisionPrompt(writer io.Writer, request execution.RequestRecord, created *shareclient.ShareCreated, queued int, now time.Time) {
+func writeListenDecisionPrompt(writer io.Writer, request execution.RequestRecord, created *shareclient.ShareCreated, queue listenPromptQueue, now time.Time) {
 	style := newTermStyle(writer)
 	rule := style.cyan("════════════════════════════════════════")
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, rule)
-	fmt.Fprintf(writer, "  %s  %s\n", style.field("Request"), style.boldCyan(fmt.Sprintf("%s@%s", request.Capability.Name, request.Capability.Version)))
+	fmt.Fprintf(writer, "  %s  %s\n", style.field("Request"), style.boldCyan(formatListenRequestTitle(request, queue)))
 	fmt.Fprintln(writer, rule)
 	fmt.Fprintln(writer)
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("From"), style.value(listenRequester(request.RequestedBy)))
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Id"), style.value(shortListenID(request.ID)))
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Share"), style.value(shortListenID(created.Share.ID)))
 	fmt.Fprintf(writer, "  %s  %s\n", style.field("Expires"), style.value(listenExpiry(created.Share.ExpiresAt, now)))
+	writeListenInputBlock(writer, style, request)
+	writeListenQueueFooter(writer, style, queue)
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, rule)
+	fmt.Fprintln(writer)
+}
+
+func formatListenRequestTitle(request execution.RequestRecord, queue listenPromptQueue) string {
+	title := fmt.Sprintf("%s@%s", request.Capability.Name, request.Capability.Version)
+	if queue.Index > 0 && queue.Total > 0 {
+		return fmt.Sprintf("[%d/%d]  %s", queue.Index, queue.Total, title)
+	}
+	return title
+}
+
+func writeListenInputBlock(writer io.Writer, style termStyle, request execution.RequestRecord) {
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "  "+style.bold("Inputs"))
 	fmt.Fprintln(writer, "  "+style.dim("──────"))
@@ -966,32 +1078,42 @@ func writeListenDecisionPrompt(writer io.Writer, request execution.RequestRecord
 	for _, name := range names {
 		fmt.Fprintf(writer, "    %s  %s\n", style.label(fmt.Sprintf("%-*s", width, name)), style.value(formatListenInput(request.Inputs[name])))
 	}
-	if queued > 0 {
-		fmt.Fprintln(writer)
-		fmt.Fprintf(writer, "  %s\n", style.dim(fmt.Sprintf("(%s queued after this)", listenCount(queued, "Request", "Requests"))))
-	}
-	fmt.Fprintln(writer)
-	fmt.Fprintln(writer, rule)
-	fmt.Fprintln(writer)
 }
 
-func (interaction *interaction) decideFulfillment() (bool, error) {
+func writeListenQueueFooter(writer io.Writer, style termStyle, queue listenPromptQueue) {
+	if len(queue.Queued) == 0 {
+		return
+	}
+	fmt.Fprintln(writer)
+	fmt.Fprintf(writer, "  %s  %s\n", style.dim("queue"), style.value(strings.Join(queue.Queued, " · ")))
+}
+
+func (interaction *interaction) decideFulfillment() (fulfillDecision, error) {
 	style := newTermStyle(interaction.output)
-	prompt := fmt.Sprintf("  %s   %s  › ", style.boldGreen("[a] Approve"), style.boldRed("[r] Reject"))
+	prompt := fmt.Sprintf("  %s  %s  %s  %s  › ",
+		style.boldGreen("[a] Approve"),
+		style.boldRed("[r] Reject"),
+		style.bold("[s] Skip"),
+		style.boldCyan("[b] Background"),
+	)
 	for {
 		answer, err := interaction.read(prompt)
 		if err != nil {
-			return false, err
+			return fulfillReject, err
 		}
 		switch strings.ToLower(strings.TrimSpace(answer)) {
-		case "a", "accept", "approve", "y", "yes", "s", "si", "sí", "aceptar":
-			return true, nil
+		case "a", "accept", "approve", "y", "yes", "si", "sí", "aceptar":
+			return fulfillApprove, nil
 		case "r", "reject", "n", "no", "rechazar":
-			return false, nil
+			return fulfillReject, nil
+		case "s", "skip":
+			return fulfillSkip, nil
+		case "b", "background", "bg":
+			return fulfillBackground, nil
 		case "":
-			fmt.Fprintln(interaction.output, "  "+style.dim("Empty. Type a or r."))
+			fmt.Fprintln(interaction.output, "  "+style.dim("Empty. Type a, r, s, or b."))
 		default:
-			fmt.Fprintln(interaction.output, "  "+style.yellow("Not recognized. Type a (approve) or r (reject)."))
+			fmt.Fprintln(interaction.output, "  "+style.yellow("Not recognized. Type a (approve), r (reject), s (skip), or b (background)."))
 		}
 	}
 }

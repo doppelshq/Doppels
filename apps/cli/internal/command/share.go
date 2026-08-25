@@ -76,6 +76,7 @@ func (app *App) runShare(arguments []string) int {
 	server := flags.String("server", defaultServer, "Doppels control-plane URL")
 	recipeName := flags.String("recipe", "", "compatible Recipe name[@version]")
 	approveAll := flags.Bool("yes", false, "approve every Step that explicitly requires approval")
+	strict := flags.Bool("strict", false, "refuse to share when a lock pin is stale")
 	inputsLocked := flags.Bool("locked", false, "make --input values immutable on the public form")
 	jsonOutput := flags.Bool("json", false, "write the initial Share session as JSON")
 	var rawInputs, rawOutputs, rawEvidence namedValues
@@ -218,7 +219,13 @@ func (app *App) runShare(arguments []string) int {
 		fmt.Fprintln(app.Stderr, "--output and --evidence are only valid for manual fulfillment")
 		return ExitContract
 	}
+	var pinIssues []lockPinIssue
 	if hasLocal {
+		var pinCode int
+		pinIssues, pinCode = app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict)
+		if pinCode != ExitSuccess {
+			return pinCode
+		}
 		if code := app.validateShareHost(root, catalog, recipeDefinition); code != ExitSuccess {
 			return code
 		}
@@ -321,6 +328,8 @@ func (app *App) runShare(arguments []string) int {
 	if *jsonOutput {
 		// stdout has already emitted its one machine-readable ShareSession document.
 		runtimeStdout = app.Stderr
+	} else {
+		runtimeStdout = prefixLines(runtimeStdout, "    ")
 	}
 	options := execution.Options{
 		ApproveAll: *approveAll,
@@ -341,6 +350,10 @@ func (app *App) runShare(arguments []string) int {
 	var timeline *runTimeline
 	if !*jsonOutput {
 		timeline = newRunTimeline(app.Stderr, invocation)
+		timeline.hideCatalog = true
+		if len(pinIssues) > 0 {
+			timeline.pinWarnings = []string{"stale"}
+		}
 		options.OnEvent = func(callbackContext context.Context, event execution.RunEvent) error {
 			if err := timeline.onEvent(callbackContext, event); err != nil {
 				return err
@@ -387,7 +400,28 @@ func (app *App) validateShareHost(root string, catalog *manifest.Catalog, recipe
 	if len(validation.Diagnostics) == 0 {
 		return ExitSuccess
 	}
+	catalogRoot := root
+	if catalog != nil && catalog.Root != "" {
+		catalogRoot = catalog.Root
+	}
+	var other []manifest.Diagnostic
+	hostFailed := false
 	for _, diagnostic := range validation.Diagnostics {
+		if strings.HasPrefix(diagnostic.Code, "host.") {
+			hostFailed = true
+			continue
+		}
+		other = append(other, diagnostic)
+	}
+	if hostFailed {
+		writeHostNotReady(
+			app.Stderr,
+			recipe.Value.Metadata.Name,
+			listenRelPath(catalogRoot, recipe.Source.Path),
+			manifest.CheckRequires(recipe.Value, catalogRoot, app.Host),
+		)
+	}
+	for _, diagnostic := range other {
 		fmt.Fprintln(app.Stderr, diagnostic.Error())
 	}
 	return diagnosticsExitCode(validation.Diagnostics)

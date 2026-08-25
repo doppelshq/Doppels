@@ -34,6 +34,7 @@ func (app *App) runLocal(arguments []string) int {
 	flags.Var(&rawEvidence, "evidence", "manual evidence as name=value (repeatable)")
 	recipeName := flags.String("recipe", "", "compatible Recipe name[@version]")
 	yes := flags.Bool("yes", false, "auto-approve all approval steps without prompting")
+	strict := flags.Bool("strict", false, "refuse to run when a lock pin is stale")
 	detach := false
 	flags.BoolVar(&detach, "detach", false, "run in the background and print the Run id")
 	flags.BoolVar(&detach, "d", false, "run in the background and print the Run id")
@@ -144,6 +145,12 @@ func (app *App) runLocal(arguments []string) int {
 			fmt.Fprintln(app.Stderr, "--detach only supports shell Recipes")
 			return ExitContract
 		}
+	}
+	issues, code := app.checkLockPin(root, capabilityDefinition, recipeDefinition, *strict)
+	if code != ExitSuccess {
+		return code
+	}
+	if detach {
 		if code := app.checkRecipeDrift(recipeDefinition); code != ExitSuccess {
 			return code
 		}
@@ -180,6 +187,8 @@ func (app *App) runLocal(arguments []string) int {
 	if *jsonOutput {
 		// In JSON mode stdout is reserved for the final response document.
 		runtimeStdout = app.Stderr
+	} else {
+		runtimeStdout = prefixLines(runtimeStdout, "    ")
 	}
 	// Local run is operator-initiated: invoking the command is the grant.
 	// Share/listen still prompt (or require --yes) for Steps with approval: required.
@@ -195,6 +204,9 @@ func (app *App) runLocal(arguments []string) int {
 	var timeline *runTimeline
 	if !*jsonOutput {
 		timeline = newRunTimeline(app.Stderr, invocation)
+		if len(issues) > 0 {
+			timeline.pinWarnings = []string{"stale"}
+		}
 		options.OnEvent = timeline.onEvent
 	}
 	result, runErr := execution.Execute(app.context(), invocation, options)

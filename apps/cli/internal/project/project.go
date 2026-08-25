@@ -28,8 +28,8 @@ type Discovery struct {
 
 func DefaultDiscovery() Discovery {
 	return Discovery{
-		Capabilities: []string{Directory + "/capabilities"},
-		Recipes:      []string{Directory + "/recipes"},
+		Capabilities: []string{".doppels/capabilities"},
+		Recipes:      []string{".doppels/recipes"},
 	}
 }
 
@@ -80,7 +80,7 @@ func writeGitignore(doppelsDir string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil // already exists, don't overwrite
 	}
-	content := "# Doppels runtime state — do not commit\nruns/\n*.lock\n"
+	content := "# Doppels runtime state — do not commit\nruns/\nruns.db\n*.lock\n"
 	return os.WriteFile(path, []byte(content), 0o644)
 }
 
@@ -281,8 +281,18 @@ func FindSpaceManifest(root, space string) (string, bool, error) {
 }
 
 func listSpaceManifestPaths(root string) ([]string, error) {
-	doppelsDir := filepath.Join(root, Directory)
 	var matches []string
+	appendRegular := func(path string) error {
+		info, err := os.Stat(path)
+		if err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			matches = append(matches, path)
+		}
+		return nil
+	}
+	doppelsDir := filepath.Join(root, Directory)
 	for _, extension := range []string{".yaml", ".yml", ".json"} {
 		pattern := filepath.Join(doppelsDir, "*.space"+extension)
 		found, err := filepath.Glob(pattern)
@@ -296,12 +306,23 @@ func listSpaceManifestPaths(root string) ([]string, error) {
 			if name == "" || strings.Contains(name, ".") {
 				continue
 			}
-			info, err := os.Stat(path)
-			if err != nil {
+			if err := appendRegular(path); err != nil {
 				return nil, err
 			}
-			if info.Mode().IsRegular() {
-				matches = append(matches, path)
+		}
+		rootPattern := filepath.Join(root, "doppels.*"+extension)
+		rootFound, err := filepath.Glob(rootPattern)
+		if err != nil {
+			return nil, err
+		}
+		for _, path := range rootFound {
+			base := filepath.Base(path)
+			name := strings.TrimSuffix(strings.TrimPrefix(base, "doppels."), extension)
+			if name == "" || strings.Contains(name, ".") {
+				continue
+			}
+			if err := appendRegular(path); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -311,7 +332,32 @@ func listSpaceManifestPaths(root string) ([]string, error) {
 
 func isProjectRoot(path string) bool {
 	info, err := os.Stat(filepath.Join(path, Directory))
-	return err == nil && info.IsDir()
+	if err == nil && info.IsDir() {
+		return true
+	}
+	return hasRootSpaceStub(path)
+}
+
+func hasRootSpaceStub(path string) bool {
+	for _, extension := range []string{".yaml", ".yml", ".json"} {
+		pattern := filepath.Join(path, "doppels.*"+extension)
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			base := filepath.Base(match)
+			name := strings.TrimSuffix(strings.TrimPrefix(base, "doppels."), extension)
+			if name == "" || strings.Contains(name, ".") {
+				continue
+			}
+			info, err := os.Stat(match)
+			if err == nil && info.Mode().IsRegular() {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IsWorkingTree reports whether path is a Space working tree root.

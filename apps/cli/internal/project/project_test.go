@@ -42,8 +42,11 @@ func TestInitFindRootAndDiscover(t *testing.T) {
 		t.Fatalf("FindRoot() = %q, %v; want %q", found, err, root)
 	}
 
-	capability := filepath.Join(doppelsDir, "capabilities", "a.yaml")
-	recipe := filepath.Join(doppelsDir, "recipes", "nested", "b.yml")
+	capability := filepath.Join(root, Directory, "capabilities", "a.yaml")
+	recipe := filepath.Join(root, Directory, "recipes", "nested", "b.yml")
+	if err := os.MkdirAll(filepath.Dir(capability), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(capability, []byte("kind: Capability"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +56,7 @@ func TestInitFindRootAndDiscover(t *testing.T) {
 	if err := os.WriteFile(recipe, []byte("kind: Recipe"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(doppelsDir, "recipes", "README.md"), []byte("ignored"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(root, Directory, "recipes", "README.md"), []byte("ignored"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	files, err := Discover(root)
@@ -62,6 +65,83 @@ func TestInitFindRootAndDiscover(t *testing.T) {
 	}
 	if !reflect.DeepEqual(files, []string{capability, recipe}) {
 		t.Fatalf("Discover() = %#v", files)
+	}
+}
+
+func TestDefaultDiscoveryUsesUserManifestDirs(t *testing.T) {
+	got := DefaultDiscovery()
+	want := Discovery{
+		Capabilities: []string{".doppels/capabilities"},
+		Recipes:      []string{".doppels/recipes"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("DefaultDiscovery() = %#v, want %#v", got, want)
+	}
+}
+
+func TestDiscoverFindsRootCapabilitiesWithoutStub(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root); err != nil {
+		t.Fatal(err)
+	}
+	capPath := filepath.Join(root, Directory, "capabilities", "sync.yaml")
+	if err := os.MkdirAll(filepath.Dir(capPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(capPath, []byte("kind: Capability"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	files, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, []string{capPath}) {
+		t.Fatalf("Discover() = %#v, want [%s]", files, capPath)
+	}
+}
+
+func TestResolveDiscoveryReadsRootStub(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(root, "shared", "capabilities", "extra.yaml")
+	if err := os.MkdirAll(filepath.Dir(shared), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(shared, []byte("kind: Capability"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stub := filepath.Join(root, "doppels.finance.yaml")
+	if err := os.WriteFile(stub, []byte(`apiVersion: doppels.so/v1alpha1
+kind: Space
+metadata:
+  name: finance
+discovery:
+  capabilities:
+    - shared/capabilities
+  recipes:
+    - recipes
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ResolveDiscovery(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Discovery{
+		Capabilities: []string{"shared/capabilities"},
+		Recipes:      []string{"recipes"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDiscovery() = %#v, want %#v", got, want)
+	}
+	files, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, []string{shared}) {
+		t.Fatalf("Discover() = %#v, want only shared capability", files)
 	}
 }
 
@@ -78,6 +158,9 @@ func TestDiscoverUsesSpaceDiscoveryPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	defaultCap := filepath.Join(root, Directory, "capabilities", "default.yaml")
+	if err := os.MkdirAll(filepath.Dir(defaultCap), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(defaultCap, []byte("kind: Capability"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -162,5 +245,22 @@ func TestWriteSpaceManifest(t *testing.T) {
 	_, created, err = WriteSpaceManifest(root, "platform")
 	if err != nil || created {
 		t.Fatalf("second write created=%t err=%v", created, err)
+	}
+}
+
+func TestIsWorkingTreeAcceptsRootSpaceStub(t *testing.T) {
+	root := t.TempDir()
+	if IsWorkingTree(root) {
+		t.Fatal("empty dir is not a Space")
+	}
+	if err := os.WriteFile(filepath.Join(root, "doppels.engineering.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+kind: Space
+metadata:
+  name: engineering
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !IsWorkingTree(root) {
+		t.Fatal("doppels.<name>.yaml at the Space root is a working tree marker")
 	}
 }

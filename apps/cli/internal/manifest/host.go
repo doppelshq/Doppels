@@ -50,85 +50,178 @@ func (OSHost) CommandVersion(path string) (string, error) {
 	return "", lastErr
 }
 
+type hostIssue struct {
+	Field  string
+	Code   string
+	Format string
+	Args   []any
+	Label  string
+}
+
+func (issue hostIssue) diagnostic(source string) Diagnostic {
+	return diag(source, issue.Field, issue.Code, issue.Format, issue.Args...)
+}
+
+// CheckRequires lists unmet Recipe host requirements on this Node.
+// Empty means commands, hostEnv, files, and Step shells are available.
+func CheckRequires(recipe *Recipe, catalogRoot string, host Host) []string {
+	issues := recipeHostIssues(recipe, catalogRoot, host)
+	labels := make([]string, 0, len(issues))
+	seen := map[string]struct{}{}
+	for _, issue := range issues {
+		if issue.Label == "" {
+			continue
+		}
+		if _, ok := seen[issue.Label]; ok {
+			continue
+		}
+		seen[issue.Label] = struct{}{}
+		labels = append(labels, issue.Label)
+	}
+	return labels
+}
+
 func hostDiagnostics(catalog *Catalog, host Host) []Diagnostic {
-	if host == nil {
+	if host == nil || catalog == nil {
 		return nil
 	}
 	var diagnostics []Diagnostic
 	for _, revisions := range catalog.Recipes {
 		for _, definition := range revisions {
-			recipe := definition.Value
-			if recipe.Runtime != "shell" || recipe.Requires == nil {
-				continue
-			}
 			source := definition.Source.Path
-			for index, requirement := range recipe.Requires.Commands {
-				field := fmt.Sprintf("requires.commands[%d]", index)
-				path, err := host.LookupCommand(requirement.Name)
-				if err != nil {
-					diagnostics = append(diagnostics, diag(source, field, "host.command-missing", "required command %q is not available in PATH", requirement.Name))
-					continue
-				}
-				if requirement.Version == "" {
-					continue
-				}
-				output, err := host.CommandVersion(path)
-				if err != nil {
-					diagnostics = append(diagnostics, diag(source, field, "host.version-probe", "cannot determine %s version: %v", requirement.Name, err))
-					continue
-				}
-				version, ok := extractSemver(output)
-				if !ok {
-					diagnostics = append(diagnostics, diag(source, field, "host.version-probe", "cannot parse a semantic version from %s --version", requirement.Name))
-					continue
-				}
-				matches, err := satisfiesConstraint(version, requirement.Version)
-				if err != nil {
-					// The structural validator already reports malformed constraints.
-					continue
-				}
-				if !matches {
-					diagnostics = append(diagnostics, diag(source, field, "host.version-mismatch", "%s %s does not satisfy %s", requirement.Name, version.String(), requirement.Version))
-				}
-			}
-			seenShells := map[string]struct{}{}
-			for index, step := range recipe.Steps {
-				if step.Run == nil {
-					continue
-				}
-				if _, checked := seenShells[step.Run.Shell]; checked {
-					continue
-				}
-				seenShells[step.Run.Shell] = struct{}{}
-				if _, err := host.LookupCommand(step.Run.Shell); err != nil {
-					diagnostics = append(diagnostics, diag(source, fmt.Sprintf("steps[%d].run.shell", index), "host.shell-missing", "required shell %q is not available in PATH", step.Run.Shell))
-				}
-			}
-			for index, name := range recipe.Requires.HostEnv {
-				if _, exists := host.LookupEnv(name); !exists {
-					diagnostics = append(diagnostics, diag(source, fmt.Sprintf("requires.hostEnv[%d]", index), "host.env-missing", "required host environment variable %q is not set", name))
-				}
-			}
-			for index, file := range recipe.Requires.Files {
-				if strings.Contains(file, "{{") || strings.Contains(file, "}}") {
-					// Dynamic paths can only be checked once invocation inputs exist.
-					continue
-				}
-				path := filepath.Join(catalog.Root, filepath.FromSlash(file))
-				info, err := host.Stat(path)
-				if err != nil {
-					if errors.Is(err, os.ErrNotExist) {
-						diagnostics = append(diagnostics, diag(source, fmt.Sprintf("requires.files[%d]", index), "host.file-missing", "required project file %q does not exist", file))
-					} else {
-						diagnostics = append(diagnostics, diag(source, fmt.Sprintf("requires.files[%d]", index), "host.file-unavailable", "cannot inspect required project file %q: %v", file, err))
-					}
-				} else if info.IsDir() {
-					diagnostics = append(diagnostics, diag(source, fmt.Sprintf("requires.files[%d]", index), "host.file-invalid", "required project path %q is a directory, not a file", file))
-				}
+			for _, issue := range recipeHostIssues(definition.Value, catalog.Root, host) {
+				diagnostics = append(diagnostics, issue.diagnostic(source))
 			}
 		}
 	}
 	return diagnostics
+}
+
+func recipeHostIssues(recipe *Recipe, catalogRoot string, host Host) []hostIssue {
+	if host == nil || recipe == nil {
+		return nil
+	}
+	if recipe.Runtime != "shell" || recipe.Requires == nil {
+		return nil
+	}
+	var issues []hostIssue
+	for index, requirement := range recipe.Requires.Commands {
+		field := fmt.Sprintf("requires.commands[%d]", index)
+		path, err := host.LookupCommand(requirement.Name)
+		if err != nil {
+			issues = append(issues, hostIssue{
+				Field:  field,
+				Code:   "host.command-missing",
+				Format: "required command %q is not available in PATH",
+				Args:   []any{requirement.Name},
+				Label:  "command " + requirement.Name,
+			})
+			continue
+		}
+		if requirement.Version == "" {
+			continue
+		}
+		output, err := host.CommandVersion(path)
+		if err != nil {
+			issues = append(issues, hostIssue{
+				Field:  field,
+				Code:   "host.version-probe",
+				Format: "cannot determine %s version: %v",
+				Args:   []any{requirement.Name, err},
+				Label:  "command " + requirement.Name,
+			})
+			continue
+		}
+		version, ok := extractSemver(output)
+		if !ok {
+			issues = append(issues, hostIssue{
+				Field:  field,
+				Code:   "host.version-probe",
+				Format: "cannot parse a semantic version from %s --version",
+				Args:   []any{requirement.Name},
+				Label:  "command " + requirement.Name,
+			})
+			continue
+		}
+		matches, err := satisfiesConstraint(version, requirement.Version)
+		if err != nil {
+			continue
+		}
+		if !matches {
+			issues = append(issues, hostIssue{
+				Field:  field,
+				Code:   "host.version-mismatch",
+				Format: "%s %s does not satisfy %s",
+				Args:   []any{requirement.Name, version.String(), requirement.Version},
+				Label:  "command " + requirement.Name,
+			})
+		}
+	}
+	seenShells := map[string]struct{}{}
+	for index, step := range recipe.Steps {
+		if step.Run == nil {
+			continue
+		}
+		if _, checked := seenShells[step.Run.Shell]; checked {
+			continue
+		}
+		seenShells[step.Run.Shell] = struct{}{}
+		if _, err := host.LookupCommand(step.Run.Shell); err != nil {
+			issues = append(issues, hostIssue{
+				Field:  fmt.Sprintf("steps[%d].run.shell", index),
+				Code:   "host.shell-missing",
+				Format: "required shell %q is not available in PATH",
+				Args:   []any{step.Run.Shell},
+				Label:  "shell " + step.Run.Shell,
+			})
+		}
+	}
+	for index, name := range recipe.Requires.HostEnv {
+		if _, exists := host.LookupEnv(name); !exists {
+			issues = append(issues, hostIssue{
+				Field:  fmt.Sprintf("requires.hostEnv[%d]", index),
+				Code:   "host.env-missing",
+				Format: "required host environment variable %q is not set",
+				Args:   []any{name},
+				Label:  "env " + name,
+			})
+		}
+	}
+	for index, file := range recipe.Requires.Files {
+		if strings.Contains(file, "{{") || strings.Contains(file, "}}") {
+			continue
+		}
+		path := filepath.Join(catalogRoot, filepath.FromSlash(file))
+		info, err := host.Stat(path)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				issues = append(issues, hostIssue{
+					Field:  fmt.Sprintf("requires.files[%d]", index),
+					Code:   "host.file-missing",
+					Format: "required project file %q does not exist",
+					Args:   []any{file},
+					Label:  "file " + file,
+				})
+			} else {
+				issues = append(issues, hostIssue{
+					Field:  fmt.Sprintf("requires.files[%d]", index),
+					Code:   "host.file-unavailable",
+					Format: "cannot inspect required project file %q: %v",
+					Args:   []any{file, err},
+					Label:  "file " + file,
+				})
+			}
+		} else if info.IsDir() {
+			issues = append(issues, hostIssue{
+				Field:  fmt.Sprintf("requires.files[%d]", index),
+				Code:   "host.file-invalid",
+				Format: "required project path %q is a directory, not a file",
+				Args:   []any{file},
+				Label:  "file " + file,
+			})
+		}
+	}
+	return issues
 }
 
 var versionInOutputPattern = regexp.MustCompile(`v?([0-9]+\.[0-9]+\.[0-9]+)(?:[-+][0-9A-Za-z.-]+)?`)

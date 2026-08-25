@@ -2,8 +2,11 @@ package command
 
 import (
 	"fmt"
+	"io"
+	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/registryclient"
@@ -69,10 +72,14 @@ func (app *App) showDefinition(kind string, arguments []string) int {
 }
 
 type capabilityListItem struct {
+	Space      string `json:"space,omitempty"`
 	Name       string `json:"name"`
 	Version    string `json:"version"`
 	Summary    string `json:"summary,omitempty"`
+	Pin        string `json:"pin,omitempty"`
 	Recipes    int    `json:"recipes"`
+	Runs       int    `json:"runs"`
+	LastRun    string `json:"lastRun,omitempty"`
 	SourcePath string `json:"source"`
 }
 
@@ -86,61 +93,32 @@ func (app *App) listCapabilities(arguments []string) int {
 		fmt.Fprintln(app.Stderr, "capabilities list accepts no arguments")
 		return ExitContract
 	}
-	_, catalog, code := app.localCatalog()
+	index, code := app.listenLocalIndex()
 	if code != ExitSuccess {
 		return code
 	}
-	items := make([]capabilityListItem, 0)
-	for _, revisions := range catalog.Capabilities {
-		for _, definition := range revisions {
-			items = append(items, capabilityListItem{
-				Name: definition.Value.Metadata.Name, Version: definition.Value.Metadata.Version,
-				Summary:    definition.Value.Metadata.Summary,
-				Recipes:    len(catalog.RecipesForCapability(definition.Value.Metadata.Name)),
-				SourcePath: definition.Source.Path,
-			})
-		}
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Name != items[j].Name {
-			return items[i].Name < items[j].Name
-		}
-		return items[i].Version < items[j].Version
-	})
+	trees := index.localTrees()
+	stats := app.loadCatalogRunIndex(index)
+	items := capabilityListItems(trees, stats.capabilities)
 	if *jsonOutput {
 		app.writeJSON(map[string]any{"kind": "CapabilityList", "items": items})
 		return ExitSuccess
 	}
-	style := newTermStyle(app.Stdout)
-	showSummary := false
-	for _, item := range items {
-		if strings.TrimSpace(item.Summary) != "" {
-			showSummary = true
-			break
-		}
-	}
-	header := []string{style.dim("NAME"), style.dim("VERSION"), style.dim("RECIPES")}
-	if showSummary {
-		header = append(header, style.dim("SUMMARY"))
-	}
-	rows := [][]string{header}
-	for _, item := range items {
-		row := []string{item.Name, item.Version, fmt.Sprintf("%d", item.Recipes)}
-		if showSummary {
-			row = append(row, item.Summary)
-		}
-		rows = append(rows, row)
-	}
-	writeAlignedColumns(app.Stdout, rows)
+	writeCapabilityList(app.Stdout, trees, items)
 	return ExitSuccess
 }
 
 type recipeListItem struct {
-	Name       string   `json:"name"`
-	Version    string   `json:"version"`
-	Runtime    string   `json:"runtime"`
-	Provides   []string `json:"provides"`
-	SourcePath string   `json:"source"`
+	Space        string   `json:"space,omitempty"`
+	Name         string   `json:"name"`
+	Version      string   `json:"version"`
+	Runtime      string   `json:"runtime"`
+	Pin          string   `json:"pin,omitempty"`
+	Provides     []string `json:"provides"`
+	Capabilities int      `json:"capabilities"`
+	Runs         int      `json:"runs"`
+	LastRun      string   `json:"lastRun,omitempty"`
+	SourcePath   string   `json:"source"`
 }
 
 func (app *App) listRecipes(arguments []string) int {
@@ -153,17 +131,82 @@ func (app *App) listRecipes(arguments []string) int {
 		fmt.Fprintln(app.Stderr, "recipes list accepts no arguments")
 		return ExitContract
 	}
-	_, catalog, code := app.localCatalog()
+	index, code := app.listenLocalIndex()
 	if code != ExitSuccess {
 		return code
 	}
-	items := make([]recipeListItem, 0)
-	for _, revisions := range catalog.Recipes {
-		for _, definition := range revisions {
-			items = append(items, recipeListItem{
-				Name: definition.Value.Metadata.Name, Version: definition.Value.Metadata.Version,
-				Runtime: definition.Value.Runtime, Provides: append([]string(nil), definition.Value.Provides...),
-				SourcePath: definition.Source.Path,
+	trees := index.localTrees()
+	stats := app.loadCatalogRunIndex(index)
+	items := recipeListItems(trees, stats.recipes)
+	if *jsonOutput {
+		app.writeJSON(map[string]any{"kind": "RecipeList", "items": items})
+		return ExitSuccess
+	}
+	writeRecipeList(app.Stdout, trees, items)
+	return ExitSuccess
+}
+
+type catalogRunStat struct {
+	Count   int
+	Last    string
+	LastRaw string
+}
+
+type catalogRunIndex struct {
+	capabilities map[string]catalogRunStat
+	recipes      map[string]catalogRunStat
+}
+
+func (app *App) loadCatalogRunIndex(index listenLocalIndex) catalogRunIndex {
+	stats := catalogRunIndex{
+		capabilities: map[string]catalogRunStat{},
+		recipes:      map[string]catalogRunStat{},
+	}
+	now := app.now()
+	for _, entry := range index.Entries {
+		items, err := runstate.List(entry.Root)
+		if err != nil {
+			continue
+		}
+		for _, item := range items {
+			capName, capVersion := splitRevision(item.Capability)
+			bumpCatalogRunStat(stats.capabilities, catalogListKey(entry.Space, capName, capVersion), item.CreatedAt, now)
+			if strings.TrimSpace(item.Recipe) == "" {
+				continue
+			}
+			recipeName, recipeVersion := splitRevision(item.Recipe)
+			bumpCatalogRunStat(stats.recipes, catalogListKey(entry.Space, recipeName, recipeVersion), item.CreatedAt, now)
+		}
+	}
+	return stats
+}
+
+func bumpCatalogRunStat(into map[string]catalogRunStat, key, createdAt string, now time.Time) {
+	stat := into[key]
+	stat.Count++
+	if createdAt > stat.LastRaw {
+		stat.LastRaw = createdAt
+		stat.Last = formatDisplayTime(now, createdAt)
+	}
+	into[key] = stat
+}
+
+func capabilityListItems(trees []listenLocalTreeView, stats map[string]catalogRunStat) []capabilityListItem {
+	items := make([]capabilityListItem, 0)
+	for _, tree := range trees {
+		for _, capability := range tree.Capabilities {
+			name, version := splitRevision(capability.Label)
+			stat := stats[catalogListKey(tree.Space, name, version)]
+			items = append(items, capabilityListItem{
+				Space:      tree.Space,
+				Name:       name,
+				Version:    version,
+				Summary:    capability.Summary,
+				Pin:        pinOrUnpinned(capability.Origin),
+				Recipes:    len(capability.Recipes),
+				Runs:       stat.Count,
+				LastRun:    stat.Last,
+				SourcePath: capability.Path,
 			})
 		}
 	}
@@ -171,23 +214,197 @@ func (app *App) listRecipes(arguments []string) int {
 		if items[i].Name != items[j].Name {
 			return items[i].Name < items[j].Name
 		}
-		return items[i].Version < items[j].Version
+		if items[i].Version != items[j].Version {
+			return items[i].Version < items[j].Version
+		}
+		return items[i].Space < items[j].Space
 	})
-	if *jsonOutput {
-		app.writeJSON(map[string]any{"kind": "RecipeList", "items": items})
-		return ExitSuccess
+	return items
+}
+
+func recipeListItems(trees []listenLocalTreeView, stats map[string]catalogRunStat) []recipeListItem {
+	items := make([]recipeListItem, 0)
+	for _, tree := range trees {
+		for _, capability := range tree.Capabilities {
+			for _, recipe := range capability.Recipes {
+				name, version := splitRevision(recipe.Label)
+				stat := stats[catalogListKey(tree.Space, name, version)]
+				items = append(items, recipeListItem{
+					Space:        tree.Space,
+					Name:         name,
+					Version:      version,
+					Runtime:      recipe.Runtime,
+					Pin:          pinOrUnpinned(recipe.Origin),
+					Provides:     append([]string(nil), recipe.Provides...),
+					Capabilities: len(recipe.Provides),
+					Runs:         stat.Count,
+					LastRun:      stat.Last,
+					SourcePath:   recipe.Path,
+				})
+			}
+		}
 	}
-	style := newTermStyle(app.Stdout)
-	rows := [][]string{{
-		style.dim("NAME"), style.dim("VERSION"), style.dim("RUNTIME"), style.dim("PROVIDES"),
-	}}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Name != items[j].Name {
+			return items[i].Name < items[j].Name
+		}
+		if items[i].Version != items[j].Version {
+			return items[i].Version < items[j].Version
+		}
+		return items[i].Space < items[j].Space
+	})
+	return items
+}
+
+func splitRevision(label string) (name, version string) {
+	if i := strings.LastIndex(label, "@"); i > 0 {
+		return label[:i], label[i+1:]
+	}
+	return label, ""
+}
+
+func writeCapabilityList(writer io.Writer, trees []listenLocalTreeView, items []capabilityListItem) {
+	style := newTermStyle(writer)
+	showSpace := catalogListShowSpace(trees)
+	header := []string{style.dim("NAME"), style.dim("VERSION"), style.dim("PIN"), style.dim("HOST"), style.dim("RECIPES"), style.dim("RUNS"), style.dim("LAST"), style.dim("FILE")}
+	if showSpace {
+		header = append([]string{style.dim("SPACE")}, header...)
+	}
+	rows := [][]string{header}
+	byKey := capabilityViewsByKey(trees)
 	for _, item := range items {
-		rows = append(rows, []string{
-			item.Name, item.Version, item.Runtime, strings.Join(item.Provides, ","),
-		})
+		host := catalogHostMark(style, byKey[catalogListKey(item.Space, item.Name, item.Version)])
+		last := item.LastRun
+		if last == "" {
+			last = "—"
+		}
+		row := []string{
+			item.Name, item.Version, item.Pin, host, fmt.Sprintf("%d", item.Recipes),
+			fmt.Sprintf("%d", item.Runs), last, catalogFileCell(style, trees, item.Space, item.SourcePath),
+		}
+		if showSpace {
+			row = append([]string{item.Space}, row...)
+		}
+		rows = append(rows, row)
 	}
-	writeAlignedColumns(app.Stdout, rows)
-	return ExitSuccess
+	writeAlignedColumns(writer, rows)
+}
+
+func writeRecipeList(writer io.Writer, trees []listenLocalTreeView, items []recipeListItem) {
+	style := newTermStyle(writer)
+	showSpace := catalogListShowSpace(trees)
+	header := []string{style.dim("NAME"), style.dim("VERSION"), style.dim("RUNTIME"), style.dim("PIN"), style.dim("HOST"), style.dim("CAPS"), style.dim("RUNS"), style.dim("LAST"), style.dim("FILE")}
+	if showSpace {
+		header = append([]string{style.dim("SPACE")}, header...)
+	}
+	rows := [][]string{header}
+	byKey := recipeViewsByKey(trees)
+	for _, item := range items {
+		host := recipeHostMark(style, byKey[catalogListKey(item.Space, item.Name, item.Version)])
+		last := item.LastRun
+		if last == "" {
+			last = "—"
+		}
+		row := []string{
+			item.Name, item.Version, item.Runtime, item.Pin, host, fmt.Sprintf("%d", item.Capabilities),
+			fmt.Sprintf("%d", item.Runs), last, catalogFileCell(style, trees, item.Space, item.SourcePath),
+		}
+		if showSpace {
+			row = append([]string{item.Space}, row...)
+		}
+		rows = append(rows, row)
+	}
+	writeAlignedColumns(writer, rows)
+}
+
+func pinOrUnpinned(origin string) string {
+	if strings.TrimSpace(origin) == "" {
+		return "unpinned"
+	}
+	return origin
+}
+
+func catalogFileCell(style termStyle, trees []listenLocalTreeView, space, rel string) string {
+	if strings.TrimSpace(rel) == "" {
+		return "—"
+	}
+	abs := rel
+	for _, tree := range trees {
+		if tree.Space == space && tree.Path != "" {
+			abs = filepath.Join(tree.Path, filepath.FromSlash(rel))
+			break
+		}
+	}
+	return style.fileLink(abs, filepath.ToSlash(rel))
+}
+
+func catalogListShowSpace(trees []listenLocalTreeView) bool {
+	seen := map[string]struct{}{}
+	for _, tree := range trees {
+		seen[tree.Space] = struct{}{}
+	}
+	return len(seen) > 1
+}
+
+func catalogListKey(space, name, version string) string {
+	return space + "\x00" + name + "@" + version
+}
+
+func capabilityViewsByKey(trees []listenLocalTreeView) map[string][]listenLocalRecipeView {
+	out := map[string][]listenLocalRecipeView{}
+	for _, tree := range trees {
+		for _, capability := range tree.Capabilities {
+			name, version := splitRevision(capability.Label)
+			out[catalogListKey(tree.Space, name, version)] = capability.Recipes
+		}
+	}
+	return out
+}
+
+func recipeViewsByKey(trees []listenLocalTreeView) map[string]listenLocalRecipeView {
+	out := map[string]listenLocalRecipeView{}
+	for _, tree := range trees {
+		for _, capability := range tree.Capabilities {
+			for _, recipe := range capability.Recipes {
+				name, version := splitRevision(recipe.Label)
+				out[catalogListKey(tree.Space, name, version)] = recipe
+			}
+		}
+	}
+	return out
+}
+
+func catalogHostMark(style termStyle, recipes []listenLocalRecipeView) string {
+	if len(recipes) == 0 {
+		return "—"
+	}
+	ready, checked := 0, 0
+	for _, recipe := range recipes {
+		if !recipe.Checked {
+			continue
+		}
+		checked++
+		if recipe.Ready {
+			ready++
+		}
+	}
+	if checked == 0 {
+		return "—"
+	}
+	if ready == checked {
+		return style.boldGreen("✓")
+	}
+	return style.boldRed("✗")
+}
+
+func recipeHostMark(style termStyle, recipe listenLocalRecipeView) string {
+	if !recipe.Checked {
+		return "—"
+	}
+	if recipe.Ready {
+		return style.boldGreen("✓")
+	}
+	return style.boldRed("✗")
 }
 
 func (app *App) runRuns(arguments []string) int {

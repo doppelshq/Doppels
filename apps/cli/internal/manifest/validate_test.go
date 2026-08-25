@@ -158,6 +158,45 @@ func TestCapabilityRejectsNullDefaultAndEmptyEnum(t *testing.T) {
 	}
 }
 
+func TestCheckRequiresReportsUnmetHostNeeds(t *testing.T) {
+	host := fakeHost{
+		commands: map[string]string{"tar": "/bin/tar", "sh": "/bin/sh"},
+		versions: map[string]string{"/bin/tar": "tar 2.5.0"},
+		env:      map[string]string{},
+		stat:     func(string) (fs.FileInfo, error) { return nil, os.ErrNotExist },
+	}
+	document, err := Decode([]byte(validRecipeYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe := document.(*Recipe)
+	got := CheckRequires(recipe, ".", host)
+	want := []string{"command tar", "env SIGNING_KEY", "file package.json"}
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("CheckRequires() = %#v, want %#v", got, want)
+	}
+}
+
+func TestCheckRequiresEmptyWhenHostSatisfies(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "package.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := Decode([]byte(validRecipeYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := fakeHost{
+		commands: map[string]string{"tar": "/bin/tar", "sh": "/bin/sh"},
+		versions: map[string]string{"/bin/tar": "tar 1.35.0"},
+		env:      map[string]string{"SIGNING_KEY": "secret"},
+	}
+	got := CheckRequires(document.(*Recipe), root, host)
+	if len(got) != 0 {
+		t.Fatalf("CheckRequires() = %#v, want none", got)
+	}
+}
+
 func TestHostRequirementFailures(t *testing.T) {
 	host := fakeHost{
 		commands: map[string]string{"tar": "/bin/tar", "sh": "/bin/sh"},

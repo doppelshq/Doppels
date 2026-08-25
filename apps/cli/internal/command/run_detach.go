@@ -140,7 +140,7 @@ func (app *App) startDetachedRun(root string, runArgs []string, jsonOutput bool)
 	style := newTermStyle(app.Stdout)
 	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Run"), style.shortIDPrimary(runID))
 	fmt.Fprintf(app.Stdout, "  %s  %s %s\n", style.field("Status"), style.boldCyan(arrowMark(style)), style.bold("Detached"))
-	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Log"), style.dim(shortStateDir(logPath)))
+	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Log"), style.filePath(logPath))
 	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Follow"), "doppels runs logs "+shortRunID(runID)+" -f")
 	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Inspect"), "doppels runs show "+shortRunID(runID))
 	return ExitSuccess

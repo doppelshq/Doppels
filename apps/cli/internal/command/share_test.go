@@ -458,6 +458,50 @@ func TestShareInteractivePicksCapabilityAndDuration(t *testing.T) {
 	}
 }
 
+type shareHostWithShell struct{ unavailableHost }
+
+func (shareHostWithShell) LookupCommand(name string) (string, error) {
+	if name == "sh" {
+		return "/bin/sh", nil
+	}
+	return unavailableHost{}.LookupCommand(name)
+}
+
+func TestShareBlocksWhenHostRequiresUnmet(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "answer.yaml", shareCapabilityFixture)
+	writeManifest(t, root, "recipes", "pagerduty.yaml", shareShellRecipeFixture)
+
+	app, _, stderr := testApp(root)
+	app.Host = shareHostWithShell{}
+	code := app.Run([]string{"share", "capability/answer-question", "--yes", "--server", "http://127.0.0.1:9"})
+	if code != ExitOperational {
+		t.Fatalf("exit = %d, want %d; stderr = %s", code, ExitOperational, stderr.String())
+	}
+	out := stderr.String()
+	for _, want := range []string{
+		"Recipe not ready",
+		"answer-pagerduty",
+		"recipes/pagerduty.yaml",
+		"command pagerduty",
+		"env PAGERDUTY_API_TOKEN",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, out)
+		}
+	}
+	for _, forbidden := range []string{
+		"host.command-missing",
+		"host.env-missing",
+		"requires.commands[0]",
+		"required command",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("stderr still dumps validator noise %q:\n%s", forbidden, out)
+		}
+	}
+}
+
 func TestShareRejectsInputsAndAmbiguousRecipesBeforeBootstrap(t *testing.T) {
 	root := t.TempDir()
 	writeManifest(t, root, "capabilities", "answer.yaml", shareCapabilityFixture)
@@ -734,3 +778,42 @@ procedure: {readme: ./answer.md}
 evidence:
   note: {type: string}
 `
+
+const shareShellRecipeFixture = `apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: answer-pagerduty, version: 1.0.0}
+provides: [answer-question]
+runtime: shell
+requires:
+  commands: [pagerduty]
+  hostEnv: [PAGERDUTY_API_TOKEN]
+defaults: {approval: never}
+steps:
+  - id: page
+    name: Page
+    run: {shell: sh, script: export ANSWER=paged}
+    produces:
+      answer: {env: ANSWER}
+returns:
+  answer: "{{ steps.page.answer }}"
+`
+
+func TestShareStrictBlocksStaleLockPin(t *testing.T) {
+	root := t.TempDir()
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+	writeStaleCapabilityLock(t, root)
+
+	app, _, stderr := testApp(root)
+	code := app.Run([]string{"share", "capability/greet", "--input", "name=Ada", "--yes", "--strict", "--json", "--server", "http://127.0.0.1:1"})
+	if code != ExitContract {
+		t.Fatalf("strict stale share exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "stale") || !strings.Contains(out, "metadata.version") {
+		t.Fatalf("strict stale share stderr = %s", out)
+	}
+	if strings.Contains(out, "warning:") {
+		t.Fatalf("raw warning prefix still present: %s", out)
+	}
+}

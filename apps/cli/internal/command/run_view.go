@@ -27,7 +27,7 @@ func writeRunShow(writer io.Writer, detail *runstate.Detail, now time.Time) {
 		fmt.Fprintf(writer, "  %s  %s\n", style.field("Request"), style.dim(shortRunID(summary.RequestID)))
 	}
 	if summary.StateDir != "" {
-		fmt.Fprintf(writer, "  %s  %s\n", style.field("State"), style.dim(shortStateDir(summary.StateDir)))
+		fmt.Fprintf(writer, "  %s  %s\n", style.field("State"), style.filePath(runStateFile(summary.StateDir)))
 	}
 
 	if len(detail.Events) > 0 {
