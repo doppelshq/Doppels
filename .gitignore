@@ -10,5 +10,6 @@ node_modules/
 **/.doppels/runs/
 **/.doppels/*.lock
 **/.doppels/runs.db
+**/.doppels/local-registry.json
 examples/*/receipt.txt
 examples/*/pipeline.log

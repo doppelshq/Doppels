@@ -190,3 +190,55 @@ outputs: {answer: {type: string}}
 		t.Fatalf("stderr/calls = %s / %d", stderr.String(), reconciles.Load())
 	}
 }
+
+func TestPreviewAndApplyLocalOffline(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	if code := app.Run([]string{"init"}); code != ExitSuccess {
+		t.Fatalf("init exit = %d stderr=%s", code, stderr.String())
+	}
+	writeManifest(t, root, "capabilities", "greet.yaml", runCapabilityFixture)
+	writeManifest(t, root, "recipes", "greet.yaml", runRecipeFixture)
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"preview", "--json"}); code != ExitSuccess {
+		t.Fatalf("preview exit = %d stderr=%s", code, stderr.String())
+	}
+	payload := stdout.String()
+	if !strings.Contains(payload, `"kind": "Preview"`) || !strings.Contains(payload, `"server": "local"`) {
+		t.Fatalf("preview json = %s", payload)
+	}
+	if !strings.Contains(payload, `"action": "create"`) {
+		t.Fatalf("expected local creates: %s", payload)
+	}
+	if _, err := os.Stat(filepath.Join(root, "doppels.lock")); !os.IsNotExist(err) {
+		t.Fatalf("preview wrote lock: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"apply", "--json"}); code != ExitSuccess {
+		t.Fatalf("apply exit = %d stderr=%s", code, stderr.String())
+	}
+	applyJSON := stdout.String()
+	if !strings.Contains(applyJSON, `"kind": "Apply"`) || !strings.Contains(applyJSON, `"server": "local"`) || !strings.Contains(applyJSON, `"applied": true`) {
+		t.Fatalf("apply json = %s", applyJSON)
+	}
+	if _, err := os.Stat(filepath.Join(root, "doppels.lock")); err != nil {
+		t.Fatalf("missing lock: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".doppels", "local-registry.json")); err != nil {
+		t.Fatalf("missing local registry: %v", err)
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := app.Run([]string{"preview"}); code != ExitSuccess {
+		t.Fatalf("human preview exit = %d stderr=%s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "local") || !strings.Contains(out, "Already in sync") {
+		t.Fatalf("human preview = %s", out)
+	}
+}

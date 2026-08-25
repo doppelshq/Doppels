@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"doppels.so/cli/internal/project"
 )
 
 func TestInitDefaultCreatesLocalSpace(t *testing.T) {
@@ -100,5 +102,46 @@ func TestInitTooManyArgs(t *testing.T) {
 	app, _, stderr := testApp(root)
 	if code := app.Run([]string{"init", "foo", "bar"}); code != ExitContract {
 		t.Fatalf("exit = %d, want %d, stderr = %s", code, ExitContract, stderr.String())
+	}
+}
+
+func TestSeedDemoExamplesWritesGreet(t *testing.T) {
+	root := t.TempDir()
+	if _, err := project.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := seedDemoExamples(root); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{
+		filepath.Join(".doppels", "capabilities", "greet.yaml"),
+		filepath.Join(".doppels", "recipes", "greet.yaml"),
+	} {
+		if _, err := os.Stat(filepath.Join(root, rel)); err != nil {
+			t.Fatalf("missing %s: %v", rel, err)
+		}
+	}
+	if err := seedDemoExamples(root); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOfferDemoExamplesYesAndNo(t *testing.T) {
+	root := t.TempDir()
+	if _, err := project.Init(root); err != nil {
+		t.Fatal(err)
+	}
+	app, _, _ := testApp(root)
+	app.Stdin = strings.NewReader("no\n")
+	if app.offerDemoExamples(root) {
+		t.Fatal("declined prompt still seeded")
+	}
+
+	app.Stdin = strings.NewReader("yes\n")
+	if !app.offerDemoExamples(root) {
+		t.Fatal("accepted prompt did not seed")
+	}
+	if _, err := os.Stat(filepath.Join(root, ".doppels", "recipes", "greet.yaml")); err != nil {
+		t.Fatal(err)
 	}
 }

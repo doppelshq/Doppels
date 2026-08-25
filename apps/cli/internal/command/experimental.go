@@ -8,9 +8,13 @@ import (
 )
 
 func (app *App) runExperimental(arguments []string) int {
+	if isHelp(arguments) {
+		fmt.Fprintln(app.Stdout, "Usage: doppels experimental [on|off|status] [--json]")
+		return ExitSuccess
+	}
 	flags := app.flagSet("experimental")
 	jsonOutput := flags.Bool("json", false, "write a machine-readable response")
-	if err := flags.Parse(arguments); err != nil {
+	if err := flags.Parse(resourceFirst(arguments)); err != nil {
 		return ExitContract
 	}
 
