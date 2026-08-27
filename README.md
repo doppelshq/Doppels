@@ -4,16 +4,24 @@
 
 <h1 align="center">Doppels</h1>
 
-<p align="center"><strong>Freeze your AI operations</strong></p>
+<p align="center"><strong>Freeze successful agent runs into inspectable, reusable Recipes.</strong></p>
 
-<p align="center">Turn AI processes into deterministic local Capabilities.</p>
+<p align="center">
+  Agents are great at discovering how to complete a task. Doppels preserves the successful path as a local, reviewable Recipe—so you can replay it on your machine, or let someone request an approved execution in your environment.
+</p>
 
 <p align="center">
   <a href="https://doppels.so">Website</a>
   ·
   <a href="https://docs.doppels.so">Docs</a>
   ·
-  <a href="LICENSE">Apache-2.0</a>
+  <a href="#examples">Examples</a>
+  ·
+  <a href="#security-model">Security</a>
+  ·
+  <a href="CONTRIBUTING.md">Contributing</a>
+  ·
+  <a href="LICENSE">Apache 2.0</a>
 </p>
 
 <p align="center">
@@ -22,129 +30,332 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero-freeze.svg" alt="Freeze an agent session into Capability YAML, commit it, then doppels run replays it locally for zero tokens" width="100%">
+  <img src="docs/images/hero-flow.jpg" alt="Four-step Doppels flow: an agent explores with tool calls, you say doppel freeze, doppels run replays locally, then a Share request is approved" width="100%">
 </p>
 
-## Why
+## Quick start
 
-Coding agents are great at discovery and terrible at memory. Scripts in chat die. Docs drift. Re-running “that migration” means starting over — and paying tokens again.
+Install the **`doppels`** CLI, then add the [freeze skill](https://docs.doppels.so/skills/doppel-freeze) so your agent can write YAML.
 
-The diagram above is the whole product:
-
-1. **Freeze once** — the agent (or you) captures the working path as YAML. That session costs tokens once (`$0.54` in the example). There is no `doppels freeze` generator; the [skill](skills/doppel-freeze/SKILL.md) writes the files by hand.
-2. **Saved on your Git** — a **Capability** is the public contract (inputs / outputs). A **Recipe** is how it runs on *your* machine (Steps, shell, `requires`, `returns`). Both are plain YAML inside `.doppels/`. Review them in a PR like any other source.
-3. **Replay for $0** — `doppels run` executes locally on your Node. Same inputs → same Steps → auditable **Run** under `.doppels/` (gitignored). Credentials stay where they already are (`aws`, `gcloud`, `psql`, SSH, VPN). No model. No re-prompt.
-
-> Pre-alpha. Tagged builds are prereleases (`v0.0.0-dev.*`), not a product launch.
-
-## Install
-
-Binary name is **`doppels`** (not `doppel`).
-
-**curl**
-
-```console
+```bash
+# Install (macOS, Linux, Windows via WSL2)
 curl -fsSL https://doppels.so/install.sh | sh
-```
 
-Installs to `~/.local/bin/doppels`. Add that directory to `PATH` if needed. Pin a tag with `DOPPELS_VERSION=v0.0.0-dev.1`. Same script: [GitHub Releases](https://github.com/doppelshq/doppels/releases) / `install.sh`.
-
-Supports **macOS**, **Linux**, and **Windows via WSL2** (run the curl installer inside the Linux distro). Native Windows (`.exe` / PowerShell) is not supported in alpha — Recipes assume a POSIX shell.
-
-**Homebrew**
-
-```console
-brew tap doppelshq/tap
-brew trust doppelshq/tap   # Homebrew 6+
-brew install --cask doppels
-```
-
-**From source** ([mise](https://mise.jdx.dev))
-
-```console
-git clone https://github.com/doppelshq/doppels.git
-cd doppels
-mise install && task setup && task build:cli   # → ./bin/doppels
-```
-
-```console
-doppels --version
-```
-
-## Freeze from an agent
-
-```console
+# Teach your agent how to freeze a successful run
 npx skills add doppelshq/doppels --skill doppel-freeze
 ```
 
-Do the real work (deploy, migrate, fix prod). Then:
+Do the real work in Claude Code, Cursor, Codex, or another supported agent. When it works, tell the agent:
 
 > doppel freeze — turn what we just did into a Capability
 
-Commit the YAML when it validates. That is the asset.
+The skill writes a **Capability** (the public contract) and a **Recipe** (the local steps) into your repo, then loops `doppels validate` until clean. Commit the YAML. That is the asset.
 
-Details: [freeze guide](https://docs.doppels.so/guides/freeze-with-agent) · [`skills/doppel-freeze/`](skills/doppel-freeze/SKILL.md)
-
-## Run locally
-
-```console
-# 1. Create a local Space (default name: private)
-mkdir my-project && cd my-project
-doppels init
-
-# 2. Add Capabilities and Recipes, then validate
-doppels validate
-
-# 3. Run a Capability — auto-approve steps
-doppels run capability/greet --input name=Ada --yes
-
-# 4. Inspect history
-doppels runs list
+```bash
+# Replay the frozen Capability locally
+doppels run capability/postgres-backup --input database=production
 ```
 
-Or try the ready-made demo Space:
+Try the bundled demo first:
 
-```console
+```bash
 cd examples/demo
 doppels validate
 doppels run capability/greet --input name=Ada --yes
 ```
 
-Schemas live in [`schemas/`](schemas/). CLI reference: [docs](https://docs.doppels.so/reference/cli).
+Homebrew: `brew tap doppelshq/tap && brew trust doppelshq/tap && brew install --cask doppels`. Pin a release with `DOPPELS_VERSION=v0.1.0-alpha.1`. Installs to `~/.local/bin/doppels`. Full options: [installation](https://docs.doppels.so/installation).
 
-## Commands (alpha)
+## Why Doppels?
 
-| Command | What it does |
-|---|---|
-| `doppels init [name]` | Create working tree + Space manifest (default: `private`) |
-| `doppels validate` | Check all Capability and Recipe manifests |
-| `doppels run [cap] [--yes]` | Execute a Recipe locally; `--yes` skips approval prompts |
-| `doppels describe cap/name` | Inspect a Capability or Recipe |
-| `doppels caps / recipes` | List local definitions |
-| `doppels runs list` | Run history |
-| `doppels update` | Update the binary from GitHub Releases |
-| `doppels experimental on` | Enable cloud preview features |
+Agents often rediscover the same operational path: inspect the environment, choose tools, recover from errors, and refine the approach until it works.
 
-Cloud commands (`share`, `login`, `apply`, …) require `doppels experimental on`.
+That exploration is valuable the first time. After that, replay the reviewed path.
 
-## What's in this repo
+> **Agents discover the path. Doppels preserves it.**
 
-```text
-apps/cli/              Go runtime (validate, run, local history)
-schemas/               JSON Schema contracts (source of truth)
-skills/doppel-freeze/  Agent skill for Cursor / Claude / Codex
-skills/doppel-use/     Draft — blocked on MCP
-examples/demo/         Instant demo Space (no sleep, CI-friendly)
-examples/dev/          Sandbox Space for CLI development
-examples/quickstart/   Full reference Space (approval, manual, pipeline)
-docs/images/           README diagram (Session → Capability → Run)
-install.sh             curl installer
+| | Agent run | Recipe replay |
+|---|---|---|
+| Execution | Exploratory | Explicit, reviewed steps |
+| LLM required | Yes | No |
+| Token usage | Depends on the run | 0 |
+| Reviewable before execution | Partially | Yes |
+| Versionable in Git | No | Yes |
+
+<p align="center">
+  <img src="docs/images/agent-vs-recipe.jpg" alt="Left: branching exploratory agent tool calls. Right: linear Recipe steps inspect, dump, upload, verify. Freeze sits in the middle." width="100%">
+</p>
+
+## What gets frozen?
+
+Freeze captures the execution contract as two YAML files.
+
+A **Capability** is the public contract (inputs and outputs):
+
+```yaml
+apiVersion: doppels.so/v1alpha1
+kind: Capability
+
+metadata:
+  name: postgres-backup
+  version: 1.0.0
+
+inputs:
+  database:
+    type: string
+    required: true
+
+outputs:
+  backup:
+    type: file
 ```
 
-## Links
+A **Recipe** is the local how. It declares `provides`, runs on your machine, and maps `returns` to the Capability:
 
-- [doppels.so](https://doppels.so)
-- [docs.doppels.so](https://docs.doppels.so)
-- [Homebrew tap](https://github.com/doppelshq/homebrew-tap)
-- [CONTRIBUTING.md](CONTRIBUTING.md) (DCO + CLA)
-- [LICENSE](LICENSE) and [NOTICE](NOTICE) — Apache-2.0
+```yaml
+apiVersion: doppels.so/v1alpha1
+kind: Recipe
+
+metadata:
+  name: postgres-backup-pg
+  version: 1.0.0
+
+provides: [postgres-backup]
+runtime: shell
+
+requires:
+  commands: [sh, pg_dump]
+
+steps:
+  - id: dump
+    name: Dump database
+    env:
+      DATABASE: "{{ inputs.database }}"
+    run:
+      shell: sh
+      script: |
+        pg_dump "$DATABASE" > backup.dump
+    produces:
+      backup:
+        file: backup.dump
+
+returns:
+  backup: "{{ steps.dump.backup }}"
+```
+
+A freeze can describe:
+
+- Typed and validated inputs (Capability)
+- Tools, `requires`, and the reviewed order of Steps (Recipe)
+- Declared outputs / `returns`
+- References to local secrets
+- Runtime requirements and metadata
+
+Review the YAML before you run it. Credentials stay on the host.
+
+<p align="center">
+  <img src="docs/images/recipe-in-editor.jpg" alt="Editor with capabilities/postgres-backup.yaml and recipes/postgres-backup-pg.yaml. Callouts: typed inputs, explicit tools, reviewed steps, declared outputs." width="100%">
+</p>
+
+Schemas: [`schemas/`](schemas/). YAML reference: [docs](https://docs.doppels.so/reference/yaml-schemas).
+
+## How it works
+
+1. Use Claude Code, Cursor, Codex, or another supported agent to complete a task.
+2. Once the run succeeds, ask the agent to freeze it (`doppel freeze`). The [doppel-freeze skill](skills/doppel-freeze/SKILL.md) writes Capability + Recipe YAML.
+3. Review the generated files and commit them to Git.
+4. Replay locally with `doppels run`, or share as an approval-gated Capability (preview).
+
+```text
+Agent explores → Successful run → Freeze (skill) → Capability + Recipe
+                                                      ├─ Replay locally
+                                                      └─ Share by request
+```
+
+<p align="center">
+  <img src="docs/images/how-it-works.jpg" alt="Three stages: Discover with a compatible agent, freeze into local YAML and commit, then reuse via doppels run or Share by request." width="100%">
+</p>
+
+## Replay locally
+
+Run the reviewed path again:
+
+```bash
+doppels run capability/postgres-backup \
+  --input database=production
+```
+
+```text
+✓ Inputs validated
+✓ Reviewed steps executed
+✓ Output created: ./backup.dump
+```
+
+Replay uses the Recipe's explicit Steps and your local tools, credentials, and environment. `--yes` auto-approves Steps that declare an approval prompt.
+
+Guide: [Validate and run](https://docs.doppels.so/guides/validate-and-run). CLI reference: [docs](https://docs.doppels.so/reference/cli).
+
+<p align="center">
+  <img src="docs/images/replay-local.jpg" alt="doppels run capability/postgres-backup --input database=production, then checks for validated inputs, executed steps, and backup.dump." width="100%">
+</p>
+
+## Share the capability
+
+Share is a **preview** cloud feature. Enable it, then create a request link for a Capability:
+
+```bash
+doppels experimental on
+doppels share capability/postgres-backup
+```
+
+The requester supplies the declared inputs. You review the request (`doppels listen`), approve it, and the Recipe runs in your environment. They receive the declared result.
+
+> **They access the capability. Execution stays on your node.**
+
+The request flow:
+
+1. You share a Capability link.
+2. The requester provides validated inputs.
+3. You inspect and approve the request.
+4. Your node executes the reviewed Recipe locally.
+5. The declared result is returned and the Run is recorded.
+
+YAML also travels over Git: commit, clone, `doppels validate`, `doppels run`. Guide: [Share](https://docs.doppels.so/guides/sharing).
+
+<p align="center">
+  <img src="docs/images/share-request.jpg" alt="Share request: Sam requested postgres-backup, input database=payments, Approve and run button." width="100%">
+</p>
+
+## Security model
+
+Doppels is designed around an explicit boundary: coordination may happen remotely, but execution remains in the environment that owns the capability.
+
+```text
+Requester → Coordination service → Approval → Your node → Local tools
+                                                        → Local secrets
+                                                        → Declared output
+```
+
+Core principles:
+
+- Recipes are inspectable before execution.
+- Approval is required by default for shared requests (and for Steps that declare it).
+- Credentials are referenced locally and stay on the host.
+- Inputs are explicit and validated.
+- Execution happens on the owner's node.
+- Runs produce an audit record under `.doppels/`.
+- Share publishes declared `returns`. The Recipe script stays on the node.
+
+See the [share security notes](https://docs.doppels.so/guides/sharing) and [FAQ](https://docs.doppels.so/reference/faq) for trust boundaries and what the coordination service handles.
+
+<p align="center">
+  <img src="docs/images/security-boundary.jpg" alt="Requester and coordination service sit outside Your environment. Secrets, tools, and execution stay inside. Only declared output returns." width="100%">
+</p>
+
+## Examples
+
+Runnable fixtures in this repo:
+
+| Path | What it does |
+|---|---|
+| [`examples/demo`](examples/demo) | Instant `greet` Capability (CI-friendly) |
+| [`examples/quickstart`](examples/quickstart) | Approval, manual review, and a small pipeline |
+| [`examples/dev`](examples/dev) | Sandbox Space for CLI development |
+
+The kind of work freeze is meant to capture:
+
+| Capability | What it does | Inputs | Output |
+|---|---|---|---|
+| `postgres-backup` | Creates and verifies a database backup | Database | Backup file |
+| `release-check` | Runs release-readiness checks | Version, environment | Validation report |
+| `customer-report` | Generates a customer report | Customer, date range | Report |
+| `incident-investigation` | Collects incident evidence | Service, time range | Evidence bundle |
+
+Every published example should be executable and include its requirements, expected side effects, and test fixture.
+
+<p align="center">
+  <img src="docs/images/recipe-catalog.jpg" alt="Illustrative catalog of frozen Capabilities: postgres-backup selected with inputs and backup-file output." width="100%">
+</p>
+
+## Honest limits
+
+Doppels preserves the **same reviewed execution path**. Results still depend on the world around that path.
+
+- External state can change results.
+- APIs, schemas, and tool behavior evolve.
+- Side effects may be irreversible.
+- Safe replay requires idempotency awareness.
+- Non-deterministic tools remain non-deterministic.
+- A Recipe is only as safe as its Steps, inputs, permissions, and review process.
+
+Use dry runs, constrained credentials, explicit approvals, and environment-specific safeguards for sensitive workflows.
+
+<p align="center">
+  <img src="docs/images/honest-limits.jpg" alt="Field-journal illustration: a fixed path passing through API, state, and time." width="100%">
+</p>
+
+## Architecture
+
+```text
+Agent integration
+      ↓
+Freeze skill → Capability + Recipe files → Git
+                       ↓
+                  CLI / runtime → Local tools and environment
+                       ↕
+              Optional share coordination (preview)
+```
+
+The core model separates:
+
+- **Discovery:** an agent explores and completes the task.
+- **Compilation:** the freeze skill converts the successful tool path into YAML.
+- **Execution:** the runtime validates inputs and invokes explicit Steps locally.
+- **Coordination:** optional sharing handles requests and approvals. Credentials and Steps stay on the node.
+
+<p align="center">
+  <img src="docs/images/architecture.jpg" alt="Architecture: agent integration into the freeze skill, then OSS local CLI runtime, tools, YAML, and Git. Optional dashed cloud box for Share requests." width="100%">
+</p>
+
+This repository is the Apache-2.0 core: CLI, schemas, and agent skills. The hosted control plane is separate and optional.
+
+## Project status
+
+Doppels is pre-alpha. Tagged builds are prereleases (`v0.1.0-alpha.*`). The Recipe format, supported integrations, and execution model may evolve.
+
+Before using Doppels in production:
+
+- Review generated YAML.
+- Test it in a constrained environment.
+- Use least-privilege credentials.
+- Understand every side effect.
+- Pin compatible tool and Capability versions.
+
+Current work: [open issues](https://github.com/doppelshq/doppels/issues).
+
+## Documentation
+
+- [Installation](https://docs.doppels.so/installation)
+- [Quickstart](https://docs.doppels.so/quickstart)
+- [How it works](https://docs.doppels.so/concepts/how-it-works)
+- [Freeze with an agent](https://docs.doppels.so/guides/freeze-with-agent)
+- [Capabilities](https://docs.doppels.so/concepts/capabilities) · [Recipes](https://docs.doppels.so/concepts/recipes)
+- [Validate and run](https://docs.doppels.so/guides/validate-and-run)
+- [Share](https://docs.doppels.so/guides/sharing)
+- [CLI reference](https://docs.doppels.so/reference/cli)
+- [YAML schemas](https://docs.doppels.so/reference/yaml-schemas)
+- [FAQ](https://docs.doppels.so/reference/faq)
+
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) (DCO + CLA), browse [open issues](https://github.com/doppelshq/doppels/issues), or open a discussion before proposing a large change.
+
+Please report security vulnerabilities privately to the maintainers.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE). See [NOTICE](NOTICE).
+
+---
+
+**Run it once. Freeze it. Replay it. Share it.**
