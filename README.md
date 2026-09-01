@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero-flow.jpg" alt="Four-step Doppels flow: an agent explores with tool calls, you say doppel freeze, doppels run replays locally, then a Share request is approved" width="100%">
+  <img src="docs/images/hero-flow.jpg" alt="Agent run as failed paths; Doppels; Recipe as Inspect, Query, Export, Verify. Versioned. Shareable. Portable." width="100%">
 </p>
 
 ## Quick start
@@ -154,7 +154,7 @@ A freeze can describe:
 Review the YAML before you run it. Credentials stay on the host.
 
 <p align="center">
-  <img src="docs/images/recipe-in-editor.jpg" alt="Editor with capabilities/postgres-backup.yaml and recipes/postgres-backup-pg.yaml. Callouts: typed inputs, explicit tools, reviewed steps, declared outputs." width="100%">
+  <img src="docs/images/recipe-in-editor.jpg" alt="Dark editor on examples/quickstart: .doppels/capabilities/greet.yaml and recipes/greet.yaml. Callouts: typed inputs, explicit tools, reviewed steps, declared outputs." width="100%">
 </p>
 
 Schemas: [`schemas/`](schemas/). YAML reference: [docs](https://docs.doppels.so/reference/yaml-schemas).
@@ -164,7 +164,7 @@ Schemas: [`schemas/`](schemas/). YAML reference: [docs](https://docs.doppels.so/
 1. Use Claude Code, Cursor, Codex, or another supported agent to complete a task.
 2. Once the run succeeds, ask the agent to freeze it (`doppel freeze`). The [doppel-freeze skill](skills/doppel-freeze/SKILL.md) writes Capability + Recipe YAML.
 3. Review the generated files and commit them to Git.
-4. Replay locally with `doppels run`, or share as an approval-gated Capability (preview).
+4. Replay locally with `doppels run`, or share as an approval-gated Capability.
 
 ```text
 Agent explores → Successful run → Freeze (skill) → Capability + Recipe
@@ -173,7 +173,7 @@ Agent explores → Successful run → Freeze (skill) → Capability + Recipe
 ```
 
 <p align="center">
-  <img src="docs/images/how-it-works.jpg" alt="Three stages: Discover with a compatible agent, freeze into local YAML and commit, then reuse via doppels run or Share by request." width="100%">
+  <img src="docs/images/how-it-works.jpg" alt="Three stages: chat with an agent about a Postgres backup, freeze into local YAML, then reuse via doppels run or Share." width="100%">
 </p>
 
 ## Replay locally
@@ -201,10 +201,9 @@ Guide: [Validate and run](https://docs.doppels.so/guides/validate-and-run). CLI 
 
 ## Share the capability
 
-Share is a **preview** cloud feature. Enable it, then create a request link for a Capability:
+Share is included from day one, free. Create a request link for a Capability:
 
 ```bash
-doppels experimental on
 doppels share capability/postgres-backup
 ```
 
@@ -274,7 +273,7 @@ The kind of work freeze is meant to capture:
 Every published example should be executable and include its requirements, expected side effects, and test fixture.
 
 <p align="center">
-  <img src="docs/images/recipe-catalog.jpg" alt="Illustrative catalog of frozen Capabilities: postgres-backup selected with inputs and backup-file output." width="100%">
+  <img src="docs/images/recipe-catalog.jpg" alt="Catalog of Capabilities. postgres-backup selected with Run and Share link actions, dark YAML, and backup-file output." width="100%">
 </p>
 
 ## Honest limits
@@ -303,7 +302,7 @@ Freeze skill → Capability + Recipe files → Git
                        ↓
                   CLI / runtime → Local tools and environment
                        ↕
-              Optional share coordination (preview)
+              Share coordination
 ```
 
 The core model separates:
@@ -311,13 +310,13 @@ The core model separates:
 - **Discovery:** an agent explores and completes the task.
 - **Compilation:** the freeze skill converts the successful tool path into YAML.
 - **Execution:** the runtime validates inputs and invokes explicit Steps locally.
-- **Coordination:** optional sharing handles requests and approvals. Credentials and Steps stay on the node.
+- **Coordination:** Share handles requests and approvals. Credentials and Steps stay on the node.
 
 <p align="center">
-  <img src="docs/images/architecture.jpg" alt="Architecture: agent integration into the freeze skill, then OSS local CLI runtime, tools, YAML, and Git. Optional dashed cloud box for Share requests." width="100%">
+  <img src="docs/images/architecture.jpg" alt="Architecture: agent integration into the freeze skill, then OSS local CLI runtime, tools, YAML, and Git. Share coordinates requests; the node executes." width="100%">
 </p>
 
-This repository is the Apache-2.0 core: CLI, schemas, and agent skills. The hosted control plane is separate and optional.
+This repository is the Apache-2.0 core: CLI, schemas, and agent skills. Share ships from day one, free. Local `doppels run` still works on its own; Share uses the hosted control plane only to coordinate requests.
 
 ## Project status
 
