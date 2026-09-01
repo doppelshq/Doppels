@@ -1,7 +1,7 @@
 ---
 name: doppel-setup
 description: >-
-  Onboards Doppels on this machine: install the CLI, run a ping→pong smoke
+  Onboards Doppels on this machine: install the CLI, run a hello.txt smoke
   Capability/Recipe, then install doppel-freeze for later. Use when the user
   asks to set up Doppels, install Doppels, or paste a setup prompt that
   references doppel-setup.
@@ -14,7 +14,7 @@ Orchestrate first-time Doppels setup. Keep it short. Prefer commands over essays
 ## Goal
 
 1. CLI `doppels` on PATH
-2. Smoke Capability/Recipe that prints `pong` and validates with the CLI
+2. Smoke Capability/Recipe that writes `hello.txt` and validates with the CLI
 3. Skill `doppel-freeze` installed for this agent harness (for later)
 
 ## 1. Install the CLI
@@ -46,7 +46,7 @@ Do not invent other installers. Do not download random binaries.
 
 **Windows:** use **WSL2**, open the Linux shell, then run the curl installer above. Native Windows is not supported (Recipes need a POSIX shell).
 
-## 2. Smoke test (ping → pong)
+## 2. Smoke test (write hello.txt)
 
 In the current working directory:
 
@@ -58,42 +58,46 @@ doppels init --json
 
 Write these two files exactly. Do **not** load `doppel-freeze` for this smoke. Do **not** ask what to capture. Do **not** ask confirmation.
 
-`.doppels/capabilities/ping.yaml`:
+`.doppels/capabilities/hello.yaml`:
 
 ```yaml
 apiVersion: doppels.so/v1alpha1
 kind: Capability
 
 metadata:
-  name: ping
+  name: hello
   version: 1.0.0
-  displayName: Ping
-  summary: Smoke test that returns pong.
+  displayName: Hello
+  summary: Smoke test that writes hello.txt.
   impact: low
   tags: [smoke]
 
 inputs: {}
 
 outputs:
-  message:
+  greeting:
     type: string
-    description: Always pong.
+    description: Always hello.
+  hello:
+    type: artifact
+    description: Written hello.txt.
+    mediaType: text/plain
 ```
 
-`.doppels/recipes/ping.yaml`:
+`.doppels/recipes/hello.yaml`:
 
 ```yaml
 apiVersion: doppels.so/v1alpha1
 kind: Recipe
 
 metadata:
-  name: ping
+  name: hello
   version: 1.0.0
-  displayName: Ping (smoke)
-  summary: Print pong.
+  displayName: Hello (smoke)
+  summary: Write hello.txt.
   impact: low
 
-provides: [ping]
+provides: [hello]
 runtime: shell
 
 requires:
@@ -103,29 +107,32 @@ defaults:
   approval: never
 
 steps:
-  - id: ping
-    name: Print pong
+  - id: hello
+    name: Write hello.txt
     run:
       shell: sh
       script: |
-        export MESSAGE="pong"
-        printf '%s\n' "$MESSAGE"
+        export GREETING="hello"
+        printf '%s\n' "$GREETING" > hello.txt
     produces:
-      message:
-        env: MESSAGE
+      greeting:
+        env: GREETING
+      hello:
+        file: hello.txt
 
 returns:
-  message: "{{ steps.ping.message }}"
+  greeting: "{{ steps.hello.greeting }}"
+  hello: "{{ steps.hello.hello }}"
 ```
 
 Then:
 
 ```bash
 doppels validate
-doppels run capability/ping --yes
+doppels run capability/hello --yes
 ```
 
-Expect `Returns message pong`. If freeze skill instructions conflict, these files win.
+Expect `Returns greeting hello` and `hello.txt` in the working directory. If freeze skill instructions conflict, these files win.
 
 ## 3. Install the freeze skill
 
@@ -150,6 +157,7 @@ Show the user:
 ```text
 Doppels is ready.
 - doppels --version
+- Smoke wrote hello.txt
 - Say "doppel freeze" after a real operation to capture it.
 ```
 
@@ -160,5 +168,5 @@ Stop. Do not add cloud login, share, or Hub flows unless asked.
 - Execution stays local. Never suggest running Steps in the cloud.
 - Never exfiltrate secrets or print credential values.
 - Prefer `curl | sh` over brew unless the user is already on Homebrew for Doppels.
-- Keep the smoke Recipe trivial: one step, no network required.
+- Keep the smoke Recipe trivial: one step, no network required, deterministic file write.
 - During setup, skip freeze intent/confirmation questions.
