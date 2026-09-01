@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero-flow.jpg" alt="Cursor-style agent session: inspect Postgres, pg_dump, user says doppel freeze; then doppels run replays the same path locally" width="100%">
+  <img src="docs/images/hero-flow.jpg" alt="Agent run as failed paths; Doppels; Recipe as Inspect, Query, Export, Verify. Versioned. Shareable. Portable." width="100%">
 </p>
 
 ## Quick start
