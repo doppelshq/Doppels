@@ -56,8 +56,9 @@ func writeNodeUsage(writer io.Writer) {
 	fmt.Fprintln(writer, "On each Request: [a]pprove  [r]eject  [s]kip  [b]ackground")
 }
 
-// runListen attaches to Shares already created by this Identity (console or
-// `doppels share`). It never creates Shares — Share stays one-shot.
+// runListen powers `doppels node up`: it attaches to Shares already created by
+// this Identity (console or `doppels share`). It never creates Shares — Share
+// stays one-shot.
 func (app *App) runListen(arguments []string) int {
 	defaultServer := environmentValue(app.environment(), "DOPPELS_SERVER")
 	apiToken := environmentValue(app.environment(), "DOPPELS_API_TOKEN")
@@ -105,10 +106,10 @@ func (app *App) runListen(arguments []string) int {
 	server := flags.String("server", defaultServer, "Doppels control-plane URL")
 	pollEvery := flags.Duration("poll", 2*time.Second, "inbox poll interval")
 	approveAll := flags.Bool("yes", false, "auto-fulfill Requests and approve required Steps")
-	jsonOutput := flags.Bool("json", false, "emit machine-readable listen events on stdout")
-	org := flags.String("org", "", "Organization to listen on (default: current context)")
-	space := flags.String("space", "", "limit listening to one Space in the Organization")
-	capability := flags.String("capability", "", "limit listening to one Capability name")
+	jsonOutput := flags.Bool("json", false, "emit machine-readable Node events on stdout")
+	org := flags.String("org", "", "Organization to serve (default: current context)")
+	space := flags.String("space", "", "limit the Node to one Space in the Organization")
+	capability := flags.String("capability", "", "limit the Node to one Capability name")
 	var rawOutputs, rawEvidence namedValues
 	flags.Var(&rawOutputs, "output", "manual output as name=value (repeatable)")
 	flags.Var(&rawEvidence, "evidence", "manual evidence as name=value (repeatable)")
@@ -157,7 +158,7 @@ func (app *App) runListen(arguments []string) int {
 
 	scopeView, filters, registry, err := app.resolveListenScope(*server, apiToken, store, catalog, filters)
 	if err != nil {
-		fmt.Fprintf(app.Stderr, "resolve listen scope: %v\n", err)
+		fmt.Fprintf(app.Stderr, "resolve Node scope: %v\n", err)
 		return ExitOperational
 	}
 	scopeView.LocalTrees = index.localTrees()

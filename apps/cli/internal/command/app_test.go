@@ -133,22 +133,43 @@ func TestNodeUpRequiresLogin(t *testing.T) {
 	}
 }
 
-func TestExperimentalHelpShowsNodeUpNotListen(t *testing.T) {
+func TestNodeUpHelpUsesNodeVocabulary(t *testing.T) {
+	root := t.TempDir()
+	app, _, stderr := testApp(root)
+	app.Environment = []string{"DOPPELS_API_TOKEN=test-token"}
+	if code := app.Run([]string{"node", "up", "--help"}); code != ExitContract {
+		t.Fatalf("node up --help exit = %d, stderr = %s", code, stderr.String())
+	}
+	out := stderr.String()
+	if strings.Contains(strings.ToLower(out), "listen") {
+		t.Fatalf("node up --help still uses retired listen vocabulary:\n%s", out)
+	}
+	if !strings.Contains(out, "Node events") {
+		t.Fatalf("node up --help missing Node event description:\n%s", out)
+	}
+}
+
+func TestHelpShowsPublicShareAndNodeWithoutExperimental(t *testing.T) {
 	root := t.TempDir()
 	app, stdout, stderr := testApp(root)
-	app.Environment = []string{"DOPPELS_EXPERIMENTAL=1"}
 	if code := app.Run([]string{"help"}); code != ExitSuccess {
 		t.Fatalf("help exit = %d, stderr = %s", code, stderr.String())
 	}
 	out := stdout.String()
+	if !strings.Contains(out, "doppels share capability/<name>[@ver]") {
+		t.Fatalf("help missing public share command:\n%s", out)
+	}
 	if !strings.Contains(out, "doppels node up") {
-		t.Fatalf("help missing node up:\n%s", out)
+		t.Fatalf("help missing public node up command:\n%s", out)
+	}
+	if !strings.Contains(out, "doppels login|logout|whoami") {
+		t.Fatalf("help missing public identity commands:\n%s", out)
 	}
 	if strings.Contains(out, "doppels listen") {
 		t.Fatalf("help still advertises listen:\n%s", out)
 	}
-	if !strings.Contains(out, "· Node") {
-		t.Fatalf("help missing Node section:\n%s", out)
+	if !strings.Contains(out, "\nShare\n") {
+		t.Fatalf("help missing Share section:\n%s", out)
 	}
 }
 

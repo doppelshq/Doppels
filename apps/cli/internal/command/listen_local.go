@@ -220,7 +220,7 @@ func (index listenLocalIndex) resolve(capability, space string) (string, *manife
 	for _, entry := range matches {
 		names = append(names, entry.Label)
 	}
-	return "", nil, fmt.Errorf("Capability %q found in multiple local Spaces (%s); listen from one Space or narrow --space", capability, strings.Join(names, ", "))
+	return "", nil, fmt.Errorf("Capability %q found in multiple local Spaces (%s); run node up from one Space or narrow --space", capability, strings.Join(names, ", "))
 }
 
 func discoverNodeRoots(cwd string) ([]string, error) {
