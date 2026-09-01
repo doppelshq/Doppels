@@ -63,9 +63,11 @@ func TestNoArgsPrintsUsage(t *testing.T) {
 		"Doppels",
 		"Space",
 		"Run",
+		"Share",
 		"Tooling",
 		"doppels init",
 		"doppels run",
+		"doppels share",
 		"doppels runs [list]",
 		"doppels capabilities|caps",
 		"doppels tree",
@@ -149,6 +151,31 @@ func TestExperimentalHelpShowsNodeUpNotListen(t *testing.T) {
 	}
 	if !strings.Contains(out, "· Node") {
 		t.Fatalf("help missing Node section:\n%s", out)
+	}
+	if strings.Count(out, "doppels share capability/") != 1 {
+		t.Fatalf("help should list share once:\n%s", out)
+	}
+}
+
+func TestHelpShowsShareWithoutExperimental(t *testing.T) {
+	root := t.TempDir()
+	app, stdout, stderr := testApp(root)
+	app.Environment = []string{"DOPPELS_EXPERIMENTAL=0"}
+	if code := app.Run([]string{"help"}); code != ExitSuccess {
+		t.Fatalf("help exit = %d, stderr = %s", code, stderr.String())
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "doppels share capability/") {
+		t.Fatalf("help missing share:\n%s", out)
+	}
+	if strings.Contains(out, "Preview · Cloud") {
+		t.Fatalf("help still hides share under Preview:\n%s", out)
+	}
+	if strings.Contains(out, "doppels node up") {
+		t.Fatalf("help advertised experimental node up:\n%s", out)
+	}
+	if strings.Contains(out, "doppels login") {
+		t.Fatalf("help advertised experimental login:\n%s", out)
 	}
 }
 
