@@ -60,8 +60,9 @@ invalid usage or contracts use exit 2.
 starts manual fulfillment; more than one requires `--recipe name[@version]`.
 Shell Steps run sequentially and in isolation. Values enter through declared
 environment mappings. Local `run` treats the operator invocation as the grant
-for Steps marked `approval: required` (no `--yes`). Share/listen still prompt
-or require `--yes` because the Request comes from someone else. Local records
+for Steps marked `approval: required` (no `--yes`). Shared Requests still prompt
+when handled by `doppels share` or `doppels node up`, unless `--yes` grants the
+required Steps. Local records
 live under `.doppels/runs/<run-id>` (request/run JSON, events,
 logs, artifacts). A SQLite index at `.doppels/runs.db` backs `runs list` and
 an offline outbox for future metadata sync; blobs stay on disk.

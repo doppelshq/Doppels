@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero-flow.jpg" alt="Agent run as failed paths; Doppels; Recipe as Inspect, Query, Export, Verify. Versioned. Shareable. Portable." width="100%">
+  <img src="docs/images/hero-flow.jpg" alt="Agent run as a tangle of failed paths; Doppels; Recipe as Inspect, Query, Export, Verify in a row. Versioned. Shareable. Portable." width="100%">
 </p>
 
 ## Quick start
@@ -207,7 +207,7 @@ Share is included from day one, free. Create a request link for a Capability:
 doppels share capability/postgres-backup
 ```
 
-The requester supplies the declared inputs. You review the request (`doppels listen`), approve it, and the Recipe runs in your environment. They receive the declared result.
+Keep `doppels share` running. When the requester supplies the declared inputs, the CLI presents the Request for review. You approve it, the Recipe runs in your environment, and they receive the declared result.
 
 > **They access the capability. Execution stays on your node.**
 
@@ -215,9 +215,11 @@ The request flow:
 
 1. You share a Capability link.
 2. The requester provides validated inputs.
-3. You inspect and approve the request.
+3. The sharing terminal presents the Request; you inspect and approve it.
 4. Your node executes the reviewed Recipe locally.
 5. The declared result is returned and the Run is recorded.
+
+For ongoing requests across the local catalog, sign in and bring the Node online with `doppels node up`.
 
 YAML also travels over Git: commit, clone, `doppels validate`, `doppels run`. Guide: [Share](https://docs.doppels.so/guides/sharing).
 

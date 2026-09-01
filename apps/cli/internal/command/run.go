@@ -191,7 +191,7 @@ func (app *App) runLocal(arguments []string) int {
 		runtimeStdout = prefixLines(runtimeStdout, "    ")
 	}
 	// Local run is operator-initiated: invoking the command is the grant.
-	// Share/listen still prompt (or require --yes) for Steps with approval: required.
+	// Share/Node fulfillment still prompts (or requires --yes) for Steps with approval: required.
 	options := execution.Options{
 		ApproveAll:  true,
 		Approve:     interaction.approve,

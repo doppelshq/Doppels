@@ -154,6 +154,11 @@ func (app *App) usage(writer io.Writer) {
 		{"doppels tree [--json]", "Spaces → Capabilities → Recipes"},
 		{"doppels runs [list]|show|logs …", "history (default 20)"},
 	})
+	writeUsageSection(writer, style, "Share", []usageLine{
+		{"doppels share capability/<name>[@ver]", "create a public request link (--input · --yes)"},
+		{"doppels node up", "bring this host online · approve / reject / skip"},
+		{"doppels login|logout|whoami", "manage the Identity for shared requests"},
+	})
 	writeUsageSection(writer, style, "Tooling", []usageLine{
 		{"doppels update", "update to the latest release"},
 		{"doppels telemetry accept|reject|status", "anonymous product analytics"},
@@ -162,14 +167,7 @@ func (app *App) usage(writer io.Writer) {
 
 	if app.experimentalEnabled() {
 		fmt.Fprintln(writer, style.dim("Preview · Cloud"))
-		writeUsageSubsection(writer, style, "Node", []usageLine{
-			{"doppels node up", "this host online · approve / reject / skip inbox"},
-		})
-		writeUsageSubsection(writer, style, "Share", []usageLine{
-			{"doppels share capability/<name>[@ver]", "create share link (--input · --yes)"},
-		})
-		writeUsageSubsection(writer, style, "Identity", []usageLine{
-			{"doppels login|logout|whoami", "device login"},
+		writeUsageSubsection(writer, style, "Workspace", []usageLine{
 			{"doppels organizations|orgs [list]", "cloud Orgs"},
 			{"doppels org use · space use", "select Org / Space"},
 			{"doppels context [show]", "current binding"},

@@ -365,7 +365,7 @@ func IsWorkingTree(path string) bool {
 	return isProjectRoot(path)
 }
 
-// DiscoverListenRoots resolves Project roots for doppels listen:
+// DiscoverListenRoots resolves Project roots for `doppels node up`:
 //  1. start itself is a Project → that root only
 //  2. else immediate child dirs with .doppels/ → Workspace siblings
 //  3. else FindRoot walk-up → single ancestor Project

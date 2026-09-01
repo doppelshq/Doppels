@@ -54,7 +54,7 @@ type PendingState struct {
 	Events  []execution.RunEvent     `json:"events"`
 }
 
-// InboxItem is a Share owned by the authenticated Identity for doppels listen.
+// InboxItem is a Share owned by the authenticated Identity for `doppels node up`.
 type InboxItem struct {
 	Share               Share `json:"share"`
 	HasRequest          bool  `json:"hasRequest"`
