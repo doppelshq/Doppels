@@ -1,6 +1,7 @@
 package command
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"doppels.so/cli/internal/configstore"
+	"doppels.so/cli/internal/registryclient"
 )
 
 func TestPreviewAndApplyDiscoverProjectAndWriteLockAfterSuccess(t *testing.T) {
@@ -240,5 +244,24 @@ func TestPreviewAndApplyLocalOffline(t *testing.T) {
 	out := stdout.String()
 	if !strings.Contains(out, "local") || !strings.Contains(out, "Already in sync") {
 		t.Fatalf("human preview = %s", out)
+	}
+}
+
+func TestWriteApplyConflictHintsPointsUsersToDoppelsInit(t *testing.T) {
+	var buf bytes.Buffer
+	scope := configstore.Context{Organization: "acme", Space: "platform"}
+	changes := []registryclient.Change{{
+		Action: "conflict",
+		Kind:   "Space",
+		Name:   "platform",
+		Reason: "space_manifest_required",
+	}}
+	writeApplyConflictHints(&buf, scope, changes)
+	got := buf.String()
+	if !strings.Contains(got, "doppels init") {
+		t.Fatalf("expected hint to mention `doppels init`, got: %s", got)
+	}
+	if strings.Contains(got, "doppels spaces init") {
+		t.Fatalf("stale `doppels spaces init` reference in hint: %s", got)
 	}
 }
