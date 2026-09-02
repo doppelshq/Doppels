@@ -30,7 +30,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero-flow.jpg" alt="Agent run as a tangle of failed paths; Doppels; Recipe as Inspect, Query, Export, Verify in a row. Versioned. Shareable. Portable." width="100%">
+  <img src="docs/images/doppels-pipeline.png" alt="Agent run as a tangle of failed paths; Doppels; Recipe as Inspect, Query, Export, Verify in a row. Versioned. Shareable. Portable." width="100%">
 </p>
 
 ## Quick start
