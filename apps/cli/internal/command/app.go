@@ -611,3 +611,7 @@ func writeContract[T any](writer io.Writer, style termStyle, title string, value
 		fmt.Fprintf(writer, "    %s\n", style.cyan(name))
 	}
 }
+
+func missingLocalSpaceMessage() string {
+	return "no local Space found; run doppels init"
+}

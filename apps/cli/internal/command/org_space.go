@@ -146,7 +146,7 @@ func (app *App) warnMissingSpaceManifest(space string) {
 	}
 	style := newTermStyle(app.Stdout)
 	fmt.Fprintf(app.Stdout, "  %s  %s\n", style.field("Note"), style.dim(fmt.Sprintf(
-		"no doppels.%s.yaml here — create with doppels spaces init %s before cloud apply",
+		"no doppels.%s.yaml here — run `doppels init %s` before cloud apply",
 		space, space,
 	)))
 }

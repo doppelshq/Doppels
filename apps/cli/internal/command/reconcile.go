@@ -613,7 +613,7 @@ func writeApplyConflictHints(writer io.Writer, scope configstore.Context, change
 		switch change.Reason {
 		case "space_manifest_required":
 			fmt.Fprintf(writer, "  %s  %s\n", style.field("Next"), style.dim(fmt.Sprintf(
-				"create doppels.%s.yaml (doppels spaces init %s), then apply again",
+				"create doppels.%s.yaml (`doppels init %s`), then apply again",
 				scope.Space, scope.Space,
 			)))
 		case "source_authority_mismatch":
