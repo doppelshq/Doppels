@@ -310,10 +310,6 @@ The core model separates:
 
 This repository is the Apache-2.0 core: CLI, schemas, and agent skills. Local `doppels run` works fully offline against that core. Share uses a hosted coordination service only for request links, Request delivery, and declared `returns` — Recipes, Steps, credentials, and execution stay on your node.
 
-<p align="center">
-  <img src="docs/images/architecture.jpg" alt="Architecture: agent integration into the freeze skill, then OSS local CLI runtime, tools, YAML, and Git. Share coordinates requests; the node executes." width="100%">
-</p>
-
 ## Project status
 
 Doppels is pre-alpha. Tagged builds are prereleases (`v0.1.0-alpha.*`). The Recipe format, supported integrations, and execution model may evolve.
