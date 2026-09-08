@@ -13,6 +13,10 @@ Someone requests. You review. Your node executes locally. They get the declared 
 
 > **Delegate the request, not the authority.**
 
+<p align="center">
+  <img src="docs/images/request-review-local-result.jpg" alt="Request with allowed inputs, owner review, Recipe runs on the owner node, requester receives the declared result." width="100%">
+</p>
+
 ## The problem
 
 In companies, a small number of people hold the knowledge, credentials, environment, and authority to perform certain operational tasks. Everyone else interrupts them:
