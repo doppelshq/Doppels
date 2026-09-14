@@ -49,15 +49,67 @@ func loadWorkspaceState(root string, deps Deps) loadedWorkspace {
 		return loadedWorkspace{Health: healthInvalidManifests}
 	}
 	documents, diagnostics := loadManifests(paths)
-	validation := manifest.Validate(documents, manifest.ValidationOptions{Root: root, CheckHost: false})
-	diagnostics = append(diagnostics, validation.Diagnostics...)
+	catalog, validationDiagnostics := usableCatalog(root, documents)
+	diagnostics = append(diagnostics, validationDiagnostics...)
 
 	lock, lockErr := projectlock.Load(root)
 	health := healthOK
 	if len(diagnostics) > 0 || lockErr != nil {
 		health = healthInvalidManifests
 	}
-	return loadedWorkspace{Catalog: validation.Catalog, Lock: lock, Health: health}
+	return loadedWorkspace{Catalog: catalog, Lock: lock, Health: health}
+}
+
+// usableCatalog removes invalid definitions rather than advertising them as
+// executable. Validation is repeated after each removal because a Recipe can
+// become invalid once a Capability it references has been excluded. Both
+// sides of an exact kind/name@version duplicate are removed.
+func usableCatalog(root string, documents []manifest.Loaded) (*manifest.Catalog, []manifest.Diagnostic) {
+	remaining := append([]manifest.Loaded(nil), documents...)
+	var diagnostics []manifest.Diagnostic
+	for {
+		validation := manifest.Validate(remaining, manifest.ValidationOptions{Root: root, CheckHost: false})
+		if len(validation.Diagnostics) == 0 {
+			return validation.Catalog, diagnostics
+		}
+		diagnostics = append(diagnostics, validation.Diagnostics...)
+		invalid := make(map[string]struct{})
+		for _, diagnostic := range validation.Diagnostics {
+			invalid[diagnostic.Source] = struct{}{}
+		}
+		markDuplicateSources(remaining, invalid)
+		filtered := make([]manifest.Loaded, 0, len(remaining))
+		for _, document := range remaining {
+			if _, excluded := invalid[document.Path]; !excluded {
+				filtered = append(filtered, document)
+			}
+		}
+		if len(filtered) == len(remaining) {
+			return manifest.NewCatalog(root, nil), diagnostics
+		}
+		remaining = filtered
+	}
+}
+
+func markDuplicateSources(documents []manifest.Loaded, invalid map[string]struct{}) {
+	groups := make(map[string][]string)
+	for _, loaded := range documents {
+		metadata := loaded.Document.Meta()
+		kind := loaded.Document.Type().Kind
+		if kind != "Capability" && kind != "Recipe" {
+			continue
+		}
+		key := kind + "/" + metadata.Name + "@" + metadata.Version
+		groups[key] = append(groups[key], loaded.Path)
+	}
+	for _, sources := range groups {
+		if len(sources) < 2 {
+			continue
+		}
+		for _, source := range sources {
+			invalid[source] = struct{}{}
+		}
+	}
 }
 
 // loadManifests loads every discovered manifest path through manifest.Load,
@@ -129,20 +181,7 @@ func buildCapabilitySummaries(root string, catalog *manifest.Catalog, lock *proj
 			}
 			return left.Source.Path < right.Source.Path
 		})
-		recipes := append([]manifest.RecipeDefinition(nil), catalog.RecipesForCapability(name)...)
-		sort.Slice(recipes, func(i, j int) bool {
-			left, right := recipes[i], recipes[j]
-			if left.Value.Metadata.Name != right.Value.Metadata.Name {
-				return left.Value.Metadata.Name < right.Value.Metadata.Name
-			}
-			if left.Value.Metadata.Version != right.Value.Metadata.Version {
-				return left.Value.Metadata.Version < right.Value.Metadata.Version
-			}
-			if left.Source.SHA256 != right.Source.SHA256 {
-				return left.Source.SHA256 < right.Source.SHA256
-			}
-			return left.Source.Path < right.Source.Path
-		})
+		recipe, recipeErr := catalog.ResolveRecipe(name, "")
 		for _, definition := range definitions {
 			if definition.Value == nil {
 				continue
@@ -157,10 +196,9 @@ func buildCapabilitySummaries(root string, catalog *manifest.Catalog, lock *proj
 				Pin:            resourceOrigin(lock, "Capability", name, version, definition.Source.SHA256),
 				Readiness:      []proto.RequirementCheck{},
 			}
-			if len(recipes) == 0 {
+			if recipeErr != nil {
 				summary.Runtime = "none"
 			} else {
-				recipe := recipes[0]
 				summary.Runtime = recipe.Value.Runtime
 				summary.Recipe = &proto.RecipeReference{
 					Name:           recipe.Value.Metadata.Name,
@@ -217,19 +255,10 @@ func resourceOrigin(lock *projectlock.File, kind, name, version, digest string) 
 // Both the current .doppels/<name>.space.yaml layout and the legacy root
 // doppels.<name>.yaml stub are accepted by internal/project.
 func spaceHint(root string) string {
-	var paths []string
-	for _, extension := range []string{".yaml", ".yml", ".json"} {
-		for _, pattern := range []string{
-			filepath.Join(root, project.Directory, "*.space"+extension),
-			filepath.Join(root, "doppels.*"+extension),
-		} {
-			matches, err := filepath.Glob(pattern)
-			if err == nil {
-				paths = append(paths, matches...)
-			}
-		}
+	paths, err := project.SpaceManifestPaths(root)
+	if err != nil {
+		return filepath.Base(root)
 	}
-	sort.Strings(paths)
 	for _, path := range paths {
 		loaded, err := manifest.Load(path)
 		if err != nil {

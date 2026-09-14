@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"doppels.so/cli/internal/project"
+	"doppels.so/cli/internal/runner/proto"
 )
 
 // ErrWorkspaceNotFound is returned when a root is not a Space working tree
@@ -29,20 +30,41 @@ type registryFile struct {
 }
 
 // Registry persists the set of workspace roots the Runner knows about. Safe
-// for concurrent use: every mutation holds the lock for the in-memory update
-// and the synchronous disk write together, so readers never observe a root
-// that failed to persist.
+// for concurrent use: every mutation holds the lock across its install commit
+// point and the matching in-memory update. A post-install durability error
+// reconciles memory to the installed file and leaves the registry fail-stop.
 type Registry struct {
-	path string
+	path  string
+	files registryFiles
 
-	mu    sync.RWMutex
-	roots map[string]struct{}
+	mu     sync.RWMutex
+	roots  map[string]struct{}
+	failed error
+}
+
+type directorySyncer interface {
+	Sync() error
+	Close() error
+}
+
+type registryFiles struct {
+	rename        func(oldPath, newPath string) error
+	openDirectory func(path string) (directorySyncer, error)
 }
 
 // NewRegistry builds a Registry backed by path. Call Load before first use
 // to pick up a previous Runner's persisted roots.
 func NewRegistry(path string) *Registry {
-	return &Registry{path: path, roots: make(map[string]struct{})}
+	return &Registry{
+		path:  path,
+		roots: make(map[string]struct{}),
+		files: registryFiles{
+			rename: os.Rename,
+			openDirectory: func(path string) (directorySyncer, error) {
+				return os.Open(path)
+			},
+		},
+	}
 }
 
 // Load reads the persisted roots from disk. A missing file is not an error
@@ -55,8 +77,15 @@ func (r *Registry) Load() error {
 		}
 		return fmt.Errorf("load workspace registry: %w", err)
 	}
-	var file registryFile
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	canonical, err := proto.CanonicalJSON(data)
+	if err != nil {
+		return fmt.Errorf("decode workspace registry %s: %w", r.path, err)
+	}
+	var file struct {
+		Version int       `json:"version"`
+		Roots   *[]string `json:"roots"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(canonical))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&file); err != nil {
 		return fmt.Errorf("decode workspace registry %s: %w", r.path, err)
@@ -68,8 +97,11 @@ func (r *Registry) Load() error {
 	if file.Version != 1 {
 		return fmt.Errorf("decode workspace registry %s: unsupported version %d", r.path, file.Version)
 	}
-	seen := make(map[string]struct{}, len(file.Roots))
-	for _, root := range file.Roots {
+	if file.Roots == nil {
+		return fmt.Errorf("decode workspace registry %s: roots must be a non-null array", r.path)
+	}
+	seen := make(map[string]struct{}, len(*file.Roots))
+	for _, root := range *file.Roots {
 		if !filepath.IsAbs(root) || filepath.Clean(root) != root {
 			return fmt.Errorf("decode workspace registry %s: root %q is not a clean absolute path", r.path, root)
 		}
@@ -118,24 +150,32 @@ func (r *Registry) Add(root string) (canonical string, added bool, err error) {
 	if err != nil {
 		return "", false, fmt.Errorf("%w: %v", ErrWorkspaceNotFound, err)
 	}
-	if !project.IsWorkingTree(canonical) {
-		return "", false, fmt.Errorf("%w: %s has no .doppels/ working tree", ErrWorkspaceNotFound, canonical)
-	}
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.failed != nil {
+		return "", false, fmt.Errorf("workspace registry is fail-stop after persistence failure: %w", r.failed)
+	}
 	if _, exists := r.roots[canonical]; exists {
 		return canonical, false, nil
+	}
+	if !project.IsWorkingTree(canonical) {
+		return "", false, fmt.Errorf("%w: %s has no .doppels/ working tree", ErrWorkspaceNotFound, canonical)
 	}
 	next := make(map[string]struct{}, len(r.roots)+1)
 	for existing := range r.roots {
 		next[existing] = struct{}{}
 	}
 	next[canonical] = struct{}{}
-	if err := r.persistLocked(next); err != nil {
+	installed, err := r.persistLocked(next)
+	if installed {
+		r.roots = next
+	}
+	if err != nil {
+		if installed {
+			r.failed = err
+		}
 		return "", false, err
 	}
-	r.roots = next
 	return canonical, true, nil
 }
 
@@ -151,6 +191,9 @@ func (r *Registry) Remove(root string) (canonical string, err error) {
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.failed != nil {
+		return "", fmt.Errorf("workspace registry is fail-stop after persistence failure: %w", r.failed)
+	}
 	if _, exists := r.roots[canonical]; !exists {
 		return "", fmt.Errorf("%w: %s is not registered", ErrWorkspaceNotFound, canonical)
 	}
@@ -161,17 +204,25 @@ func (r *Registry) Remove(root string) (canonical string, err error) {
 		}
 		next[existing] = struct{}{}
 	}
-	if err := r.persistLocked(next); err != nil {
+	installed, err := r.persistLocked(next)
+	if installed {
+		r.roots = next
+	}
+	if err != nil {
+		if installed {
+			r.failed = err
+		}
 		return "", err
 	}
-	r.roots = next
 	return canonical, nil
 }
 
-// persistLocked writes roots to disk atomically. Callers must hold r.mu.
-func (r *Registry) persistLocked(roots map[string]struct{}) error {
+// persistLocked writes roots to disk atomically. installed is true once
+// rename has made the new file observable, even if directory durability then
+// fails. Callers must hold r.mu.
+func (r *Registry) persistLocked(roots map[string]struct{}) (installed bool, err error) {
 	if err := os.MkdirAll(filepath.Dir(r.path), 0o700); err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
 	list := make([]string, 0, len(roots))
 	for root := range roots {
@@ -180,40 +231,40 @@ func (r *Registry) persistLocked(roots map[string]struct{}) error {
 	sort.Strings(list)
 	data, err := json.MarshalIndent(registryFile{Version: 1, Roots: list}, "", "  ")
 	if err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
 	data = append(data, '\n')
 	temp, err := os.CreateTemp(filepath.Dir(r.path), ".workspaces-*.json")
 	if err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
 	tempPath := temp.Name()
 	defer os.Remove(tempPath)
 	if _, err := temp.Write(data); err != nil {
 		temp.Close()
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
 	if err := temp.Chmod(0o600); err != nil {
 		temp.Close()
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
 	if err := temp.Sync(); err != nil {
 		temp.Close()
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
 	if err := temp.Close(); err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
-	if err := os.Rename(tempPath, r.path); err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+	if err := r.files.rename(tempPath, r.path); err != nil {
+		return false, fmt.Errorf("persist workspace registry: %w", err)
 	}
-	directory, err := os.Open(filepath.Dir(r.path))
+	directory, err := r.files.openDirectory(filepath.Dir(r.path))
 	if err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return true, fmt.Errorf("persist workspace registry after install: %w", err)
 	}
 	defer directory.Close()
 	if err := directory.Sync(); err != nil {
-		return fmt.Errorf("persist workspace registry: %w", err)
+		return true, fmt.Errorf("persist workspace registry after install: %w", err)
 	}
-	return nil
+	return true, nil
 }

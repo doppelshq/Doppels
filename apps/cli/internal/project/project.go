@@ -147,7 +147,7 @@ func validSpaceName(value string) bool {
 // ResolveDiscovery returns default roots unless a Space stub declares discovery.
 func ResolveDiscovery(root string) (Discovery, error) {
 	discovery := DefaultDiscovery()
-	matches, err := listSpaceManifestPaths(root)
+	matches, err := SpaceManifestPaths(root)
 	if err != nil {
 		return Discovery{}, err
 	}
@@ -193,28 +193,39 @@ func DiscoverWith(root string, discovery Discovery) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	var files []string
+	canonicalRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Space root: %w", err)
+	}
+	files := make(map[string]struct{})
 	seenDirs := map[string]struct{}{}
 	for _, relative := range append(append([]string{}, discovery.Capabilities...), discovery.Recipes...) {
-		clean, err := resolveUnderRoot(absoluteRoot, relative)
+		clean, err := resolveUnderRoot(canonicalRoot, relative)
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := seenDirs[clean]; ok {
+		resolvedDir, err := filepath.EvalSymlinks(clean)
+		if errors.Is(err, os.ErrNotExist) && !hasSymlinkComponent(canonicalRoot, clean) {
 			continue
 		}
-		seenDirs[clean] = struct{}{}
-		info, err := os.Stat(clean)
-		if errors.Is(err, os.ErrNotExist) {
+		if err != nil {
+			return nil, fmt.Errorf("resolve discovery path %s: %w", clean, err)
+		}
+		if !pathWithin(canonicalRoot, resolvedDir) {
+			return nil, fmt.Errorf("discovery path %q resolves outside Space root", relative)
+		}
+		if _, ok := seenDirs[resolvedDir]; ok {
 			continue
 		}
+		seenDirs[resolvedDir] = struct{}{}
+		info, err := os.Stat(resolvedDir)
 		if err != nil {
 			return nil, err
 		}
 		if !info.IsDir() {
-			return nil, fmt.Errorf("%s is not a directory", clean)
+			return nil, fmt.Errorf("%s is not a directory", resolvedDir)
 		}
-		err = filepath.WalkDir(clean, func(path string, entry fs.DirEntry, walkErr error) error {
+		err = filepath.WalkDir(resolvedDir, func(path string, entry fs.DirEntry, walkErr error) error {
 			if walkErr != nil {
 				return walkErr
 			}
@@ -223,7 +234,21 @@ func DiscoverWith(root string, discovery Discovery) ([]string, error) {
 			}
 			extension := strings.ToLower(filepath.Ext(entry.Name()))
 			if extension == ".yaml" || extension == ".yml" || extension == ".json" {
-				files = append(files, path)
+				canonicalFile, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					return fmt.Errorf("resolve discovered manifest %s: %w", path, err)
+				}
+				if !pathWithin(canonicalRoot, canonicalFile) {
+					return fmt.Errorf("discovered manifest %s resolves outside Space root", path)
+				}
+				manifestInfo, err := os.Stat(canonicalFile)
+				if err != nil {
+					return err
+				}
+				if !manifestInfo.Mode().IsRegular() {
+					return fmt.Errorf("discovered manifest %s is not a regular file", path)
+				}
+				files[canonicalFile] = struct{}{}
 			}
 			return nil
 		})
@@ -231,8 +256,39 @@ func DiscoverWith(root string, discovery Discovery) ([]string, error) {
 			return nil, err
 		}
 	}
-	sort.Strings(files)
-	return files, nil
+	result := make([]string, 0, len(files))
+	for path := range files {
+		result = append(result, path)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func pathWithin(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func hasSymlinkComponent(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return false
+	}
+	current := root
+	for _, component := range strings.Split(relative, string(filepath.Separator)) {
+		if component == "." || component == "" {
+			continue
+		}
+		current = filepath.Join(current, component)
+		info, err := os.Lstat(current)
+		if err != nil {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func resolveUnderRoot(root, relative string) (string, error) {
@@ -280,19 +336,37 @@ func FindSpaceManifest(root, space string) (string, bool, error) {
 	return matches[0], true, nil
 }
 
-func listSpaceManifestPaths(root string) ([]string, error) {
+// SpaceManifestPaths returns canonical Space manifest paths contained by the
+// canonical Space root. Symlink escapes and dangling links are errors because
+// these files control discovery itself.
+func SpaceManifestPaths(root string) ([]string, error) {
+	absoluteRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return nil, err
+	}
 	var matches []string
 	appendRegular := func(path string) error {
-		info, err := os.Stat(path)
+		resolved, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return err
+		}
+		if !pathWithin(canonicalRoot, resolved) {
+			return fmt.Errorf("Space manifest %s resolves outside Space root", path)
+		}
+		info, err := os.Stat(resolved)
 		if err != nil {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			matches = append(matches, path)
+			matches = append(matches, resolved)
 		}
 		return nil
 	}
-	doppelsDir := filepath.Join(root, Directory)
+	doppelsDir := filepath.Join(canonicalRoot, Directory)
 	for _, extension := range []string{".yaml", ".yml", ".json"} {
 		pattern := filepath.Join(doppelsDir, "*.space"+extension)
 		found, err := filepath.Glob(pattern)
@@ -310,7 +384,7 @@ func listSpaceManifestPaths(root string) ([]string, error) {
 				return nil, err
 			}
 		}
-		rootPattern := filepath.Join(root, "doppels.*"+extension)
+		rootPattern := filepath.Join(canonicalRoot, "doppels.*"+extension)
 		rootFound, err := filepath.Glob(rootPattern)
 		if err != nil {
 			return nil, err

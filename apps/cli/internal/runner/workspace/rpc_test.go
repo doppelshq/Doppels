@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/server"
@@ -14,6 +16,33 @@ type fakeRPCServer struct {
 	handlers map[string]server.Handler
 	events   []proto.NodeEvent
 	onEvent  func(proto.NodeEvent)
+}
+
+type orderedRPCServer struct {
+	handlers   map[string]server.Handler
+	addEntered chan struct{}
+	releaseAdd chan struct{}
+	addOnce    sync.Once
+
+	mu     sync.Mutex
+	events []string
+}
+
+func (s *orderedRPCServer) Handle(method string, handler server.Handler) {
+	if s.handlers == nil {
+		s.handlers = make(map[string]server.Handler)
+	}
+	s.handlers[method] = handler
+}
+
+func (s *orderedRPCServer) EmitNodeEvent(event proto.NodeEvent) {
+	if event.Kind == proto.NodeEventWorkspaceAdded {
+		s.addOnce.Do(func() { close(s.addEntered) })
+		<-s.releaseAdd
+	}
+	s.mu.Lock()
+	s.events = append(s.events, event.Kind)
+	s.mu.Unlock()
 }
 
 func (f *fakeRPCServer) Handle(method string, handler server.Handler) {
@@ -185,6 +214,32 @@ func TestRegisterRPCMapsParamsAndDomainErrors(t *testing.T) {
 	}
 }
 
+func TestRegisterRPCMapsMissingRegisteredRootToWorkspaceNotFound(t *testing.T) {
+	service, base := newService(t)
+	root := initRoot(t, filepath.Join(base, "registered"))
+	if _, _, err := service.AddWorkspace(root); err != nil {
+		t.Fatal(err)
+	}
+	target := &fakeRPCServer{}
+	RegisterRPC(target, service)
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, request := range []struct {
+		method string
+		params map[string]any
+	}{
+		{method: "v1/listCapabilities", params: map[string]any{"workspace": root}},
+		{method: "v1/getCapability", params: map[string]any{"workspace": root, "name": "missing"}},
+	} {
+		_, rpcErr := target.handlers[request.method](rpcParams(t, request.params))
+		if rpcErr == nil || rpcErr.Code != proto.CodeWorkspaceNotFound {
+			t.Fatalf("%s error = %+v, want workspaceNotFound", request.method, rpcErr)
+		}
+	}
+}
+
 func TestRegisterRPCDoesNotEmitEventWhenPersistenceFails(t *testing.T) {
 	base := t.TempDir()
 	root := initRoot(t, filepath.Join(base, "workspace"))
@@ -202,5 +257,81 @@ func TestRegisterRPCDoesNotEmitEventWhenPersistenceFails(t *testing.T) {
 	}
 	if len(target.events) != 0 || len(registry.Roots()) != 0 {
 		t.Fatalf("failed persistence changed state: events=%+v roots=%v", target.events, registry.Roots())
+	}
+}
+
+func TestRegisterRPCPublishesConcurrentMutationsInCommitOrder(t *testing.T) {
+	base := t.TempDir()
+	root := initRoot(t, filepath.Join(base, "workspace"))
+	service := NewService(NewRegistry(filepath.Join(base, "workspaces.json")), Deps{})
+	target := &orderedRPCServer{addEntered: make(chan struct{}), releaseAdd: make(chan struct{})}
+	RegisterRPC(target, service)
+
+	addDone := make(chan *proto.Error, 1)
+	go func() {
+		_, rpcErr := target.handlers["v1/addWorkspace"](rpcParams(t, map[string]any{"root": root}))
+		addDone <- rpcErr
+	}()
+	select {
+	case <-target.addEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("add did not reach blocked publication")
+	}
+
+	removeDone := make(chan *proto.Error, 1)
+	go func() {
+		_, rpcErr := target.handlers["v1/removeWorkspace"](rpcParams(t, map[string]any{"root": root}))
+		removeDone <- rpcErr
+	}()
+	select {
+	case rpcErr := <-removeDone:
+		if rpcErr != nil {
+			t.Fatalf("removeWorkspace error = %+v", rpcErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("remove blocked while add notification was broadcasting")
+	}
+	close(target.releaseAdd)
+	if rpcErr := <-addDone; rpcErr != nil {
+		t.Fatalf("addWorkspace error = %+v", rpcErr)
+	}
+
+	target.mu.Lock()
+	events := append([]string(nil), target.events...)
+	target.mu.Unlock()
+	if len(events) != 2 || events[0] != proto.NodeEventWorkspaceAdded || events[1] != proto.NodeEventWorkspaceRemoved {
+		t.Fatalf("events = %v, want commit order [workspaceAdded workspaceRemoved]", events)
+	}
+}
+
+func TestRegisterRPCEventPublicationAllowsReentrantMutation(t *testing.T) {
+	base := t.TempDir()
+	root := initRoot(t, filepath.Join(base, "workspace"))
+	service := NewService(NewRegistry(filepath.Join(base, "workspaces.json")), Deps{})
+	target := &fakeRPCServer{}
+	RegisterRPC(target, service)
+
+	var removeErr *proto.Error
+	var once sync.Once
+	target.onEvent = func(event proto.NodeEvent) {
+		if event.Kind != proto.NodeEventWorkspaceAdded {
+			return
+		}
+		once.Do(func() {
+			_, removeErr = target.handlers["v1/removeWorkspace"](rpcParams(t, map[string]any{"root": root}))
+		})
+	}
+
+	if _, rpcErr := target.handlers["v1/addWorkspace"](rpcParams(t, map[string]any{"root": root})); rpcErr != nil {
+		t.Fatalf("addWorkspace error = %+v", rpcErr)
+	}
+	if removeErr != nil {
+		t.Fatalf("reentrant removeWorkspace error = %+v", removeErr)
+	}
+	if len(target.events) != 2 || target.events[0].Kind != proto.NodeEventWorkspaceAdded || target.events[1].Kind != proto.NodeEventWorkspaceRemoved {
+		t.Fatalf("events = %+v, want add then reentrant remove", target.events)
+	}
+	if roots := service.registry.Roots(); len(roots) != 0 {
+		t.Fatalf("roots = %v, want reentrant removal persisted", roots)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sort"
+	"sync"
 
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/server"
@@ -19,6 +20,7 @@ type RPCServer interface {
 
 // RegisterRPC attaches the PR5 method surface to the Runner server.
 func RegisterRPC(target RPCServer, service *Service) {
+	events := newNodeEventSequencer(target)
 	target.Handle("v1/listWorkspaces", func(params []byte) (any, *proto.Error) {
 		if err := decodeRPCParams(params, &struct{}{}); err != nil {
 			return nil, err
@@ -35,14 +37,14 @@ func RegisterRPC(target RPCServer, service *Service) {
 		if request.Root == "" {
 			return nil, invalidParams("root is required")
 		}
-		summary, added, err := service.AddWorkspace(request.Root)
+		summary, added, sequence, err := service.addWorkspaceForEvent(request.Root)
 		if err != nil {
 			return nil, domainError(err)
 		}
 		if added {
 			// Registry.Add synchronously commits before returning, so observers
 			// can always reload the root by the time they receive this event.
-			target.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventWorkspaceAdded, Payload: summary})
+			events.Publish(sequence, proto.NodeEvent{Kind: proto.NodeEventWorkspaceAdded, Payload: summary})
 		}
 		return summary, nil
 	})
@@ -56,13 +58,13 @@ func RegisterRPC(target RPCServer, service *Service) {
 		if request.Root == "" {
 			return nil, invalidParams("root is required")
 		}
-		root, err := service.RemoveWorkspace(request.Root)
+		root, sequence, err := service.removeWorkspaceForEvent(request.Root)
 		if err != nil {
 			return nil, domainError(err)
 		}
 		// Registry.Remove has already atomically persisted the new set and
 		// never deletes workspace files.
-		target.EmitNodeEvent(proto.NodeEvent{
+		events.Publish(sequence, proto.NodeEvent{
 			Kind:    proto.NodeEventWorkspaceRemoved,
 			Payload: map[string]string{"root": root},
 		})
@@ -110,6 +112,52 @@ func RegisterRPC(target RPCServer, service *Service) {
 		}
 		return nil, domainError(err)
 	})
+}
+
+// nodeEventSequencer preserves the Service's mutation commit order while
+// deliberately releasing its own lock around EmitNodeEvent. A blocked or
+// reentrant broadcaster therefore cannot block later handlers from committing
+// and enqueueing their notification.
+type nodeEventSequencer struct {
+	target RPCServer
+
+	mu         sync.Mutex
+	next       uint64
+	publishing bool
+	pending    map[uint64]proto.NodeEvent
+}
+
+func newNodeEventSequencer(target RPCServer) *nodeEventSequencer {
+	return &nodeEventSequencer{
+		target:  target,
+		next:    1,
+		pending: make(map[uint64]proto.NodeEvent),
+	}
+}
+
+func (s *nodeEventSequencer) Publish(sequence uint64, event proto.NodeEvent) {
+	s.mu.Lock()
+	s.pending[sequence] = event
+	if s.publishing {
+		s.mu.Unlock()
+		return
+	}
+	s.publishing = true
+	for {
+		event, ok := s.pending[s.next]
+		if !ok {
+			s.publishing = false
+			s.mu.Unlock()
+			return
+		}
+		delete(s.pending, s.next)
+		s.next++
+		s.mu.Unlock()
+
+		s.target.EmitNodeEvent(event)
+
+		s.mu.Lock()
+	}
 }
 
 func decodeRPCParams(params []byte, out any) *proto.Error {

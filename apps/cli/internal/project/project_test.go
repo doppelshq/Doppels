@@ -186,6 +186,158 @@ discovery:
 	}
 }
 
+func TestDiscoverRejectsSymlinkEscapes(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, root, external string)
+	}{
+		{
+			name: "doppels directory",
+			setup: func(t *testing.T, root, external string) {
+				if err := os.MkdirAll(filepath.Join(external, "capabilities"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(external, "capabilities", "outside.yaml"), []byte("kind: Capability"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, filepath.Join(root, Directory)); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			},
+		},
+		{
+			name: "declared intermediate directory",
+			setup: func(t *testing.T, root, external string) {
+				if _, err := Init(root); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Join(external, "capabilities"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(external, filepath.Join(root, "catalog")); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(root, Directory, "space.space.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+kind: Space
+metadata: {name: space}
+discovery: {capabilities: [catalog/capabilities]}
+`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "manifest file",
+			setup: func(t *testing.T, root, external string) {
+				if _, err := Init(root); err != nil {
+					t.Fatal(err)
+				}
+				outside := filepath.Join(external, "outside.yaml")
+				if err := os.WriteFile(outside, []byte("kind: Capability"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(root, Directory, "capabilities", "outside.yaml")); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "root")
+			external := filepath.Join(base, "external")
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(external, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			tt.setup(t, root, external)
+			if files, err := Discover(root); err == nil {
+				t.Fatalf("Discover = %#v, nil; want symlink escape error", files)
+			}
+		})
+	}
+}
+
+func TestDiscoverRejectsDanglingManifestSymlink(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, Directory, "capabilities", "dangling.yaml")
+	if err := os.Symlink(filepath.Join(root, "missing.yaml"), link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if files, err := Discover(root); err == nil {
+		t.Fatalf("Discover = %#v, nil; want dangling symlink error", files)
+	}
+}
+
+func TestDiscoverRejectsExternalAndDanglingSpaceManifestSymlinks(t *testing.T) {
+	tests := []struct {
+		name   string
+		target func(root, external string) string
+	}{
+		{name: "external", target: func(_ string, external string) string { return filepath.Join(external, "outside.space.yaml") }},
+		{name: "dangling", target: func(root, _ string) string { return filepath.Join(root, "missing.space.yaml") }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := filepath.Join(base, "root")
+			external := filepath.Join(base, "external")
+			if _, err := Init(root); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(external, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.name == "external" {
+				if err := os.WriteFile(filepath.Join(external, "outside.space.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+kind: Space
+metadata: {name: outside}
+`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			link := filepath.Join(root, Directory, "linked.space.yaml")
+			if err := os.Symlink(tt.target(root, external), link); err != nil {
+				t.Skipf("symlinks unsupported: %v", err)
+			}
+			if files, err := Discover(root); err == nil {
+				t.Fatalf("Discover = %#v, nil; want unsafe Space manifest error", files)
+			}
+		})
+	}
+}
+
+func TestDiscoverResolvesContainedManifestSymlink(t *testing.T) {
+	root := t.TempDir()
+	if _, err := Init(root); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "definitions", "inside.yaml")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("kind: Capability"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(root, Directory, "capabilities", "inside.yaml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	files, err := Discover(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(files, []string{target}) {
+		t.Fatalf("Discover = %#v, want contained canonical target", files)
+	}
+}
+
 func TestFindRootMissing(t *testing.T) {
 	if _, err := FindRoot(t.TempDir()); err != ErrNotFound {
 		t.Fatalf("FindRoot() error = %v, want ErrNotFound", err)

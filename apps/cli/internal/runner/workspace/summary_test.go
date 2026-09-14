@@ -1,7 +1,6 @@
 package workspace
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"os/exec"
@@ -221,6 +220,81 @@ evidence: {notes: {type: string}}
 	}
 }
 
+func TestBuildCapabilitySummariesDoesNotChooseAmbiguousRecipe(t *testing.T) {
+	root := newSpace(t)
+	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "answer.yaml"), manualCapabilityFixture)
+	for _, name := range []string{"answer-human-a", "answer-human-b"} {
+		writeFile(t, filepath.Join(root, ".doppels", "recipes", name+".yaml"), fmt.Sprintf(`apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: %s, version: 1.0.0}
+provides: [answer-question]
+runtime: manual
+procedure: {readme: ./runbook.md}
+evidence: {notes: {type: string}}
+`, name))
+	}
+
+	workspace := BuildWorkspaceSummary(root, Deps{Host: manifest.OSHost{}})
+	summaries := capabilitiesForTest(t, root)
+	if workspace.Health != "ok" || workspace.Capabilities != 1 || workspace.Recipes != 2 {
+		t.Fatalf("workspace = %+v, want valid ambiguous catalog counts", workspace)
+	}
+	if len(summaries) != 1 || summaries[0].Recipe != nil || summaries[0].Runtime != "none" || len(summaries[0].Readiness) != 0 {
+		t.Fatalf("summaries = %+v, must not invent a Recipe selection", summaries)
+	}
+}
+
+func TestBuildCapabilitySummariesExcludesSemanticallyInvalidRecipe(t *testing.T) {
+	root := newSpace(t)
+	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "answer.yaml"), manualCapabilityFixture)
+	writeFile(t, filepath.Join(root, ".doppels", "recipes", "broken.yaml"), `apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: answer-shell, version: 1.0.0}
+provides: [answer-question]
+runtime: shell
+defaults: {approval: never}
+steps:
+  - id: run
+    name: Run
+    run: {shell: sh, script: "true"}
+returns:
+  ok: "{{ steps.missing.ok }}"
+`)
+
+	workspace := BuildWorkspaceSummary(root, Deps{Host: manifest.OSHost{}})
+	summaries := capabilitiesForTest(t, root)
+	if workspace.Health != "invalidManifests" || workspace.Capabilities != 1 || workspace.Recipes != 0 {
+		t.Fatalf("workspace = %+v, want only usable resources counted", workspace)
+	}
+	if len(summaries) != 1 || summaries[0].Recipe != nil || summaries[0].Runtime != "none" {
+		t.Fatalf("summaries = %+v, invalid Recipe must not be executable", summaries)
+	}
+}
+
+func TestBuildCapabilitySummariesExcludesDuplicateRecipeRevision(t *testing.T) {
+	root := newSpace(t)
+	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "answer.yaml"), manualCapabilityFixture)
+	recipe := `apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: answer-human, version: 1.0.0}
+provides: [answer-question]
+runtime: manual
+procedure: {readme: ./runbook.md}
+evidence: {notes: {type: string}}
+`
+	writeFile(t, filepath.Join(root, ".doppels", "recipes", "first.yaml"), recipe)
+	writeFile(t, filepath.Join(root, ".doppels", "recipes", "second.yaml"), recipe)
+
+	workspace := BuildWorkspaceSummary(root, Deps{Host: manifest.OSHost{}})
+	summaries := capabilitiesForTest(t, root)
+	if workspace.Health != "invalidManifests" || workspace.Capabilities != 1 || workspace.Recipes != 0 {
+		t.Fatalf("workspace = %+v, want duplicate Recipe revisions excluded", workspace)
+	}
+	if len(summaries) != 1 || summaries[0].Recipe != nil || summaries[0].Runtime != "none" {
+		t.Fatalf("summaries = %+v, duplicate Recipe must not be selected", summaries)
+	}
+}
+
 func TestBuildCapabilitySummariesDuplicateVersionsBothListed(t *testing.T) {
 	root := newSpace(t)
 	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "answer-v1.yaml"), manualCapabilityFixture)
@@ -240,7 +314,7 @@ outputs: {ok: {type: string}}
 	}
 }
 
-func TestBuildCapabilitySummariesDuplicateRevisionOrderingIsDeterministic(t *testing.T) {
+func TestBuildCapabilitySummariesExcludesBothDuplicateCapabilityRevisions(t *testing.T) {
 	root := newSpace(t)
 	first := `apiVersion: doppels.so/v1alpha1
 kind: Capability
@@ -254,18 +328,12 @@ metadata: {name: answer-question, version: 1.0.0, summary: second}
 inputs: {}
 outputs: {ok: {type: string}}
 `
-	firstDigest := sha256.Sum256([]byte(first))
-	secondDigest := sha256.Sum256([]byte(second))
-	if string(firstDigest[:]) < string(secondDigest[:]) {
-		first, second = second, first
-		firstDigest, secondDigest = secondDigest, firstDigest
-	}
 	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "a.yaml"), first)
 	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "b.yaml"), second)
 
 	summaries := capabilitiesForTest(t, root)
-	if len(summaries) != 2 || summaries[0].ManifestSHA256 != fmt.Sprintf("%x", secondDigest) || summaries[1].ManifestSHA256 != fmt.Sprintf("%x", firstDigest) {
-		t.Fatalf("summaries = %+v, want digest tie-break ordering", summaries)
+	if len(summaries) != 0 {
+		t.Fatalf("summaries = %+v, want both duplicate revisions excluded", summaries)
 	}
 }
 

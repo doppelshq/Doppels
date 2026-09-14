@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"sync"
 
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/runner/proto"
@@ -27,11 +28,13 @@ type Capability struct {
 }
 
 // Service is the concurrency-safe workspace and local catalog facade used by
-// the Runner's JSON-RPC handlers. Registry owns synchronization of mutations;
-// discovery builds an immutable catalog per request.
+// the Runner's JSON-RPC handlers. mutationMu establishes a single commit order
+// for mutations; discovery builds an immutable catalog per request.
 type Service struct {
-	registry *Registry
-	deps     Deps
+	registry      *Registry
+	deps          Deps
+	mutationMu    sync.Mutex
+	eventSequence uint64
 }
 
 func NewService(registry *Registry, deps Deps) *Service {
@@ -39,7 +42,9 @@ func NewService(registry *Registry, deps Deps) *Service {
 }
 
 func (s *Service) AddWorkspace(root string) (proto.WorkspaceSummary, bool, error) {
+	s.mutationMu.Lock()
 	canonical, added, err := s.registry.Add(root)
+	s.mutationMu.Unlock()
 	if err != nil {
 		return proto.WorkspaceSummary{}, false, err
 	}
@@ -47,7 +52,35 @@ func (s *Service) AddWorkspace(root string) (proto.WorkspaceSummary, bool, error
 }
 
 func (s *Service) RemoveWorkspace(root string) (string, error) {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
 	return s.registry.Remove(root)
+}
+
+func (s *Service) addWorkspaceForEvent(root string) (proto.WorkspaceSummary, bool, uint64, error) {
+	s.mutationMu.Lock()
+	canonical, added, err := s.registry.Add(root)
+	var sequence uint64
+	if err == nil && added {
+		s.eventSequence++
+		sequence = s.eventSequence
+	}
+	s.mutationMu.Unlock()
+	if err != nil {
+		return proto.WorkspaceSummary{}, false, 0, err
+	}
+	return BuildWorkspaceSummary(canonical, s.deps), added, sequence, nil
+}
+
+func (s *Service) removeWorkspaceForEvent(root string) (string, uint64, error) {
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	canonical, err := s.registry.Remove(root)
+	if err != nil {
+		return "", 0, err
+	}
+	s.eventSequence++
+	return canonical, s.eventSequence, nil
 }
 
 func (s *Service) ListWorkspaces() []proto.WorkspaceSummary {
@@ -81,6 +114,9 @@ func (s *Service) ListCapabilities(workspace string) ([]proto.CapabilitySummary,
 	var capabilities []proto.CapabilitySummary
 	for _, root := range roots {
 		state := loadWorkspaceState(root, s.deps)
+		if workspace != "" && state.Health == healthMissingRoot {
+			return nil, fmt.Errorf("%w: %s is registered but missing", ErrWorkspaceNotFound, root)
+		}
 		capabilities = append(capabilities, buildCapabilitySummaries(root, state.Catalog, state.Lock, s.deps)...)
 	}
 	sort.Slice(capabilities, func(i, j int) bool {
@@ -112,6 +148,9 @@ func (s *Service) GetCapability(workspace, name, version string) (Capability, er
 	}
 	root := roots[0]
 	state := loadWorkspaceState(root, s.deps)
+	if state.Health == healthMissingRoot {
+		return Capability{}, fmt.Errorf("%w: %s is registered but missing", ErrWorkspaceNotFound, root)
+	}
 	if state.Catalog == nil {
 		return Capability{}, fmt.Errorf("%w: %s", ErrCapabilityNotFound, name)
 	}

@@ -73,6 +73,72 @@ func TestRegistryAddIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestRegistryAddRemainsIdempotentAfterRootDisappears(t *testing.T) {
+	base := t.TempDir()
+	root := initRoot(t, filepath.Join(base, "space-a"))
+	path := filepath.Join(base, "workspaces.json")
+	registry := NewRegistry(path)
+	canonical, _, err := registry.Add(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+
+	got, added, err := registry.Add(root)
+	if err != nil || added || got != canonical {
+		t.Fatalf("Add missing registered root = %q, %v, %v; want idempotent %q", got, added, err, canonical)
+	}
+
+	restarted := NewRegistry(path)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	got, added, err = restarted.Add(root)
+	if err != nil || added || got != canonical {
+		t.Fatalf("Add missing root after restart = %q, %v, %v; want idempotent %q", got, added, err, canonical)
+	}
+}
+
+func TestRegistryAddRemainsIdempotentAfterDoppelsDisappears(t *testing.T) {
+	base := t.TempDir()
+	root := initRoot(t, filepath.Join(base, "space-a"))
+	registry := NewRegistry(filepath.Join(base, "workspaces.json"))
+	canonical, _, err := registry.Add(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, project.Directory)); err != nil {
+		t.Fatal(err)
+	}
+	got, added, err := registry.Add(root)
+	if err != nil || added || got != canonical {
+		t.Fatalf("Add registered root without .doppels = %q, %v, %v", got, added, err)
+	}
+}
+
+func TestRegistryAddRemainsIdempotentThroughDanglingSymlink(t *testing.T) {
+	base := t.TempDir()
+	root := initRoot(t, filepath.Join(base, "space-a"))
+	alias := filepath.Join(base, "space-a-alias")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	registry := NewRegistry(filepath.Join(base, "workspaces.json"))
+	canonical, _, err := registry.Add(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	got, added, err := registry.Add(alias)
+	if err != nil || added || got != canonical {
+		t.Fatalf("Add through dangling registered alias = %q, %v, %v", got, added, err)
+	}
+}
+
 func TestRegistryAddRejectsMissingDoppelsDir(t *testing.T) {
 	base := t.TempDir()
 	notAProject := filepath.Join(base, "plain-dir")
@@ -196,6 +262,11 @@ func TestRegistryLoadRejectsUnsafePersistence(t *testing.T) {
 		{name: "relative root", body: `{"version":1,"roots":["relative/space"]}`},
 		{name: "unknown field", body: `{"version":1,"roots":[],"surprise":true}`},
 		{name: "trailing value", body: `{"version":1,"roots":[]} {}`},
+		{name: "missing roots", body: `{"version":1}`},
+		{name: "null roots", body: `{"version":1,"roots":null}`},
+		{name: "roots is object", body: `{"version":1,"roots":{}}`},
+		{name: "duplicate roots key", body: `{"version":1,"roots":[],"roots":["/tmp/other"]}`},
+		{name: "duplicate version key", body: `{"version":2,"version":1,"roots":[]}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -258,6 +329,78 @@ func TestRegistryRootsAreAbsoluteAndSortedAfterRestart(t *testing.T) {
 	roots := registry.Roots()
 	if len(roots) != 2 || roots[0] != filepath.Join(base, "a-space") || !filepath.IsAbs(roots[0]) {
 		t.Fatalf("Roots = %v, want absolute sorted roots", roots)
+	}
+}
+
+type failingDirectory struct {
+	syncErr error
+}
+
+func (d failingDirectory) Sync() error  { return d.syncErr }
+func (d failingDirectory) Close() error { return nil }
+
+func TestRegistryPersistenceCommitPoint(t *testing.T) {
+	injected := errors.New("injected persistence failure")
+	tests := []struct {
+		name      string
+		inject    func(*Registry)
+		installed bool
+	}{
+		{
+			name: "rename",
+			inject: func(registry *Registry) {
+				registry.files.rename = func(string, string) error { return injected }
+			},
+		},
+		{
+			name: "open directory after rename",
+			inject: func(registry *Registry) {
+				registry.files.openDirectory = func(string) (directorySyncer, error) { return nil, injected }
+			},
+			installed: true,
+		},
+		{
+			name: "sync directory after rename",
+			inject: func(registry *Registry) {
+				registry.files.openDirectory = func(string) (directorySyncer, error) {
+					return failingDirectory{syncErr: injected}, nil
+				}
+			},
+			installed: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := initRoot(t, filepath.Join(base, "space-a"))
+			path := filepath.Join(base, "workspaces.json")
+			registry := NewRegistry(path)
+			tt.inject(registry)
+
+			if _, _, err := registry.Add(root); !errors.Is(err, injected) {
+				t.Fatalf("Add error = %v, want injected error", err)
+			}
+			canonical, err := Canonicalize(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if registry.Contains(canonical) != tt.installed {
+				t.Fatalf("in-memory installed = %v, want %v", registry.Contains(canonical), tt.installed)
+			}
+
+			restarted := NewRegistry(path)
+			loadErr := restarted.Load()
+			if tt.installed {
+				if loadErr != nil || !restarted.Contains(canonical) {
+					t.Fatalf("restart = contains %v, error %v; want installed state", restarted.Contains(canonical), loadErr)
+				}
+				if _, err := registry.Remove(root); !errors.Is(err, injected) {
+					t.Fatalf("mutation after uncertain durability = %v, want fail-stop error", err)
+				}
+			} else if loadErr != nil || restarted.Contains(canonical) {
+				t.Fatalf("restart = contains %v, error %v; want old state", restarted.Contains(canonical), loadErr)
+			}
+		})
 	}
 }
 
