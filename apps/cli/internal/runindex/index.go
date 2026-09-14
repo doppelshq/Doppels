@@ -68,6 +68,13 @@ type IdempotencyRecord struct {
 	RunID       string
 	RequestID   string
 	Fingerprint string
+	RequestJSON string
+	RunJSON     string
+}
+
+type ReservationEvidence struct {
+	RequestJSON string
+	RunJSON     string
 }
 
 type ListQuery struct {
@@ -197,13 +204,34 @@ CREATE TABLE IF NOT EXISTS idempotency (
   run_id TEXT NOT NULL,
   request_id TEXT NOT NULL,
   request_fingerprint TEXT NOT NULL,
+  request_json TEXT NOT NULL DEFAULT '',
+  run_json TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (capability, idempotency_key)
 );
 CREATE INDEX IF NOT EXISTS runs_created_at ON runs(created_at DESC, id ASC);
 CREATE INDEX IF NOT EXISTS runs_capability_created_at ON runs(capability, created_at DESC, id ASC);
 CREATE INDEX IF NOT EXISTS runs_status_created_at ON runs(status, created_at DESC, id ASC);
-PRAGMA user_version = 2;
 `); err != nil {
+		return err
+	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "request_json", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "run_json", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		exists, err := columnExists(tx, "idempotency", column.name)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := tx.Exec("ALTER TABLE idempotency ADD COLUMN " + column.name + " " + column.definition); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err := tx.Exec(`PRAGMA user_version = 3;`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -261,7 +289,7 @@ ON CONFLICT(id) DO UPDATE SET
 // the original identifiers without replacing the Run; a different
 // fingerprint returns ErrIdempotencyConflict. Keeping both writes in one
 // transaction prevents an idempotency reservation without an indexed Run.
-func (idx *Index) ReserveStart(record Record, key, fingerprint string) (IdempotencyRecord, bool, error) {
+func (idx *Index) ReserveStart(record Record, key, fingerprint string, evidence ReservationEvidence) (IdempotencyRecord, bool, error) {
 	if record.Source == "" {
 		record.Source = SourceLocal
 	}
@@ -274,10 +302,10 @@ func (idx *Index) ReserveStart(record Record, key, fingerprint string) (Idempote
 	}
 	defer tx.Rollback()
 	result, err := tx.Exec(`
-INSERT INTO idempotency (capability, idempotency_key, run_id, request_id, request_fingerprint)
-VALUES (?, ?, ?, ?, ?)
+INSERT INTO idempotency (capability, idempotency_key, run_id, request_id, request_fingerprint, request_json, run_json)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(capability, idempotency_key) DO NOTHING
-`, record.Capability, key, record.ID, record.RequestID, fingerprint)
+`, record.Capability, key, record.ID, record.RequestID, fingerprint, evidence.RequestJSON, evidence.RunJSON)
 	if err != nil {
 		return IdempotencyRecord{}, false, err
 	}
@@ -287,9 +315,9 @@ ON CONFLICT(capability, idempotency_key) DO NOTHING
 	}
 	reservation := IdempotencyRecord{Capability: record.Capability, Key: key}
 	if err := tx.QueryRow(`
-SELECT run_id, request_id, request_fingerprint
+SELECT run_id, request_id, request_fingerprint, request_json, run_json
 FROM idempotency WHERE capability = ? AND idempotency_key = ?
-`, record.Capability, key).Scan(&reservation.RunID, &reservation.RequestID, &reservation.Fingerprint); err != nil {
+`, record.Capability, key).Scan(&reservation.RunID, &reservation.RequestID, &reservation.Fingerprint, &reservation.RequestJSON, &reservation.RunJSON); err != nil {
 		return IdempotencyRecord{}, false, err
 	}
 	if reservation.Fingerprint != fingerprint {
@@ -309,6 +337,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		return IdempotencyRecord{}, false, err
 	}
 	return reservation, created, nil
+}
+
+func (idx *Index) GetReservation(runID string) (IdempotencyRecord, error) {
+	var reservation IdempotencyRecord
+	err := idx.db.QueryRow(`
+SELECT capability, idempotency_key, run_id, request_id, request_fingerprint, request_json, run_json
+FROM idempotency WHERE run_id = ? LIMIT 1
+`, runID).Scan(&reservation.Capability, &reservation.Key, &reservation.RunID, &reservation.RequestID,
+		&reservation.Fingerprint, &reservation.RequestJSON, &reservation.RunJSON)
+	return reservation, err
 }
 
 func (idx *Index) List() ([]Record, error) {

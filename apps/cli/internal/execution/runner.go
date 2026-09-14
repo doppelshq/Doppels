@@ -141,9 +141,18 @@ func (r *runner) initialize(requestID, runID string) error {
 	if r.invocation.Recipe != nil && r.invocation.Recipe.Runtime == "shell" {
 		run.NodeID = r.invocation.NodeID
 	}
+	if r.invocation.PreparedRun != nil {
+		run = *r.invocation.PreparedRun
+		run.Inputs = cloneMap(r.invocation.PreparedRun.Inputs)
+	}
 	r.result = Result{Status: "running", StateDir: r.store.Dir(), Request: request, Run: run, Artifacts: map[string]ArtifactReference{}}
 	if err := r.store.WriteRequest(request); err != nil {
 		return err
+	}
+	if r.options.AfterRequestPersisted != nil {
+		if err := r.options.AfterRequestPersisted(); err != nil {
+			return err
+		}
 	}
 	if err := r.store.WriteRun(run); err != nil {
 		return err

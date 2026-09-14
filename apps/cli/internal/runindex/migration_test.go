@@ -78,10 +78,10 @@ VALUES ('run-v1', 'request-v1', 'succeeded', 'local', 'greet@1.0.0', '', '2026-0
 	if err := idx.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
-		t.Fatalf("user_version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("user_version = %d, want 3", version)
 	}
-	for _, name := range []string{"capability", "idempotency_key", "run_id", "request_id", "request_fingerprint"} {
+	for _, name := range []string{"capability", "idempotency_key", "run_id", "request_id", "request_fingerprint", "request_json", "run_json"} {
 		if !tableColumns(t, idx.db, "idempotency")[name] {
 			t.Fatalf("idempotency column %q missing", name)
 		}

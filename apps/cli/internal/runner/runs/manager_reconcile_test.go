@@ -2,11 +2,19 @@ package runs
 
 import (
 	"context"
+	"database/sql"
 	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
+	"time"
 
+	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/runindex"
 	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runstate"
 )
 
 // TestStartNeverReservesDurablyAfterClose reproduces a deterministic race
@@ -63,7 +71,7 @@ func TestStartNeverReservesDurablyAfterClose(t *testing.T) {
 		Status: "running", Source: "local", Capability: "greet@1.0.0", NodeID: "node-test",
 		CreatedAt: "2026-09-14T00:00:00Z", StateDir: root,
 	}
-	_, created, err := idx.ReserveStart(fresh, "race-close", "irrelevant-fingerprint")
+	_, created, err := idx.ReserveStart(fresh, "race-close", "irrelevant-fingerprint", runindex.ReservationEvidence{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +109,10 @@ func TestOrdinaryRestartReconcilesOrphanedReservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := idx.ReserveStart(orphan, "orphan-key", fingerprint); err != nil {
+	if _, _, err := idx.ReserveStart(orphan, "orphan-key", fingerprint, runindex.ReservationEvidence{
+		RequestJSON: `{"apiVersion":"doppels.so/v1alpha1","kind":"Request","id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","createdAt":"2026-09-14T00:00:00Z","idempotencyKey":"orphan-key","origin":"cli","capability":{"name":"greet","version":"1.0.0"},"inputs":{},"requestedBy":{"kind":"identity","id":"local-operator"}}`,
+		RunJSON:     `{"apiVersion":"doppels.so/v1alpha1","kind":"Run","id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","requestId":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","createdAt":"2026-09-14T00:00:00Z","capability":{"name":"greet","version":"1.0.0"},"recipe":{"name":"greet-shell","version":"1.0.0"},"inputs":{},"executor":{"kind":"service","id":"doppels-runner"},"nodeId":"node-test"}`,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := idx.Close(); err != nil {
@@ -133,3 +144,134 @@ func TestOrdinaryRestartReconcilesOrphanedReservation(t *testing.T) {
 		t.Fatalf("retry = %#v, want stable reference to %#v", retry, orphan)
 	}
 }
+
+// TestRestartReconcilesPreInitializationCrashesWithoutFabricatingEvidence
+// reproduces the remaining finding-1 data-loss bug at both pre-initialization
+// crash boundaries. Recovery must preserve the exact canonical evidence that
+// the accepted startRun represented; synthesizing empty inputs, a different
+// key, missing manifest hashes, or a different Space is dishonest history.
+func TestRestartReconcilesPreInitializationCrashesWithoutFabricatingEvidence(t *testing.T) {
+	for _, boundary := range []string{"post-reserve", "post-request"} {
+		t.Run(boundary, func(t *testing.T) {
+			service, root := runnerWorkspace(t, true)
+			if _, _, err := project.WriteSpaceManifest(root, "review-space"); err != nil {
+				t.Fatal(err)
+			}
+			resolved, err := service.ResolveExecution(root, "greet", "greet-shell")
+			if err != nil {
+				t.Fatal(err)
+			}
+			capabilityRef := execution.ReferenceCapability(resolved.Capability)
+			recipeRef := execution.ReferenceRecipe(*resolved.Recipe)
+			for name, digest := range map[string]string{
+				"capability": capabilityRef.ManifestSHA256,
+				"recipe":     recipeRef.ManifestSHA256,
+			} {
+				if len(digest) != 64 || digest == strings.Repeat("0", 64) {
+					t.Fatalf("%s manifest digest = %q, want non-trivial SHA-256", name, digest)
+				}
+			}
+
+			createdAt := time.Date(2026, 9, 14, 23, 0, 0, 123_000_000, time.UTC)
+			manager := NewManager(context.Background(), service, Config{
+				NodeID: "node-review", Now: func() time.Time { return createdAt },
+				Environment: []string{"PATH=" + os.Getenv("PATH")},
+			})
+			requestPersisted := make(chan struct{}, 1)
+			switch boundary {
+			case "post-reserve":
+				manager.testStopAfterReserve = true
+			case "post-request":
+				manager.testAfterRequestPersisted = func() error {
+					requestPersisted <- struct{}{}
+					return os.ErrClosed
+				}
+			}
+
+			key := "honest-" + boundary
+			params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","recipe":"greet-shell","inputs":{"count":7},"approvalMode":"auto","idempotencyKey":"` + key + `"}`)
+			started, rpcErr := manager.Start("doppels-desktop", params)
+			if rpcErr != nil {
+				t.Fatalf("Start: %+v", rpcErr)
+			}
+			if boundary == "post-request" {
+				<-requestPersisted
+			}
+			if err := manager.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			fingerprintBefore := storedFingerprint(t, root, started.RunID)
+			expectedFingerprint, err := requestFingerprint("greet@1.0.0", ptr("greet-shell@1.0.0"), []byte(`{"count":7}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fingerprintBefore != expectedFingerprint {
+				t.Fatalf("stored fingerprint = %q, want %q", fingerprintBefore, expectedFingerprint)
+			}
+
+			expectedRequest := execution.RequestRecord{
+				APIVersion: execution.APIVersion, Kind: "Request", ID: started.RequestID,
+				CreatedAt: createdAt, IdempotencyKey: key, Origin: "cli",
+				Capability: capabilityRef, Inputs: map[string]any{"count": float64(7)},
+				RequestedBy: execution.ActorReference{Kind: "identity", ID: "local-operator"},
+				Space:       "review-space",
+			}
+			expectedRun := execution.RunRecord{
+				APIVersion: execution.APIVersion, Kind: "Run", ID: started.RunID,
+				RequestID: started.RequestID, CreatedAt: createdAt,
+				Capability: capabilityRef, Recipe: &recipeRef,
+				Inputs:   map[string]any{"count": float64(7)},
+				Executor: execution.ActorReference{Kind: "service", ID: "doppels-runner"},
+				NodeID:   "node-review",
+			}
+
+			restarted := NewManager(context.Background(), service, Config{NodeID: "node-review", Now: func() time.Time { return createdAt.Add(time.Second) }})
+			defer restarted.Close()
+			result, rpcErr := restarted.GetRun(started.RunID, true)
+			if rpcErr != nil {
+				t.Fatalf("GetRun after restart: %+v", rpcErr)
+			}
+			if !reflect.DeepEqual(result.Request, expectedRequest) {
+				t.Fatalf("recovered Request = %#v, want exact %#v", result.Request, expectedRequest)
+			}
+			detail, err := runstate.Load(root, started.RunID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(detail.Run, expectedRun) {
+				t.Fatalf("recovered Run = %#v, want exact %#v", detail.Run, expectedRun)
+			}
+			if result.Summary.Source != "desktop" || result.Summary.Status != "interrupted" {
+				t.Fatalf("recovered summary = %#v, want desktop/interrupted", result.Summary)
+			}
+			if len(detail.Events) != 2 || detail.Events[0].Type != "run_created" || detail.Events[1].Type != "run_interrupted" {
+				t.Fatalf("recovered events = %#v, want honest pre-execution terminal history", detail.Events)
+			}
+
+			retry, rpcErr := restarted.Start("doppels-desktop", params)
+			if rpcErr != nil || retry != started {
+				t.Fatalf("retry = %#v, %+v; want stable IDs %#v", retry, rpcErr, started)
+			}
+			if fingerprintAfter := storedFingerprint(t, root, started.RunID); fingerprintAfter != fingerprintBefore {
+				t.Fatalf("fingerprint after restart = %q, want unchanged %q", fingerprintAfter, fingerprintBefore)
+			}
+		})
+	}
+}
+
+func storedFingerprint(t *testing.T, root, runID string) string {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(root, ".doppels", "runs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var fingerprint string
+	if err := db.QueryRow(`SELECT request_fingerprint FROM idempotency WHERE run_id = ?`, runID).Scan(&fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	return fingerprint
+}
+
+func ptr(value string) *string { return &value }

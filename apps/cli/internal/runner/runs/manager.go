@@ -32,7 +32,8 @@ import (
 type runIndex interface {
 	Get(id string) (runindex.Record, error)
 	Upsert(record runindex.Record) error
-	ReserveStart(record runindex.Record, key, fingerprint string) (runindex.IdempotencyRecord, bool, error)
+	ReserveStart(record runindex.Record, key, fingerprint string, evidence runindex.ReservationEvidence) (runindex.IdempotencyRecord, bool, error)
+	GetReservation(runID string) (runindex.IdempotencyRecord, error)
 	EnqueueOutbox(runID string, payload any) error
 	List() ([]runindex.Record, error)
 	ListPage(query runindex.ListQuery) (runindex.Page, error)
@@ -80,6 +81,12 @@ type Manager struct {
 	// before Start would durably reserve, letting tests deterministically
 	// interleave Start with a concurrent Close. Always nil in production.
 	testBeforeReserve func()
+	// testStopAfterReserve simulates process loss immediately after the
+	// reservation transaction commits, before an engine goroutine exists.
+	testStopAfterReserve bool
+	// testAfterRequestPersisted simulates process loss after request.json and
+	// before run.json.
+	testAfterRequestPersisted func() error
 	// testBeforeForward/testAfterForward are test-only scheduling seams for
 	// pinning a live subscriber forwarder's drain window.
 	testBeforeForward func()
@@ -198,6 +205,36 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 		CreatedAt: createdAt.Format(time.RFC3339Nano),
 		StateDir:  filepath.Join(resolved.Root, ".doppels", "runs", runID),
 	}
+	capabilityRef := execution.ReferenceCapability(resolved.Capability)
+	var recipeRef *execution.DefinitionReference
+	if resolved.Recipe != nil {
+		value := execution.ReferenceRecipe(*resolved.Recipe)
+		recipeRef = &value
+	}
+	requestRecord := execution.RequestRecord{
+		APIVersion: execution.APIVersion, Kind: "Request", ID: requestID,
+		CreatedAt: createdAt, IdempotencyKey: request.IdempotencyKey, Origin: "cli",
+		Capability: capabilityRef, Inputs: inputs,
+		RequestedBy: execution.ActorReference{Kind: "identity", ID: "local-operator"},
+		Space:       resolved.Space,
+	}
+	runRecord := execution.RunRecord{
+		APIVersion: execution.APIVersion, Kind: "Run", ID: runID, RequestID: requestID,
+		CreatedAt: createdAt, Capability: capabilityRef, Recipe: recipeRef, Inputs: inputs,
+		Executor: execution.ActorReference{Kind: "service", ID: "doppels-runner"},
+	}
+	if resolved.Recipe != nil && resolved.Recipe.Value.Runtime == "shell" {
+		runRecord.NodeID = m.config.NodeID
+	}
+	requestJSON, err := json.Marshal(requestRecord)
+	if err != nil {
+		return StartResult{}, internalError(err)
+	}
+	runJSON, err := json.Marshal(runRecord)
+	if err != nil {
+		return StartResult{}, internalError(err)
+	}
+	evidence := runindex.ReservationEvidence{RequestJSON: string(requestJSON), RunJSON: string(runJSON)}
 	if m.testBeforeReserve != nil {
 		m.testBeforeReserve()
 	}
@@ -213,7 +250,7 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 		m.mu.Unlock()
 		return StartResult{}, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}
 	}
-	reservation, created, err := idx.ReserveStart(record, request.IdempotencyKey, fingerprint)
+	reservation, created, err := idx.ReserveStart(record, request.IdempotencyKey, fingerprint, evidence)
 	if err != nil {
 		m.mu.Unlock()
 		if errors.Is(err, runindex.ErrIdempotencyConflict) {
@@ -223,6 +260,10 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 	}
 	result := StartResult{RequestID: reservation.RequestID, RunID: reservation.RunID}
 	if !created {
+		m.mu.Unlock()
+		return result, nil
+	}
+	if m.testStopAfterReserve {
 		m.mu.Unlock()
 		return result, nil
 	}
@@ -236,11 +277,11 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 	if m.config.OnStarted != nil {
 		m.config.OnStarted(summaryFromRecord(resolved.Root, record))
 	}
-	go m.execute(runCtx, active, idx, resolved, inputs, request.IdempotencyKey, result, record.Source, request.ApprovalMode, createdAt)
+	go m.execute(runCtx, active, idx, resolved, inputs, request.IdempotencyKey, result, record.Source, request.ApprovalMode, createdAt, requestRecord, runRecord)
 	return result, nil
 }
 
-func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, resolved workspace.Execution, inputs map[string]any, key string, ids StartResult, source, approvalMode string, createdAt time.Time) {
+func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, resolved workspace.Execution, inputs map[string]any, key string, ids StartResult, source, approvalMode string, createdAt time.Time, requestRecord execution.RequestRecord, runRecord execution.RunRecord) {
 	defer m.wg.Done()
 	defer close(active.done)
 	defer active.cancel()
@@ -257,6 +298,7 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, 
 		Executor: execution.ActorReference{Kind: "service", ID: "doppels-runner"},
 		NodeID:   m.config.NodeID, Source: source, Space: resolved.Space, IdempotencyKey: key,
 		RequestID: ids.RequestID, RequestCreatedAt: createdAt, RunID: ids.RunID,
+		ExistingRequest: &requestRecord, PreparedRun: &runRecord,
 	}
 	if resolved.Recipe != nil {
 		reference := execution.ReferenceRecipe(*resolved.Recipe)
@@ -265,8 +307,9 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, 
 	}
 	options := execution.Options{
 		ApproveAll: approvalMode == "auto", Environment: m.config.Environment,
-		Now:      func() time.Time { return m.config.Now().UTC().Truncate(time.Millisecond) },
-		RunIndex: idx,
+		Now:                   func() time.Time { return m.config.Now().UTC().Truncate(time.Millisecond) },
+		RunIndex:              idx,
+		AfterRequestPersisted: m.testAfterRequestPersisted,
 		OnEvent: func(_ context.Context, event execution.RunEvent) error {
 			m.broadcast(ids.RunID, payloadFromEvent(event))
 			return nil
@@ -338,20 +381,33 @@ func reconcileOrphanedReservations(root string, idx runIndex, now func() time.Ti
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
 		}
-		if err := materializeOrphanedReservation(root, runDir, record, now, idx); err != nil {
+		reservation, err := idx.GetReservation(record.ID)
+		if err != nil {
+			return fmt.Errorf("load orphaned Run %s evidence: %w", record.ID, err)
+		}
+		var request execution.RequestRecord
+		var run execution.RunRecord
+		if err := json.Unmarshal([]byte(reservation.RequestJSON), &request); err != nil {
+			return fmt.Errorf("decode orphaned Run %s Request evidence: %w", record.ID, err)
+		}
+		if err := json.Unmarshal([]byte(reservation.RunJSON), &run); err != nil {
+			return fmt.Errorf("decode orphaned Run %s Run evidence: %w", record.ID, err)
+		}
+		if request.ID != record.RequestID || run.ID != record.ID || run.RequestID != request.ID {
+			return fmt.Errorf("orphaned Run %s reservation evidence has inconsistent identifiers", record.ID)
+		}
+		if err := materializeOrphanedReservation(root, runDir, record, request, run, now, idx); err != nil {
 			return fmt.Errorf("reconcile orphaned Run %s: %w", record.ID, err)
 		}
 	}
 	return nil
 }
 
-// materializeOrphanedReservation synthesizes the minimal durable Run history
-// for a reservation that never reached execution: request.json/run.json (with
-// empty Inputs — the originals were never durably recorded, since only
-// runner.initialize() persists them) followed by run_created and
-// run_interrupted. This keeps the idempotency contract's promise that a
-// retry with the same key always returns the same, loadable reference.
-func materializeOrphanedReservation(root, runDir string, record runindex.Record, now func() time.Time, idx runIndex) error {
+// materializeOrphanedReservation completes the exact immutable Request/Run
+// evidence committed with the reservation, then records that execution never
+// began. It never infers inputs, keys, Space, source, or definition hashes
+// from the lossy index projection.
+func materializeOrphanedReservation(root, runDir string, record runindex.Record, request execution.RequestRecord, run execution.RunRecord, now func() time.Time, idx runIndex) error {
 	// A partially-initialized directory (crash mid-Open, before run.json) has
 	// no observers depending on its contents: safe to clear and retry.
 	if err := os.RemoveAll(runDir); err != nil {
@@ -361,36 +417,14 @@ func materializeOrphanedReservation(root, runDir string, record runindex.Record,
 	if err != nil {
 		return err
 	}
-	createdAt, err := time.Parse(time.RFC3339Nano, record.CreatedAt)
-	if err != nil {
-		createdAt = now().UTC()
-	}
 	occurred := now().UTC().Truncate(time.Millisecond)
-	capabilityRef := definitionReferenceFrom(record.Capability)
-	var recipeRef *execution.DefinitionReference
-	if record.Recipe != "" {
-		ref := definitionReferenceFrom(record.Recipe)
-		recipeRef = &ref
-	}
-	request := execution.RequestRecord{
-		APIVersion: execution.APIVersion, Kind: "Request", ID: record.RequestID,
-		CreatedAt: createdAt, IdempotencyKey: "local:" + record.RequestID,
-		Capability: capabilityRef, Inputs: map[string]any{},
-		RequestedBy: execution.ActorReference{Kind: "identity", ID: "local-operator"},
-		Origin:      "cli",
-	}
-	run := execution.RunRecord{
-		APIVersion: execution.APIVersion, Kind: "Run", ID: record.ID, RequestID: record.RequestID,
-		CreatedAt: createdAt, Capability: capabilityRef, Recipe: recipeRef, Inputs: map[string]any{},
-		Executor: execution.ActorReference{Kind: "service", ID: "doppels-runner"}, NodeID: record.NodeID,
-	}
 	if err := store.WriteRequest(request); err != nil {
 		return err
 	}
 	if err := store.WriteRun(run); err != nil {
 		return err
 	}
-	created := execution.RunEvent{APIVersion: execution.APIVersion, Kind: "RunEvent", RunID: record.ID, Sequence: 0, OccurredAt: createdAt, Type: "run_created"}
+	created := execution.RunEvent{APIVersion: execution.APIVersion, Kind: "RunEvent", RunID: record.ID, Sequence: 0, OccurredAt: run.CreatedAt, Type: "run_created"}
 	if err := store.AppendEvent(created); err != nil {
 		return err
 	}
@@ -411,11 +445,6 @@ func materializeOrphanedReservation(root, runDir string, record runindex.Record,
 		"capability": record.Capability, "recipe": record.Recipe,
 		"createdAt": record.CreatedAt, "finishedAt": record.FinishedAt,
 	})
-}
-
-func definitionReferenceFrom(value string) execution.DefinitionReference {
-	name, version, _ := strings.Cut(value, "@")
-	return execution.DefinitionReference{Name: name, Version: version}
 }
 
 func (m *Manager) Active() int {

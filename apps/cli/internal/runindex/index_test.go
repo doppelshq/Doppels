@@ -286,7 +286,7 @@ func TestReserveStartIsAtomicAcrossIndexesAndSurvivesRestart(t *testing.T) {
 				Status: "running", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T12:00:00Z",
 				StateDir: filepath.Join(root, ".doppels", "runs", "candidate"),
 			}
-			reservation, created, err := idx.ReserveStart(record, "same-key", "same-fingerprint")
+			reservation, created, err := idx.ReserveStart(record, "same-key", "same-fingerprint", ReservationEvidence{})
 			outcomes <- outcome{reservation: reservation, created: created, err: err}
 		}(i)
 	}
@@ -330,14 +330,14 @@ func TestReserveStartIsAtomicAcrossIndexesAndSurvivesRestart(t *testing.T) {
 	retry, created, err := reopened.ReserveStart(Record{
 		ID: "other-run", RequestID: "other-request", Status: "running",
 		Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root,
-	}, "same-key", "same-fingerprint")
+	}, "same-key", "same-fingerprint", ReservationEvidence{})
 	if err != nil || created || retry != winner {
 		t.Fatalf("retry = %#v, created=%v, err=%v; want original %#v", retry, created, err, winner)
 	}
 	if _, _, err := reopened.ReserveStart(Record{
 		ID: "collision", RequestID: "collision-request", Status: "running",
 		Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root,
-	}, "same-key", "different-fingerprint"); !errors.Is(err, ErrIdempotencyConflict) {
+	}, "same-key", "different-fingerprint", ReservationEvidence{}); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("collision error = %v, want ErrIdempotencyConflict", err)
 	}
 	records, err := reopened.List()
