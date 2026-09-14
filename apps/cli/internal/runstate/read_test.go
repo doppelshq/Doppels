@@ -148,6 +148,49 @@ func TestLogsRejectsSymlinkEscapingTheRunDirectory(t *testing.T) {
 	}
 }
 
+func TestLogFilesDetectsTruncationMarkerWithoutFullRead(t *testing.T) {
+	root := t.TempDir()
+	runID := "run01truncated"
+	reqID := "req01truncated"
+	dir := filepath.Join(root, ".doppels", "runs", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 25, 12, 0, 0, 0, time.UTC)
+	writeJSON(t, filepath.Join(dir, "request.json"), execution.RequestRecord{
+		APIVersion: execution.APIVersion, Kind: "Request", ID: reqID, CreatedAt: now,
+		Capability: execution.DefinitionReference{Name: "greet", Version: "1.0.0"},
+	})
+	writeJSON(t, filepath.Join(dir, "run.json"), execution.RunRecord{
+		APIVersion: execution.APIVersion, Kind: "Run", ID: runID, RequestID: reqID, CreatedAt: now,
+		Capability: execution.DefinitionReference{Name: "greet", Version: "1.0.0"},
+	})
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("x", 1<<20) + "\n[doppels: truncated after 1.0MiB]\n"
+	if err := os.WriteFile(filepath.Join(dir, "logs", "run.stdout.log"), []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "logs", "run.stderr.log"), []byte("clean output\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	refs, err := LogFiles(root, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("refs = %#v", refs)
+	}
+	for _, ref := range refs {
+		wantTruncated := ref.Stream == "stdout"
+		if ref.Truncated != wantTruncated {
+			t.Fatalf("ref %#v truncated = %v, want %v", ref, ref.Truncated, wantTruncated)
+		}
+	}
+}
+
 // TestLogsRejectsSymlinkedIntermediateDirectory covers the other shape of
 // the same escape: not the log file itself, but the "logs" directory
 // component being a symlink to somewhere outside the Run directory.
