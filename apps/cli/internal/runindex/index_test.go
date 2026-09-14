@@ -233,6 +233,49 @@ func TestListPageUsesStableCursorAndBoundedFilters(t *testing.T) {
 	}
 }
 
+// TestUpsertNeverChangesCreatedAtAfterTheFirstInsert reproduces review
+// finding 10: created_at is the sort key ListPage's keyset pagination
+// relies on ("ORDER BY created_at DESC, id ASC"). A Run's row is first
+// written at reservation time (ReserveStart, T0) and then Upserted again
+// once the engine actually initializes it (T2, later) — if that second
+// write were allowed to change created_at, a row could shift position (or
+// vanish/duplicate across a client's page boundary) between two calls to
+// ListPage. created_at must be assigned once and stay immutable across
+// every subsequent Upsert, no matter what value a caller passes.
+func TestUpsertNeverChangesCreatedAtAfterTheFirstInsert(t *testing.T) {
+	root := t.TempDir()
+	idx, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+
+	original := Record{
+		ID: "run-1", RequestID: "req-1", Status: "running", Capability: "greet@1.0.0",
+		CreatedAt: "2026-09-14T12:00:00Z", StateDir: root,
+	}
+	if err := idx.Upsert(original); err != nil {
+		t.Fatal(err)
+	}
+	later := original
+	later.Status = "succeeded"
+	later.CreatedAt = "2026-09-14T13:00:00Z" // a later Upsert (e.g. engine init) proposing a different value
+	if err := idx.Upsert(later); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := idx.Get("run-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CreatedAt != original.CreatedAt {
+		t.Fatalf("created_at = %q after a later Upsert, want unchanged %q", got.CreatedAt, original.CreatedAt)
+	}
+	if got.Status != "succeeded" {
+		t.Fatalf("status = %q, want succeeded (other columns must still update)", got.Status)
+	}
+}
+
 func TestEncodeCursorResumesListPageAtExactBoundary(t *testing.T) {
 	root := t.TempDir()
 	idx, err := Open(root)

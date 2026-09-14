@@ -244,7 +244,6 @@ ON CONFLICT(id) DO UPDATE SET
   capability = excluded.capability,
   recipe = excluded.recipe,
   node_id = excluded.node_id,
-  created_at = excluded.created_at,
   finished_at = excluded.finished_at,
   state_dir = excluded.state_dir,
   sync_status = excluded.sync_status
