@@ -80,6 +80,10 @@ type Manager struct {
 	// before Start would durably reserve, letting tests deterministically
 	// interleave Start with a concurrent Close. Always nil in production.
 	testBeforeReserve func()
+	// testBeforeForward/testAfterForward are test-only scheduling seams for
+	// pinning a live subscriber forwarder's drain window.
+	testBeforeForward func()
+	testAfterForward  func()
 
 	// openIndex constructs the runIndex for a workspace root. Overridable in
 	// tests to wrap the real *runindex.Index in a fault-injecting decorator

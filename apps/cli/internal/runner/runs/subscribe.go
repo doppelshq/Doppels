@@ -31,10 +31,13 @@ type runSubscriber struct {
 	sub     server.RunEventSubscriber
 	events  chan proto.RunEventPayload
 
-	mu         sync.Mutex
-	lastReplay int
-	bytes      int
-	stopped    bool
+	mu             sync.Mutex
+	lastReplay     int
+	bytes          int
+	pending        int
+	firstPending   int
+	stopped        bool
+	discardBacklog bool
 }
 
 // addSubscriber registers entry so broadcast() starts queuing events for it
@@ -45,8 +48,9 @@ type runSubscriber struct {
 func (m *Manager) addSubscriber(runID string, sub server.RunEventSubscriber) *runSubscriber {
 	entry := &runSubscriber{
 		manager: m, runID: runID, sub: sub,
-		events:     make(chan proto.RunEventPayload, subscriberEventBuffer),
-		lastReplay: -1,
+		events:       make(chan proto.RunEventPayload, subscriberEventBuffer),
+		lastReplay:   -1,
+		firstPending: -1,
 	}
 	m.subsMu.Lock()
 	m.subs[runID] = append(m.subs[runID], entry)
@@ -68,15 +72,27 @@ func (e *runSubscriber) start() {
 }
 
 func (e *runSubscriber) forward() {
+	if e.manager.testBeforeForward != nil {
+		e.manager.testBeforeForward()
+	}
+	if e.manager.testAfterForward != nil {
+		defer e.manager.testAfterForward()
+	}
 	for event := range e.events {
 		e.mu.Lock()
+		e.pending--
+		if e.pending == 0 {
+			e.firstPending = -1
+		} else {
+			e.firstPending = event.Sequence + 1
+		}
 		skip := event.Sequence <= e.lastReplay
 		// The byte budget tracks pending backlog, not lifetime traffic: an
 		// event leaving the queue here frees its share of the budget for
 		// whatever deliver() admits next.
 		e.bytes -= approxEventSize(event)
-		e.mu.Unlock()
-		if skip {
+		if skip || e.discardBacklog {
+			e.mu.Unlock()
 			continue
 		}
 		// A connection can drop a frame on its own outbound queue
@@ -86,11 +102,10 @@ func (e *runSubscriber) forward() {
 		// forwarding further events to a subscriber whose connection has
 		// already proven it cannot keep up.
 		if !e.sub.DeliverRunEvent(event) {
-			e.close()
-			e.manager.removeSubscriber(e.runID, e)
-			e.sub.DeliverRunGap(e.runID, event.Sequence)
+			e.gapLocked(event.Sequence)
 			return
 		}
+		e.mu.Unlock()
 	}
 }
 
@@ -109,6 +124,10 @@ func (e *runSubscriber) deliver(event proto.RunEventPayload) {
 	}
 	select {
 	case e.events <- event:
+		if e.pending == 0 {
+			e.firstPending = event.Sequence
+		}
+		e.pending++
 		e.bytes += size
 		e.mu.Unlock()
 	default:
@@ -120,7 +139,11 @@ func (e *runSubscriber) deliver(event proto.RunEventPayload) {
 // asynchronously notifies the subscriber and unregisters it, since both can
 // block or re-enter the manager.
 func (e *runSubscriber) gapLocked(fromSequence int) {
+	if e.firstPending >= 0 && e.firstPending < fromSequence {
+		fromSequence = e.firstPending
+	}
 	e.stopped = true
+	e.discardBacklog = true
 	close(e.events)
 	e.mu.Unlock()
 	go func() {

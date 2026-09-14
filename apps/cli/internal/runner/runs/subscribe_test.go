@@ -2,6 +2,7 @@ package runs
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -9,6 +10,8 @@ import (
 	"time"
 
 	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runner/server"
+	"doppels.so/cli/internal/runner/transport"
 )
 
 type fakeSubscriber struct {
@@ -169,6 +172,131 @@ func TestSubscribeOverflowGapsInsteadOfBlockingTheEngine(t *testing.T) {
 			t.Fatal("subscriber was never marked stopped after overflow")
 		default:
 			time.Sleep(5 * time.Millisecond)
+		}
+	}
+}
+
+// TestRunEventGapIsLastNotificationForRunOverRealSocket reproduces the
+// remaining finding-5 ordering bug with the real JSON-RPC transport. Once a
+// gap is visible on the wire, no event from the discarded backlog may follow
+// it for that Run, and fromSequence must name the first discarded event.
+func TestRunEventGapIsLastNotificationForRunOverRealSocket(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	forwardStarted := make(chan struct{})
+	releaseForward := make(chan struct{})
+	forwardDone := make(chan struct{})
+	manager.testBeforeForward = func() {
+		close(forwardStarted)
+		<-releaseForward
+	}
+	manager.testAfterForward = func() { close(forwardDone) }
+
+	srv := server.New(server.Config{
+		Token: integrationToken, RunnerVersion: "0.0.1-test",
+		NodeStatus: func() proto.NodeStatus { return proto.NodeStatus{} },
+		Log:        func(string, ...any) {},
+	})
+	RegisterRPC(srv, manager)
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := transport.Unix{}.Listen(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	go srv.Serve(serveCtx, listener)
+	t.Cleanup(srv.Close)
+
+	client := dialIntegrationClient(t, socketPath)
+	startResponse := client.call("start-gap", "v1/startRun", map[string]any{
+		"workspace": root, "capability": "greet", "inputs": map[string]any{"count": 1},
+		"approvalMode": "interactive", "idempotencyKey": "wire-gap-order",
+	})
+	if startResponse.Err != nil {
+		t.Fatalf("startRun: %+v", startResponse.Err)
+	}
+	var started StartResult
+	if err := json.Unmarshal(rawResult(t, startResponse), &started); err != nil {
+		t.Fatal(err)
+	}
+	waitForStatus(t, root, started.RunID, "pending_manual")
+
+	subResponse := client.call("sub-gap", "v1/subscribeRun", map[string]any{"runId": started.RunID})
+	if subResponse.Err != nil {
+		t.Fatalf("subscribeRun: %+v", subResponse.Err)
+	}
+	var snapshot SubscribeResult
+	if err := json.Unmarshal(rawResult(t, subResponse), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	<-forwardStarted
+	firstLive := len(snapshot.Events)
+	for sequence := firstLive; sequence < firstLive+subscriberEventBuffer+1; sequence++ {
+		manager.broadcast(started.RunID, proto.RunEventPayload{
+			RunID: started.RunID, Sequence: sequence, Type: "step_started",
+		})
+	}
+
+	method, params := client.readNotification(t)
+	if method != "v1/nodeEvent" {
+		t.Fatalf("first post-overflow notification = %q, want v1/nodeEvent gap", method)
+	}
+	var gap proto.NodeEvent
+	if err := json.Unmarshal(params, &gap); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseForward)
+	<-forwardDone
+	if gap.Kind != proto.NodeEventRunEventGap {
+		t.Fatalf("node event kind = %q, want %q", gap.Kind, proto.NodeEventRunEventGap)
+	}
+	rawPayload, err := json.Marshal(gap.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gapPayload struct {
+		RunID        string `json:"runId"`
+		FromSequence int    `json:"fromSequence"`
+	}
+	if err := json.Unmarshal(rawPayload, &gapPayload); err != nil {
+		t.Fatal(err)
+	}
+	if gapPayload.RunID != started.RunID || gapPayload.FromSequence != firstLive {
+		t.Fatalf("gap payload = %#v, want runId %q fromSequence %d", gapPayload, started.RunID, firstLive)
+	}
+
+	// The ping response is a deterministic FIFO fence: once observed, every
+	// frame the completed forwarder could enqueue has already been read.
+	if err := client.encoder.WriteFrame(map[string]any{"jsonrpc": "2.0", "id": "gap-fence", "method": "v1/ping", "params": map[string]any{}}); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		frame, err := client.decoder.ReadFrame()
+		if err != nil {
+			t.Fatalf("read post-gap frame: %v", err)
+		}
+		var envelope struct {
+			ID     any             `json:"id"`
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(frame, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Method == "v1/runEvent" {
+			var event proto.RunEventPayload
+			if err := json.Unmarshal(envelope.Params, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.RunID == started.RunID {
+				t.Fatalf("runEvent sequence %d appeared after runEventGap for Run %s", event.Sequence, event.RunID)
+			}
+		}
+		if envelope.ID == "gap-fence" {
+			break
 		}
 	}
 }
