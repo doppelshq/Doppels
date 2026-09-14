@@ -261,17 +261,28 @@ func (c *connection) sendNodeEvent(event proto.NodeEvent) {
 // connection only. Domain callers (e.g. runs.Manager) push events straight to
 // a specific subscriber instead of the server-wide broadcast EmitNodeEvent
 // uses, since a Run subscription is per-connection, not per-server.
-func (c *connection) DeliverRunEvent(event proto.RunEventPayload) {
-	c.enqueue(proto.NewNotification("v1/runEvent", event), false)
+//
+// It reports whether the frame was actually queued. A saturated outbound
+// queue drops the frame (best-effort, like any notification) but the caller
+// must not treat that as success: a dropped event is a gap, and the caller
+// is responsible for reacting (see DeliverRunGap) — silently losing an event
+// with no signal at all would violate the no-gap contract.
+func (c *connection) DeliverRunEvent(event proto.RunEventPayload) bool {
+	return c.enqueue(proto.NewNotification("v1/runEvent", event), false)
 }
 
 // DeliverRunGap tells this connection's subscriber that it fell behind and
 // must resynchronize (RFC §10): the Runner stops emitting that Run to it.
+// This is the client's only signal to resync, so it is never a silent,
+// best-effort drop: a saturated outbound queue closes the connection
+// instead, which is itself an unambiguous signal to reconnect and
+// re-subscribe (RFC §10: "Desconexión = unsubscribe implícito ... Reconexión
+// = nuevo initialize + re-subscripciones").
 func (c *connection) DeliverRunGap(runID string, fromSequence int) {
 	c.enqueue(proto.NewNotification("v1/nodeEvent", proto.NodeEvent{
 		Kind:    proto.NodeEventRunEventGap,
 		Payload: map[string]any{"runId": runID, "fromSequence": fromSequence},
-	}), false)
+	}), true)
 }
 
 func (c *connection) close() {

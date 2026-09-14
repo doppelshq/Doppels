@@ -151,10 +151,11 @@ type signalingSubscriber struct {
 	notified chan struct{}
 }
 
-func (s *signalingSubscriber) DeliverRunEvent(event proto.RunEventPayload) {
+func (s *signalingSubscriber) DeliverRunEvent(event proto.RunEventPayload) bool {
 	if event.Type == "run_cancelled" || event.Type == "run_interrupted" {
 		s.notified <- struct{}{}
 	}
+	return true
 }
 
 func (s *signalingSubscriber) DeliverRunGap(string, int) {}
@@ -227,5 +228,8 @@ type countingSubscriber struct {
 	events chan struct{}
 }
 
-func (c *countingSubscriber) DeliverRunEvent(proto.RunEventPayload) { c.events <- struct{}{} }
-func (c *countingSubscriber) DeliverRunGap(string, int)             {}
+func (c *countingSubscriber) DeliverRunEvent(proto.RunEventPayload) bool {
+	c.events <- struct{}{}
+	return true
+}
+func (c *countingSubscriber) DeliverRunGap(string, int) {}

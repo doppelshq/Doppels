@@ -75,7 +75,18 @@ func (e *runSubscriber) forward() {
 		if skip {
 			continue
 		}
-		e.sub.DeliverRunEvent(event)
+		// A connection can drop a frame on its own outbound queue
+		// independently of this subscriber's byte/count budget (e.g. a
+		// stuck client). That is still a gap: report it as one instead of
+		// silently treating the drop as a successful delivery, and stop
+		// forwarding further events to a subscriber whose connection has
+		// already proven it cannot keep up.
+		if !e.sub.DeliverRunEvent(event) {
+			e.close()
+			e.manager.removeSubscriber(e.runID, e)
+			e.sub.DeliverRunGap(e.runID, event.Sequence)
+			return
+		}
 	}
 }
 

@@ -331,6 +331,41 @@ func TestServerUnsubscribedClientReceivesNoNodeEvents(t *testing.T) {
 	}
 }
 
+// TestDeliverRunEventReportsDropAndDeliverRunGapClosesOnSaturation
+// reproduces review finding 3: a saturated outbound queue silently dropped
+// both v1/runEvent and its v1/nodeEvent runEventGap escape hatch, so a
+// stuck client could miss events with no signal at all — not even the
+// "unmistakable resync" of a closed connection. DeliverRunEvent must report
+// whether the frame was actually queued so the caller (runs.Manager) can
+// react, and DeliverRunGap must be delivered or force a close: it is the
+// client's only signal to resynchronize, so it may never itself be a
+// silent, best-effort drop. A saturated *real* connection object is used
+// (no fake subscriber) since the bug is specifically in the outbound queue.
+func TestDeliverRunEventReportsDropAndDeliverRunGapClosesOnSaturation(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	defer clientEnd.Close()
+	conn := newConnection(server, clientEnd)
+
+	for i := 0; i < outboundBufferSize; i++ {
+		if !conn.enqueue(map[string]any{"filler": i}, false) {
+			t.Fatalf("failed to fill outbound queue at slot %d", i)
+		}
+	}
+
+	if conn.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 0, Type: "run_created"}) {
+		t.Fatal("DeliverRunEvent reported success while the outbound queue was saturated")
+	}
+	if conn.isClosed() {
+		t.Fatal("a dropped best-effort runEvent must not by itself close the connection")
+	}
+
+	conn.DeliverRunGap("r-1", 0)
+	if !conn.isClosed() {
+		t.Fatal("DeliverRunGap on a saturated queue must guarantee delivery or close the connection — it did neither")
+	}
+}
+
 func TestHandleSubscribeDeliversOnlyToCallingConnection(t *testing.T) {
 	ts := startServer(t, testConfig())
 	var captured RunEventSubscriber

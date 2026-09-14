@@ -46,7 +46,10 @@ type Handler func(params []byte) (any, *proto.Error)
 // to the one connection that called it. Unlike EmitNodeEvent, delivery is
 // never broadcast: a Run subscription belongs to a single client connection.
 type RunEventSubscriber interface {
-	DeliverRunEvent(event proto.RunEventPayload)
+	// DeliverRunEvent reports whether the event was actually queued for
+	// delivery. false means the caller must treat this as a gap (see
+	// DeliverRunGap) — it must never be silently ignored.
+	DeliverRunEvent(event proto.RunEventPayload) bool
 	DeliverRunGap(runID string, fromSequence int)
 }
 
