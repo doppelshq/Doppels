@@ -39,10 +39,34 @@ func (m *Manager) ListRuns(params ListParams) (ListResult, *proto.Error) {
 	if params.Limit < 1 || params.Limit > runindex.MaxPageSize {
 		return ListResult{}, invalidParams(fmt.Sprintf("limit must be between 1 and %d", runindex.MaxPageSize))
 	}
+	if params.Status != "" {
+		stored, ok := storedStatus(params.Status)
+		if !ok {
+			return ListResult{}, invalidParams("status must be one of: running, succeeded, failed, cancelled, interrupted, pendingManual")
+		}
+		params.Status = stored
+	}
 	if params.Workspace != "" {
 		return m.listRunsForRoot(params.Workspace, params)
 	}
 	return m.listRunsAcrossWorkspaces(params)
+}
+
+// storedStatus maps a wire-form status enum (RunSummary.status, RFC §8:
+// running, succeeded, failed, cancelled, interrupted, pendingManual) to the
+// storage form runindex actually persists ("pending_manual" instead of
+// "pendingManual"; every other value is already identical on both sides).
+// It reports false for anything else, so a filter can never silently match
+// zero rows because of a naming mismatch or a typo.
+func storedStatus(wire string) (string, bool) {
+	switch wire {
+	case "running", "succeeded", "failed", "cancelled", "interrupted":
+		return wire, true
+	case "pendingManual":
+		return "pending_manual", true
+	default:
+		return "", false
+	}
 }
 
 func (m *Manager) listRunsForRoot(root string, params ListParams) (ListResult, *proto.Error) {

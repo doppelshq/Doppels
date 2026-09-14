@@ -60,6 +60,39 @@ func TestListRunsWithinWorkspacePaginatesAndFilters(t *testing.T) {
 // registered or not. A forged cursor must be rejected as a domain/params
 // error before any filesystem mutation, never silently create state outside
 // the registry.
+// TestListRunsStatusAcceptsWireEnumAndRejectsUnknownValues reproduces
+// review finding 9: listRuns's Status filter was passed straight through
+// to runindex without any mapping or validation. The wire enum for a
+// pendingManual Run is "pendingManual" (RunSummary.status, RFC §8), but
+// storage uses runindex's "pending_manual" — filtering by the documented
+// wire value silently matched nothing. An unrecognized status string was
+// also silently accepted, returning an empty page instead of -32602.
+func TestListRunsStatusAcceptsWireEnumAndRejectsUnknownValues(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	started := manualRun(t, manager, root, "status-filter")
+
+	page, rpcErr := manager.ListRuns(ListParams{Workspace: root, Status: "pendingManual"})
+	if rpcErr != nil {
+		t.Fatalf("ListRuns: %+v", rpcErr)
+	}
+	found := false
+	for _, run := range page.Runs {
+		if run.RunID == started.RunID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("filtering by the documented wire status %q found nothing: %#v", "pendingManual", page.Runs)
+	}
+
+	if _, rpcErr := manager.ListRuns(ListParams{Workspace: root, Status: "not-a-real-status"}); rpcErr == nil || rpcErr.Code != proto.CodeInvalidParams {
+		t.Fatalf("unknown status error = %+v, want -32602", rpcErr)
+	}
+}
+
 func TestListRunsRejectsCursorReferencingAnUnregisteredRoot(t *testing.T) {
 	base := t.TempDir()
 	registry := workspace.NewRegistry(filepath.Join(base, "workspaces.json"))
