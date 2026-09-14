@@ -151,13 +151,30 @@ func Logs(root, runID string) ([]Log, error) {
 		}
 		sort.Strings(paths)
 	}
+	realStateDir, err := filepath.EvalSymlinks(detail.Summary.StateDir)
+	if err != nil {
+		return nil, err
+	}
 	logs := make([]Log, 0, len(paths))
 	for _, relative := range paths {
 		clean := filepath.Clean(relative)
 		if filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.Dir(clean) != "logs" {
 			return nil, fmt.Errorf("RunEvent contains unsafe log path %q", relative)
 		}
-		data, err := os.ReadFile(filepath.Join(detail.Summary.StateDir, clean))
+		// The name alone can never prove safety: a symlink at this path
+		// (planted by a Recipe step, which runs arbitrary shell) can point
+		// anywhere on disk while looking like an ordinary log file. Resolve
+		// the real path and confine it to the Run directory before reading,
+		// mirroring the pattern localstate.Store.Resume already uses.
+		resolved, err := filepath.EvalSymlinks(filepath.Join(detail.Summary.StateDir, clean))
+		if err != nil {
+			return nil, err
+		}
+		relToRoot, err := filepath.Rel(realStateDir, resolved)
+		if err != nil || relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("log path %q escapes the Run directory", relative)
+		}
+		data, err := os.ReadFile(resolved)
 		if err != nil {
 			return nil, err
 		}
