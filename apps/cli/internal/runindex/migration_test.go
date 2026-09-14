@@ -15,6 +15,16 @@ func TestOpenMigratesV1DatabaseAdditively(t *testing.T) {
 	if err := os.MkdirAll(doppelsDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	runDir := filepath.Join(doppelsDir, "runs", "run-v1")
+	if err := os.MkdirAll(runDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "run.json"), []byte(`{"id":"run-v1","requestId":"request-v1","createdAt":"2026-09-14T12:00:00Z","nodeId":"node-from-disk","capability":{"name":"greet","version":"1.0.0"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "events.jsonl"), []byte(`{"type":"run_succeeded","occurredAt":"2026-09-14T12:05:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	db, err := sql.Open("sqlite", filepath.Join(doppelsDir, "runs.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -31,9 +41,10 @@ CREATE TABLE runs (
   state_dir TEXT NOT NULL,
   sync_status TEXT NOT NULL DEFAULT 'none'
 );
+PRAGMA user_version = 1;
 INSERT INTO runs (id, request_id, status, source, capability, recipe, created_at, state_dir, sync_status)
-VALUES ('run-v1', 'request-v1', 'succeeded', 'local', 'greet@1.0.0', '', '2026-09-14T12:00:00Z', '/state', 'none');
-`)
+VALUES ('run-v1', 'request-v1', 'succeeded', 'local', 'greet@1.0.0', '', '2026-09-14T12:00:00Z', ?, 'none');
+`, runDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,8 +64,22 @@ VALUES ('run-v1', 'request-v1', 'succeeded', 'local', 'greet@1.0.0', '', '2026-0
 			t.Fatalf("runs column %q was not added; columns = %#v", name, columns)
 		}
 	}
-	if got, err := idx.Get("run-v1"); err != nil || got.ID != "run-v1" {
+	got, err := idx.Get("run-v1")
+	if err != nil || got.ID != "run-v1" {
 		t.Fatalf("preserved v1 row = %#v, %v", got, err)
+	}
+	if got.NodeID != "node-from-disk" {
+		t.Fatalf("migrated v1 NodeID = %q, want recovered from run.json", got.NodeID)
+	}
+	if got.FinishedAt != "2026-09-14T12:05:00Z" {
+		t.Fatalf("migrated v1 FinishedAt = %q, want recovered from events.jsonl", got.FinishedAt)
+	}
+	var version int
+	if err := idx.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("user_version = %d, want 2", version)
 	}
 	for _, name := range []string{"capability", "idempotency_key", "run_id", "request_id", "request_fingerprint"} {
 		if !tableColumns(t, idx.db, "idempotency")[name] {

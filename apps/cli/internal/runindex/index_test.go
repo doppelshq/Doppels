@@ -81,6 +81,175 @@ func TestBackfillFromDisk(t *testing.T) {
 	if len(items) != 1 || items[0].Status != "succeeded" || items[0].Capability != "greet@1.0.0" {
 		t.Fatalf("backfill items = %#v", items)
 	}
+	if items[0].FinishedAt != "" {
+		t.Fatalf("FinishedAt without occurredAt = %q, want empty", items[0].FinishedAt)
+	}
+}
+
+// TestBackfillFromDiskCapturesNodeIDAndFinishedAt reproduces half of review
+// finding 12: a fresh backfill (a row missing entirely from the index)
+// never read run.json's nodeId at all, and never computed finishedAt from
+// the terminal event's timestamp — both were silently left empty even
+// though the authoritative disk state has them.
+func TestBackfillFromDiskCapturesNodeIDAndFinishedAt(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".doppels", "runs", "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runJSON := []byte(`{"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","requestId":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","createdAt":"2026-08-02T12:00:00Z","nodeId":"node-disk","capability":{"name":"greet","version":"1.0.0"}}`)
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), runJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(`{"type":"run_succeeded","occurredAt":"2026-08-02T12:05:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	record, err := idx.Get("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.NodeID != "node-disk" {
+		t.Fatalf("NodeID = %q, want %q", record.NodeID, "node-disk")
+	}
+	if record.FinishedAt != "2026-08-02T12:05:00Z" {
+		t.Fatalf("FinishedAt = %q, want %q", record.FinishedAt, "2026-08-02T12:05:00Z")
+	}
+}
+
+// TestBackfillEnrichesExistingRowsMissingNodeIDOrFinishedAt reproduces the
+// other half of finding 12: a row that already exists in the index (e.g.
+// migrated from the pre-nodeId/finished_at schema, so both columns default
+// to "") was skipped entirely by Backfill — it only ever handled rows
+// missing outright. A present, non-empty value must never be overwritten
+// (it may be more current than the disk snapshot), but a genuinely missing
+// one should be filled from the authoritative on-disk state.
+func TestBackfillEnrichesExistingRowsMissingNodeIDOrFinishedAt(t *testing.T) {
+	root := t.TempDir()
+	runID := "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	dir := filepath.Join(root, ".doppels", "runs", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runJSON := []byte(`{"id":"` + runID + `","requestId":"req-c","createdAt":"2026-08-02T12:00:00Z","nodeId":"node-disk","capability":{"name":"greet","version":"1.0.0"}}`)
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), runJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(`{"type":"run_succeeded","occurredAt":"2026-08-02T12:05:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate a pre-existing index row (as if migrated from the old schema):
+	// present in the index already, with finishedAt still at its
+	// post-ALTER-TABLE default ("") and, deliberately, NodeID and Source
+	// values a disk-derived record would not produce — proving Backfill
+	// enriches only the missing field and leaves present values untouched.
+	idx, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Upsert(Record{
+		ID: runID, RequestID: "req-c", Status: "succeeded", Source: "cloud",
+		Capability: "greet@1.0.0", NodeID: "node-index",
+		CreatedAt: "2026-08-02T12:00:00Z", StateDir: dir,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	record, err := reopened.Get(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.NodeID != "node-index" {
+		t.Fatalf("NodeID = %q, want preserved index value %q", record.NodeID, "node-index")
+	}
+	if record.FinishedAt != "2026-08-02T12:05:00Z" {
+		t.Fatalf("FinishedAt = %q, want enriched from disk %q", record.FinishedAt, "2026-08-02T12:05:00Z")
+	}
+	if record.Source != "cloud" {
+		t.Fatalf("Source = %q, want unchanged %q (Backfill must not overwrite present fields)", record.Source, "cloud")
+	}
+}
+
+// TestBackfillEnrichmentNeverClobbersConcurrentEngineUpsert pins the race
+// between Backfill reading an incomplete row and writing its disk-derived
+// enrichment. The engine may publish a newer full Record in that window;
+// Backfill must fill only columns that are still empty at write time and
+// leave every fresh engine-owned field untouched.
+func TestBackfillEnrichmentNeverClobbersConcurrentEngineUpsert(t *testing.T) {
+	root := t.TempDir()
+	runID := "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+	dir := filepath.Join(root, ".doppels", "runs", runID)
+	if err := os.MkdirAll(filepath.Join(dir, "logs"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), []byte(`{"id":"`+runID+`","requestId":"request-disk","createdAt":"2026-08-02T12:00:00Z","nodeId":"node-disk","capability":{"name":"disk","version":"1.0.0"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte(`{"type":"run_succeeded","occurredAt":"2026-08-02T12:05:00Z"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	idx, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	stale := Record{
+		ID: runID, RequestID: "request-stale", Status: "running", Source: SourceLocal,
+		Capability: "disk@1.0.0", CreatedAt: "2026-08-02T12:00:00Z", StateDir: dir,
+		SyncStatus: SyncNone,
+	}
+	if err := idx.Upsert(stale); err != nil {
+		t.Fatal(err)
+	}
+
+	readComplete := make(chan struct{})
+	releaseWrite := make(chan struct{})
+	idx.testBeforeEnrichUpdate = func() {
+		close(readComplete)
+		<-releaseWrite
+	}
+	backfillDone := make(chan error, 1)
+	go func() {
+		backfillDone <- idx.Backfill()
+	}()
+	<-readComplete
+
+	fresh := Record{
+		ID: runID, RequestID: "request-engine", Status: "cancelled", Source: "desktop",
+		Capability: "engine@2.0.0", Recipe: "engine-recipe@2.0.0", NodeID: "node-engine",
+		CreatedAt: "2026-08-02T12:00:00Z", FinishedAt: "2026-08-02T12:06:00Z",
+		StateDir: dir, SyncStatus: SyncPending,
+	}
+	if err := idx.Upsert(fresh); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseWrite)
+	if err := <-backfillDone; err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := idx.Get(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != fresh {
+		t.Fatalf("record after concurrent enrichment = %#v, want fresh engine record %#v", got, fresh)
+	}
 }
 
 func TestReserveStartIsAtomicAcrossIndexesAndSurvivesRestart(t *testing.T) {

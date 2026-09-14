@@ -93,6 +93,10 @@ type listCursor struct {
 type Index struct {
 	db   *sql.DB
 	root string
+
+	// testBeforeEnrichUpdate is a test-only scheduling seam used to pin the
+	// interleaving between Backfill's disk read and its conditional UPDATE.
+	testBeforeEnrichUpdate func()
 }
 
 // busyTimeoutMS is the SQLITE_BUSY wait applied to every connection in the
