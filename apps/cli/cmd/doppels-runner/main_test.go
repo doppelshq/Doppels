@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/runner/proto"
 )
 
@@ -26,8 +27,13 @@ func TestDoppelsRunnerBinaryAcceptsHandshake(t *testing.T) {
 	socketPath := filepath.Join(configDir, "runner.sock")
 	token := strings.Repeat("a", 64)
 	port := pickFreePort(t)
+	binaryPath := filepath.Join(t.TempDir(), "doppels-runner")
+	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build runner binary: %v\n%s", err, output)
+	}
 
-	cmd := exec.Command("/tmp/doppels-runner",
+	cmd := exec.Command(binaryPath,
 		"--socket="+socketPath,
 		"--token="+token,
 		"--config="+configDir,
@@ -120,6 +126,102 @@ func TestDoppelsRunnerBinaryAcceptsHandshake(t *testing.T) {
 	if response.Err != nil {
 		t.Fatalf("ping err: %+v", response.Err)
 	}
+
+	workspaceRoot := filepath.Join(configDir, "workspace")
+	if _, err := project.Init(workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	capabilityPath := filepath.Join(workspaceRoot, ".doppels", "capabilities", "greet.yaml")
+	capability := `apiVersion: doppels.so/v1alpha1
+kind: Capability
+metadata: {name: greet, version: 1.0.0}
+inputs: {}
+outputs: {message: {type: string}}
+`
+	if err := os.WriteFile(capabilityPath, []byte(capability), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type nodeNotification struct {
+		Method string          `json:"method"`
+		Params proto.NodeEvent `json:"params"`
+	}
+	var events []nodeNotification
+	call := func(id, method string, params any) proto.Response {
+		t.Helper()
+		if err := encoder.WriteFrame(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+			t.Fatal(err)
+		}
+		for {
+			frame, err := decoder.ReadFrame()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var notification nodeNotification
+			if err := json.Unmarshal(frame, &notification); err != nil {
+				t.Fatal(err)
+			}
+			if notification.Method != "" {
+				events = append(events, notification)
+				continue
+			}
+			var got proto.Response
+			if err := json.Unmarshal(frame, &got); err != nil {
+				t.Fatal(err)
+			}
+			return got
+		}
+	}
+
+	subscribe := call("subscribe", "v1/subscribeNode", map[string]any{})
+	if subscribe.Err != nil {
+		t.Fatalf("subscribeNode err: %+v", subscribe.Err)
+	}
+	var initial proto.NodeStatus
+	if err := unmarshalResult(subscribe.Result, &initial); err != nil {
+		t.Fatal(err)
+	}
+	if len(initial.Workspaces) != 0 {
+		t.Fatalf("initial workspaces = %+v, want empty", initial.Workspaces)
+	}
+
+	added := call("add", "v1/addWorkspace", map[string]any{"root": workspaceRoot})
+	if added.Err != nil {
+		t.Fatalf("addWorkspace err: %+v", added.Err)
+	}
+	if len(events) != 1 || events[0].Method != "v1/nodeEvent" || events[0].Params.Kind != proto.NodeEventWorkspaceAdded {
+		t.Fatalf("add events = %+v", events)
+	}
+	resubscribed := call("resubscribe", "v1/subscribeNode", map[string]any{})
+	var subscribedStatus proto.NodeStatus
+	if resubscribed.Err != nil || unmarshalResult(resubscribed.Result, &subscribedStatus) != nil || len(subscribedStatus.Workspaces) != 1 || subscribedStatus.Workspaces[0].Capabilities != 1 {
+		t.Fatalf("subscribeNode snapshot = %#v, decoded = %+v", resubscribed, subscribedStatus)
+	}
+
+	statusResponse := call("status", "v1/getNodeStatus", map[string]any{})
+	var status proto.NodeStatus
+	if statusResponse.Err != nil || unmarshalResult(statusResponse.Result, &status) != nil || len(status.Workspaces) != 1 || status.Workspaces[0].Capabilities != 1 {
+		t.Fatalf("getNodeStatus = %#v, decoded = %+v", statusResponse, status)
+	}
+
+	listed := call("caps", "v1/listCapabilities", map[string]any{})
+	var capabilities []proto.CapabilitySummary
+	if listed.Err != nil || unmarshalResult(listed.Result, &capabilities) != nil || len(capabilities) != 1 || capabilities[0].Name != "greet" {
+		t.Fatalf("listCapabilities = %#v, decoded = %+v", listed, capabilities)
+	}
+
+	detail := call("cap", "v1/getCapability", map[string]any{"workspace": workspaceRoot, "name": "greet", "version": "1.0.0"})
+	if detail.Err != nil {
+		t.Fatalf("getCapability err: %+v", detail.Err)
+	}
+
+	removed := call("remove", "v1/removeWorkspace", map[string]any{"root": workspaceRoot})
+	if removed.Err != nil {
+		t.Fatalf("removeWorkspace err: %+v", removed.Err)
+	}
+	if len(events) != 2 || events[1].Method != "v1/nodeEvent" || events[1].Params.Kind != proto.NodeEventWorkspaceRemoved {
+		t.Fatalf("remove events = %+v", events)
+	}
 	// Capabilities advertised for future F2 workstreams.
 	for _, capability := range initResult.Capabilities {
 		if capability == "" {
@@ -135,6 +237,21 @@ func TestResolveTokenRejectsMalformedPersistedToken(t *testing.T) {
 	}
 	if _, err := resolveToken("", path); err == nil {
 		t.Fatal("expected malformed token to be rejected")
+	}
+}
+
+func TestRunRejectsCorruptWorkspaceRegistryBeforeListening(t *testing.T) {
+	configDir := t.TempDir()
+	socketPath := filepath.Join(configDir, "runner.sock")
+	if err := os.WriteFile(filepath.Join(configDir, "workspaces.json"), []byte(`{"version":2,"roots":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := run(socketPath, strings.Repeat("a", 64), "test", configDir)
+	if err == nil {
+		t.Fatal("run accepted corrupt workspace registry")
+	}
+	if _, statErr := os.Lstat(socketPath); !os.IsNotExist(statErr) {
+		t.Fatalf("runner listened before validating registry: %v", statErr)
 	}
 }
 
