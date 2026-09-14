@@ -381,7 +381,21 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 		}
 		return
 	}
-	queued := conn.enqueue(proto.NewResponse(message.ID, result), true)
+	if fitter, ok := result.(ResponseFrameFitter); ok {
+		if fitErr := fitter.FitResponseFrame(message.ID, proto.MaxFrameBytes); fitErr != nil {
+			conn.consumePendingActivation(false)
+			conn.enqueue(proto.NewErrorResponse(message.ID, fitErr), true)
+			return
+		}
+	}
+	response := proto.NewResponse(message.ID, result)
+	encoded, encodeErr := json.Marshal(response)
+	if encodeErr != nil || len(encoded) > proto.MaxFrameBytes {
+		conn.consumePendingActivation(false)
+		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{Code: proto.CodeInternal, Message: "response exceeds maximum frame size"}), true)
+		return
+	}
+	queued := conn.enqueue(response, true)
 	// Runs any RunEventSubscriber.Defer callback the handler registered
 	// (e.g. v1/subscribeRun activating live delivery) only now that the
 	// response is ahead of it in the outbound FIFO — and never at all if the

@@ -84,10 +84,14 @@ func RegisterRPC(target RPCServer, manager *Manager) {
 		if request.RunID == "" {
 			return nil, invalidParams("runId is required")
 		}
-		return manager.GetRunLogs(LogsParams{
+		result, rpcErr := manager.GetRunLogs(LogsParams{
 			RunID: request.RunID, StepID: request.StepID,
 			Offset: request.Offset, Limit: request.Limit,
 		})
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		return &result, nil
 	})
 
 	target.HandleSubscribe("v1/subscribeRun", func(sub server.RunEventSubscriber, params []byte) (any, *proto.Error) {

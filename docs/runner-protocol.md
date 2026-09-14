@@ -316,7 +316,9 @@ Así el caller puede reconciliar el cambio sin confundirlo con éxito durable.
 
 - `files` siempre lista los ficheros confinados por-(step,stream)
   descubiertos (filtrados por `stepId` si se indica); nunca lee su
-  contenido para construir esta lista.
+  contenido para construir esta lista. Se ordena canónicamente por `path` y
+  admite como máximo 1024 entradas por respuesta; si el Run supera ese
+  límite, el cliente debe acotar por `stepId` (`-32602 invalidParams`).
 - `content` solo se devuelve cuando se indica `stepId`: es la codificación
   **base64** de la ventana de bytes `[offset, offset+limit)` de la
   concatenación cruda de los streams que hacen match para ese step, en
@@ -328,11 +330,10 @@ Así el caller puede reconciliar el cambio sin confundirlo con éxito durable.
   runa multi-byte exactamente en el límite. base64 hace que el contrato
   offset/limit sea exacto byte a byte sin importar lo que el subproceso
   haya escrito.
-- El límite efectivo de `limit` (y por tanto de una página) se calcula para
-  que la respuesta completa — `content` codificado más el envelope
-  JSON-RPC y los metadatos de `files` — quepa con margen dentro de
-  `MaxFrameBytes` (§4, 4 MiB): el transporte rechaza escribir un frame que
-  lo exceda.
+- El límite efectivo de `limit` (y por tanto de una página) se calcula con
+  el `id` real de la llamada para que la respuesta JSON-RPC completa —
+  `content` codificado, envelope y metadatos de `files` — no exceda
+  `MaxFrameBytes` (§4, 4 MiB).
 
 ## 10. Events (notifications)
 

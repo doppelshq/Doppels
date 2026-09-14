@@ -3,6 +3,7 @@ package runs
 import (
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -12,18 +13,10 @@ import (
 	"doppels.so/cli/internal/runstate"
 )
 
-// logFrameOverheadBytes reserves room, on top of the base64-encoded content
-// itself, for the JSON-RPC envelope and files[] metadata (one small,
-// bounded entry per discovered log file).
-const logFrameOverheadBytes = 64 << 10
-
-// maxLogContentBytes bounds the *raw* (pre-base64) bytes a single
-// getRunLogs content page may span. Base64 expands raw bytes by exactly
-// 4/3 (rounded up); capping the raw window here keeps the fully encoded
-// response safely under proto.MaxFrameBytes, which the transport enforces
-// by refusing to write an oversized frame — never something a paginated,
-// read-only RPC should be able to trigger.
-const maxLogContentBytes = (proto.MaxFrameBytes - logFrameOverheadBytes) / 4 * 3
+// maxLogFiles bounds files[] without changing its wire shape. Callers can
+// narrow discovery with stepId; accepting an unbounded directory would let
+// metadata alone exceed the transport's hard frame limit.
+const maxLogFiles = 1024
 
 // LogsParams is the v1/getRunLogs request.
 type LogsParams struct {
@@ -53,6 +46,43 @@ type LogFile struct {
 type LogsResult struct {
 	Files   []LogFile `json:"files"`
 	Content *string   `json:"content,omitempty"`
+	raw     []byte
+}
+
+// FitResponseFrame trims only the raw content window until the complete
+// JSON-RPC response, including the caller's actual id and files metadata,
+// fits maxBytes. Cardinality is bounded before this point, so metadata-only
+// responses never need an incompatible partial files[] representation.
+func (r *LogsResult) FitResponseFrame(id any, maxBytes int) *proto.Error {
+	setContent := func(size int) {
+		encoded := base64.StdEncoding.EncodeToString(r.raw[:size])
+		r.Content = &encoded
+	}
+	fits := func() bool {
+		encoded, err := json.Marshal(proto.NewResponse(id, r))
+		return err == nil && len(encoded) <= maxBytes
+	}
+	if fits() {
+		return nil
+	}
+	if r.Content == nil {
+		return &proto.Error{Code: proto.CodeInvalidParams, Message: "log metadata exceeds maximum frame size; filter by stepId"}
+	}
+	low, high := 0, len(r.raw)
+	for low < high {
+		mid := low + (high-low+1)/2
+		setContent(mid)
+		if fits() {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	setContent(low)
+	if !fits() {
+		return &proto.Error{Code: proto.CodeInvalidParams, Message: "log metadata exceeds maximum frame size; filter by stepId"}
+	}
+	return nil
 }
 
 // GetRunLogs lists the confined log files for a Run (optionally filtered to
@@ -76,7 +106,8 @@ func (m *Manager) GetRunLogs(params LogsParams) (LogsResult, *proto.Error) {
 		return LogsResult{}, internalError(err)
 	}
 
-	files := make([]LogFile, 0, len(refs))
+	sort.Slice(refs, func(i, j int) bool { return refs[i].Path < refs[j].Path })
+	files := make([]LogFile, 0, min(len(refs), maxLogFiles))
 	matched := make([]runstate.LogFileRef, 0, len(refs))
 	for _, ref := range refs {
 		if params.StepID != "" && ref.StepID != params.StepID {
@@ -84,6 +115,9 @@ func (m *Manager) GetRunLogs(params LogsParams) (LogsResult, *proto.Error) {
 		}
 		files = append(files, LogFile{StepID: ref.StepID, Stream: ref.Stream, Path: ref.Path, Size: ref.Size, Truncated: ref.Truncated})
 		matched = append(matched, ref)
+		if len(files) > maxLogFiles {
+			return LogsResult{}, invalidParams("too many log files; filter by stepId")
+		}
 	}
 	result := LogsResult{Files: files}
 	if params.StepID == "" {
@@ -103,8 +137,8 @@ func (m *Manager) GetRunLogs(params LogsParams) (LogsResult, *proto.Error) {
 		offset = total
 	}
 	limit := int64(params.Limit)
-	if limit <= 0 || limit > maxLogContentBytes {
-		limit = maxLogContentBytes
+	if limit <= 0 || limit > proto.MaxFrameBytes {
+		limit = proto.MaxFrameBytes
 	}
 	end := offset + limit
 	if end > total {
@@ -117,6 +151,7 @@ func (m *Manager) GetRunLogs(params LogsParams) (LogsResult, *proto.Error) {
 	}
 	encoded := base64.StdEncoding.EncodeToString(window)
 	result.Content = &encoded
+	result.raw = window
 	return result, nil
 }
 

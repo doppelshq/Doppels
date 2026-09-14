@@ -79,7 +79,7 @@ func TestRegisterRPCStartCancelGetListLogsAndSubscribe(t *testing.T) {
 	if protoErr != nil {
 		t.Fatalf("getRunLogs: %+v", protoErr)
 	}
-	if len(logsResult.(LogsResult).Files) == 0 {
+	if len(logsResult.(*LogsResult).Files) == 0 {
 		t.Fatalf("getRunLogs result = %#v", logsResult)
 	}
 

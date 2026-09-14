@@ -64,6 +64,13 @@ type RunEventSubscriber interface {
 	NotifyClosed(fn func())
 }
 
+// ResponseFrameFitter lets a paginated result shrink itself using the real
+// JSON-RPC id before the response is queued. Implementations must measure the
+// complete proto.Response, not only their result payload.
+type ResponseFrameFitter interface {
+	FitResponseFrame(id any, maxBytes int) *proto.Error
+}
+
 // SubscribeHandler is the extension seam for methods that must address their
 // own calling connection to satisfy a later, out-of-band notification
 // (v1/subscribeRun). The RunEventSubscriber is only ever the connection that
