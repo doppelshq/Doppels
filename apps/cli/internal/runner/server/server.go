@@ -41,6 +41,21 @@ type internalHandler func(conn *connection, params []byte) (any, *proto.Error)
 // lifecycle and subscription state stay private to the server package.
 type Handler func(params []byte) (any, *proto.Error)
 
+// RunEventSubscriber is the narrow, connection-scoped seam a domain method
+// uses to push v1/runEvent notifications (and the runEventGap escape hatch)
+// to the one connection that called it. Unlike EmitNodeEvent, delivery is
+// never broadcast: a Run subscription belongs to a single client connection.
+type RunEventSubscriber interface {
+	DeliverRunEvent(event proto.RunEventPayload)
+	DeliverRunGap(runID string, fromSequence int)
+}
+
+// SubscribeHandler is the extension seam for methods that must address their
+// own calling connection to satisfy a later, out-of-band notification
+// (v1/subscribeRun). The RunEventSubscriber is only ever the connection that
+// invoked the method.
+type SubscribeHandler func(sub RunEventSubscriber, params []byte) (any, *proto.Error)
+
 // Server dispatches v1 methods over accepted connections.
 type Server struct {
 	config   Config
@@ -99,6 +114,17 @@ func (s *Server) Handle(method string, run Handler) {
 	defer s.mu.Unlock()
 	s.handlers[method] = func(_ *connection, params []byte) (any, *proto.Error) {
 		return run(params)
+	}
+}
+
+// HandleSubscribe registers (or replaces) a v1 method that needs to address
+// its own calling connection, e.g. to register it for later out-of-band
+// notifications. See SubscribeHandler.
+func (s *Server) HandleSubscribe(method string, run SubscribeHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
+		return run(conn, params)
 	}
 }
 

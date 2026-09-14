@@ -233,6 +233,36 @@ func TestListPageUsesStableCursorAndBoundedFilters(t *testing.T) {
 	}
 }
 
+func TestEncodeCursorResumesListPageAtExactBoundary(t *testing.T) {
+	root := t.TempDir()
+	idx, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	for _, record := range []Record{
+		{ID: "run-a", RequestID: "req-a", Status: "running", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root},
+		{ID: "run-b", RequestID: "req-b", Status: "running", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T12:00:00Z", StateDir: root},
+	} {
+		if err := idx.Upsert(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cursor, err := EncodeCursor("greet@1.0.0", "", "2026-09-14T13:00:00Z", "run-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := idx.ListPage(ListQuery{Capability: "greet@1.0.0", Cursor: cursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRunIDs(t, page.Records, "run-b")
+
+	if _, err := EncodeCursor("greet@1.0.0", "", "not-a-timestamp", "run-a"); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("invalid timestamp error = %v, want ErrInvalidCursor", err)
+	}
+}
+
 func assertRunIDs(t *testing.T, records []Record, want ...string) {
 	t.Helper()
 	if len(records) != len(want) {

@@ -257,6 +257,23 @@ func (c *connection) sendNodeEvent(event proto.NodeEvent) {
 	c.enqueue(proto.NewNotification("v1/nodeEvent", event), false)
 }
 
+// DeliverRunEvent sends a v1/runEvent notification targeted at this
+// connection only. Domain callers (e.g. runs.Manager) push events straight to
+// a specific subscriber instead of the server-wide broadcast EmitNodeEvent
+// uses, since a Run subscription is per-connection, not per-server.
+func (c *connection) DeliverRunEvent(event proto.RunEventPayload) {
+	c.enqueue(proto.NewNotification("v1/runEvent", event), false)
+}
+
+// DeliverRunGap tells this connection's subscriber that it fell behind and
+// must resynchronize (RFC §10): the Runner stops emitting that Run to it.
+func (c *connection) DeliverRunGap(runID string, fromSequence int) {
+	c.enqueue(proto.NewNotification("v1/nodeEvent", proto.NodeEvent{
+		Kind:    proto.NodeEventRunEventGap,
+		Payload: map[string]any{"runId": runID, "fromSequence": fromSequence},
+	}), false)
+}
+
 func (c *connection) close() {
 	c.mu.Lock()
 	if c.closed {

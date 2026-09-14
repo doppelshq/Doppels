@@ -407,6 +407,15 @@ FROM runs WHERE 1 = 1`)
 	return page, nil
 }
 
+// EncodeCursor builds an opaque keyset cursor bound to capability/status
+// filters, resuming a ListPage strictly after the given (createdAt, id)
+// boundary. It exists for callers that must resume beyond a single Index —
+// e.g. cross-workspace aggregation, which fetches its own batch per
+// workspace and needs to synthesize a resume point mid-batch.
+func EncodeCursor(capability, status, createdAt, id string) (string, error) {
+	return encodeListCursor(listCursor{Version: 1, CreatedAt: createdAt, ID: id, Capability: capability, Status: status})
+}
+
 func encodeListCursor(cursor listCursor) (string, error) {
 	if _, err := time.Parse(time.RFC3339Nano, cursor.CreatedAt); err != nil || !safeID.MatchString(cursor.ID) {
 		return "", fmt.Errorf("%w: invalid indexed boundary", ErrInvalidCursor)

@@ -331,6 +331,65 @@ func TestServerUnsubscribedClientReceivesNoNodeEvents(t *testing.T) {
 	}
 }
 
+func TestHandleSubscribeDeliversOnlyToCallingConnection(t *testing.T) {
+	ts := startServer(t, testConfig())
+	var captured RunEventSubscriber
+	ts.HandleSubscribe("v1/subscribeRun", func(sub RunEventSubscriber, params []byte) (any, *proto.Error) {
+		captured = sub
+		return map[string]any{"status": "running"}, nil
+	})
+
+	subscriber := dialClient(t, ts)
+	if response := subscriber.initialize(); response.Err != nil {
+		t.Fatalf("initialize subscriber: %+v", response.Err)
+	}
+	bystander := dialClient(t, ts)
+	if response := bystander.initialize(); response.Err != nil {
+		t.Fatalf("initialize bystander: %+v", response.Err)
+	}
+
+	response := subscriber.call("sub-1", "v1/subscribeRun", map[string]any{"runId": "r-1"})
+	if response.Err != nil {
+		t.Fatalf("subscribeRun: %+v", response.Err)
+	}
+	if captured == nil {
+		t.Fatal("subscribe handler did not receive a RunEventSubscriber")
+	}
+
+	captured.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 0, Type: "run_created"})
+	method, params := subscriber.readNotification(t)
+	if method != "v1/runEvent" {
+		t.Fatalf("method = %s", method)
+	}
+	var event proto.RunEventPayload
+	if err := json.Unmarshal(params, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.RunID != "r-1" || event.Type != "run_created" {
+		t.Fatalf("event = %+v", event)
+	}
+
+	captured.DeliverRunGap("r-1", 3)
+	method, params = subscriber.readNotification(t)
+	if method != "v1/nodeEvent" {
+		t.Fatalf("method = %s", method)
+	}
+	var gap proto.NodeEvent
+	if err := json.Unmarshal(params, &gap); err != nil {
+		t.Fatal(err)
+	}
+	if gap.Kind != proto.NodeEventRunEventGap {
+		t.Fatalf("kind = %s", gap.Kind)
+	}
+
+	// The bystander must observe neither notification: assert the next
+	// frame it reads is its own ping response.
+	pingResponse := bystander.call("quiet", "v1/ping", map[string]any{})
+	if pingResponse.Err != nil {
+		t.Fatalf("ping: %+v", pingResponse.Err)
+	}
+}
+
 func TestServerClosesConnectionWithoutHandshake(t *testing.T) {
 	cfg := testConfig()
 	cfg.HandshakeTimeout = 150 * time.Millisecond

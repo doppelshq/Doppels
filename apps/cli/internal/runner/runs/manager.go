@@ -57,6 +57,9 @@ type Manager struct {
 	wg      sync.WaitGroup
 
 	terminalMu sync.Mutex
+
+	subsMu sync.Mutex
+	subs   map[string][]*runSubscriber
 }
 
 func NewManager(ctx context.Context, workspaces *workspace.Service, config Config) *Manager {
@@ -76,6 +79,7 @@ func NewManager(ctx context.Context, workspaces *workspace.Service, config Confi
 	return &Manager{
 		ctx: ctx, cancel: cancel, workspaces: workspaces, config: config,
 		indexes: make(map[string]*runindex.Index), active: make(map[string]*activeRun),
+		subs: make(map[string][]*runSubscriber),
 	}
 }
 
@@ -221,6 +225,10 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx *runindex.
 		ApproveAll: approvalMode == "auto", Environment: m.config.Environment,
 		Now:      func() time.Time { return m.config.Now().UTC().Truncate(time.Millisecond) },
 		RunIndex: idx,
+		OnEvent: func(_ context.Context, event execution.RunEvent) error {
+			m.broadcast(ids.RunID, payloadFromEvent(event))
+			return nil
+		},
 	}
 	if approvalMode == "interactive" {
 		options.Approve = func(ctx context.Context, _ execution.ApprovalRequest) (bool, error) {
@@ -316,6 +324,7 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 	if err := store.AppendEvent(event); err != nil {
 		return "", internalError(err)
 	}
+	m.broadcast(runID, payloadFromEvent(event))
 	record.Status = status
 	record.FinishedAt = event.OccurredAt.Format(time.RFC3339Nano)
 	if err := idx.Upsert(record); err != nil {
