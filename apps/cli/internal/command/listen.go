@@ -253,7 +253,18 @@ func (app *App) runListen(arguments []string) int {
 				return shareCommandExitCode(ctx, err)
 			case next, ok := <-jobs:
 				if !ok {
-					return stopNode("", nil)
+					// RunProducer closes Jobs before its wrapper goroutine
+					// publishes the terminal error. Always consume that result;
+					// otherwise a poll failure can look like a clean shutdown.
+					err := <-producerErr
+					if err == nil || errors.Is(err, context.Canceled) {
+						return stopNode("", nil)
+					}
+					clearListenStatus(app.Stderr)
+					fmt.Fprintf(app.Stderr, "Unable to keep Node online: %v\n", err)
+					background.Wait()
+					drainListenJobs(jobs)
+					return shareCommandExitCode(ctx, err)
 				}
 				job = next
 			}
@@ -436,13 +447,25 @@ func (app *App) runListen(arguments []string) int {
 				runtimeStdout = prefixLines(runtimeStdout, "    ")
 			}
 
+			// Pre-resolve operator approval mirrors the original `node up`
+			// precedence: a failing control-plane call prints "Unable to
+			// approve" and returns without resolving the local catalog.
+			if current.Origin == "space" && registry != nil &&
+				strings.ToLower(strings.TrimSpace(current.Request.OperatorDecision)) != "approve" {
+				if _, approveErr := registry.DecideRequest(ctx, apiToken, current.Organization, current.Space, current.Request.ID, "approve"); approveErr != nil {
+					fmt.Fprintf(app.Stderr, "Unable to approve: %v\n", approveErr)
+					closeChannel()
+					return shareCommandExitCode(ctx, approveErr)
+				}
+			}
+
 			var capability manifest.CapabilityDefinition
 			var recipe *manifest.RecipeDefinition
 			var fulfillResolveErr error
 			if current.Origin == "space" {
-				capability, recipe, fulfillResolveErr = listener.ResolveSpaceFulfillment(catalog, *current.Request, port, autoSteps)
+				capability, recipe, fulfillResolveErr = listener.ResolveSpaceFulfillmentContext(ctx, catalog, *current.Request, port, autoSteps)
 			} else {
-				capability, recipe, fulfillResolveErr = listener.ResolveShareFulfillment(catalog, current.Created.Share, port, autoSteps)
+				capability, recipe, fulfillResolveErr = listener.ResolveShareFulfillmentContext(ctx, catalog, current.Created.Share, port, autoSteps)
 			}
 			if fulfillResolveErr != nil {
 				fmt.Fprintln(app.Stderr, fulfillResolveErr)
@@ -478,6 +501,7 @@ func (app *App) runListen(arguments []string) int {
 					Catalog:       catalog,
 					Approvals:     port,
 					ApproveAll:    autoSteps,
+					Preapproved:   true, // pre-approved above before local resolve
 					Output:        runtimeStdout,
 					Err:           app.Stderr,
 					Environment:   app.environment(),
@@ -489,6 +513,9 @@ func (app *App) runListen(arguments []string) int {
 						return nil
 					},
 				}, current, capability, recipe)
+				// Preapproved already short-circuited ApproveError; the typed
+				// check below is defensive against future callers forgetting
+				// to set the flag.
 				var approveErr *listener.ApproveError
 				if errors.As(runErr, &approveErr) {
 					fmt.Fprintf(app.Stderr, "Unable to approve: %v\n", approveErr.Err)
@@ -520,8 +547,10 @@ func (app *App) runListen(arguments []string) int {
 			}
 
 			result, runErr := listener.FulfillShare(ctx, listener.ShareFulfillConfig{
-				Root:   root,
-				NodeID: app.localNodeID(),
+				Root:       root,
+				NodeID:     app.localNodeID(),
+				Approvals:  port,
+				ApproveAll: autoSteps,
 				BeforeSuccess: func(callbackContext context.Context, run execution.RunRecord, returns, evidence map[string]any) error {
 					if current.Channel == nil {
 						return nil

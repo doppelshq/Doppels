@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"math"
+	"errors"
+	"fmt"
+	"io"
 	"sort"
-	"strconv"
+	"strings"
 )
 
 // CanonicalJSON re-encodes a JSON value with keys sorted recursively, no
@@ -19,6 +21,12 @@ func CanonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 	decoder.UseNumber()
 	var value any
 	if err := decoder.Decode(&value); err != nil {
+		return nil, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return nil, errors.New("canonical JSON must contain exactly one value")
+	} else if !errors.Is(err, io.EOF) {
 		return nil, err
 	}
 	var buf bytes.Buffer
@@ -97,15 +105,46 @@ func writeCanonical(buf *bytes.Buffer, value any) error {
 // exponent or fraction, while values that would lose precision keep their
 // original digits.
 func canonicalNumber(text string) string {
-	if parsed, err := strconv.ParseInt(text, 10, 64); err == nil {
-		return strconv.FormatInt(parsed, 10)
+	negative := strings.HasPrefix(text, "-")
+	if negative {
+		text = text[1:]
 	}
-	parsed, err := strconv.ParseFloat(text, 64)
-	if err != nil {
-		return text
+	parts := strings.SplitN(strings.ToLower(text), "e", 2)
+	mantissa := parts[0]
+	exponent := 0
+	if len(parts) == 2 {
+		if _, err := fmt.Sscan(parts[1], &exponent); err != nil {
+			return text
+		}
 	}
-	if parsed == math.Trunc(parsed) && !math.IsInf(parsed, 0) && math.Abs(parsed) < 1<<62 {
-		return strconv.FormatInt(int64(parsed), 10)
+	decimal := strings.IndexByte(mantissa, '.')
+	if decimal < 0 {
+		decimal = len(mantissa)
+	} else {
+		mantissa = strings.ReplaceAll(mantissa, ".", "")
 	}
-	return text
+	decimal += exponent
+	mantissa = strings.TrimLeft(mantissa, "0")
+	if mantissa == "" {
+		return "0"
+	}
+	var result string
+	switch {
+	case decimal <= 0:
+		result = "0." + strings.Repeat("0", -decimal) + mantissa
+	case decimal >= len(mantissa):
+		result = mantissa + strings.Repeat("0", decimal-len(mantissa))
+	default:
+		result = mantissa[:decimal] + "." + mantissa[decimal:]
+	}
+	if strings.Contains(result, ".") {
+		result = strings.TrimRight(strings.TrimRight(result, "0"), ".")
+	}
+	if result == "" || result == "0" {
+		return "0"
+	}
+	if negative {
+		return "-" + result
+	}
+	return result
 }

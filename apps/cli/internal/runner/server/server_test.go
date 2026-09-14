@@ -137,6 +137,28 @@ func TestServerRejectsMethodsBeforeInitialize(t *testing.T) {
 	}
 }
 
+func TestServerNewRejectsEmptyToken(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected panic for empty Token")
+		}
+	}()
+	_ = New(Config{NodeStatus: func() proto.NodeStatus { return proto.NodeStatus{} }})
+}
+
+func TestServerInitializeRejectsEmptyClientToken(t *testing.T) {
+	ts := startServer(t, testConfig())
+	client := dialClient(t, ts)
+
+	response := client.call("bad", "v1/initialize", map[string]any{
+		"token":  "",
+		"client": map[string]any{"name": "x", "version": "0"},
+	})
+	if response.Err == nil || response.Err.Code != proto.CodeAuthFailed {
+		t.Fatalf("err = %+v, want -32001 (empty token rejected)", response.Err)
+	}
+}
+
 func TestServerInitializeAuthenticatesToken(t *testing.T) {
 	ts := startServer(t, testConfig())
 	client := dialClient(t, ts)
@@ -271,6 +293,22 @@ func TestServerSubscribeNodeSnapshotThenEvents(t *testing.T) {
 	}
 	if event.Kind != proto.NodeEventRunStarted {
 		t.Fatalf("kind = %s", event.Kind)
+	}
+}
+
+func TestSubscribeNodeIsNotActiveBeforeSnapshotDispatch(t *testing.T) {
+
+	s := New(testConfig())
+	conn := newConnection(s, nil)
+
+	if _, protoErr := s.handleSubscribeNode(conn, nil); protoErr != nil {
+		t.Fatalf("subscribeNode: %+v", protoErr)
+	}
+	conn.mu.Lock()
+	subscribed := conn.nodeSubscribed
+	conn.mu.Unlock()
+	if subscribed {
+		t.Fatal("subscription became active before its snapshot was dispatched")
 	}
 }
 
@@ -430,5 +468,109 @@ func decodeResult(t *testing.T, response *proto.Response, out any) {
 	}
 	if err := json.Unmarshal(raw, out); err != nil {
 		t.Fatalf("decode result %s: %v", raw, err)
+	}
+}
+
+// TestServerClosesSlowClientOnRequiredQueueSaturation pins the RFC §15
+// policy: if the outbound queue cannot deliver an RPC response, the
+// client is hanging on a request that will never arrive, so the server
+// closes the connection rather than dropping silently.
+//
+// We simulate a stuck client by closing the read side of the socket and
+// then writing enough RPC requests to fill both the OS TCP recv buffer and
+// the in-process outbound channel (1024 entries). Once the writer blocks,
+// new RPC enqueues fall into the default branch and close the connection.
+func TestServerClosesSlowClientOnRequiredQueueSaturation(t *testing.T) {
+	ts := startServer(t, testConfig())
+	conn, err := (transport.Unix{}).Dial(ts.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	if err := (proto.NewEncoder(conn)).WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "init", "method": "v1/initialize",
+		"params": map[string]any{
+			"token":  testToken,
+			"client": map[string]any{"name": "slow", "version": "0"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := proto.NewDecoder(conn).ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Half-close the read side: the server can still send but every write
+	// once the kernel buffers fill will block. Combine with enough RPCs to
+	// also fill the in-process outbound queue.
+	if tcpConn, ok := conn.(*net.UnixConn); ok {
+		if err := tcpConn.CloseRead(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Fire 1500 RPCs without ever reading. With CloseRead active, the
+	// server-side write loop must block once its TCP send buffer (default
+	// 256 KiB on Linux) fills; outbound queue (1024) overflows next.
+	request := []byte(`{"jsonrpc":"2.0","id":"sat","method":"v1/getNodeStatus","params":{}}` + "\n")
+	for i := 0; i < 1500; i++ {
+		if _, err := conn.Write(request); err != nil {
+			break
+		}
+	}
+
+	// Reading any byte means the server kept the connection open. RFC §15
+	// requires the client to detect a framing issue via connection close.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); err == nil {
+		t.Fatal("expected server to close saturated connection")
+	}
+}
+
+// TestServerDropsExcessFramesForBestEffortNotifications pins that a slow
+// subscriber can drop notifications without losing protocol state. The
+// connection survives (only RPC responses force a close on saturation).
+func TestServerDropsExcessNotificationsWithoutClosing(t *testing.T) {
+	ts := startServer(t, testConfig())
+	conn, err := (transport.Unix{}).Dial(ts.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	enc := proto.NewEncoder(conn)
+	decoder := proto.NewDecoder(conn)
+	if err := enc.WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "init", "method": "v1/initialize",
+		"params": map[string]any{
+			"token":  testToken,
+			"client": map[string]any{"name": "x", "version": "0"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decoder.ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte(`{"jsonrpc":"2.0","id":"sub","method":"v1/subscribeNode","params":{}}` + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := decoder.ReadFrame(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold off reading; flood with notifications.
+	for i := 0; i < 2000; i++ {
+		ts.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventRunStarted, Payload: map[string]any{"i": i}})
+	}
+
+	// Drain one response (or notification) to confirm the connection is
+	// still usable after the flood. Reading just one frame is enough to
+	// prove the server has not torn the connection down for notifications.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := decoder.ReadFrame(); err != nil {
+		t.Fatalf("expected at least one frame after notification flood; got %v", err)
 	}
 }

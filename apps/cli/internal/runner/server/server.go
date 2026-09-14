@@ -35,19 +35,24 @@ type Config struct {
 	Log func(format string, args ...any)
 }
 
-type handler func(conn *connection, params []byte) (any, *proto.Error)
+type internalHandler func(conn *connection, params []byte) (any, *proto.Error)
+
+// Handler is the public extension seam for domain methods. Connection
+// lifecycle and subscription state stay private to the server package.
+type Handler func(params []byte) (any, *proto.Error)
 
 // Server dispatches v1 methods over accepted connections.
 type Server struct {
 	config   Config
-	handlers map[string]handler
+	handlers map[string]internalHandler
 
-	mu       sync.Mutex
-	conns    map[*connection]struct{}
-	shutdown bool
-	closed   chan struct{}
-	closeOne sync.Once
-	listener transport.Listener
+	mu               sync.Mutex
+	conns            map[*connection]struct{}
+	shutdown         bool
+	shutdownAfterAck bool
+	closed           chan struct{}
+	closeOne         sync.Once
+	listener         transport.Listener
 }
 
 // New builds a Server with the core v1 method surface. Domain methods
@@ -55,6 +60,11 @@ type Server struct {
 func New(config Config) *Server {
 	if config.HandshakeTimeout <= 0 {
 		config.HandshakeTimeout = 10 * time.Second
+	}
+	// An empty token would silently authenticate any client that omits the
+	// field: reject at boot so the misconfiguration cannot escape.
+	if config.Token == "" {
+		panic("runner server: empty Token in Config; refusing to authenticate without one")
 	}
 	if config.NodeStatus == nil {
 		config.NodeStatus = func() proto.NodeStatus {
@@ -66,7 +76,7 @@ func New(config Config) *Server {
 	}
 	server := &Server{
 		config:   config,
-		handlers: make(map[string]handler),
+		handlers: make(map[string]internalHandler),
 		conns:    make(map[*connection]struct{}),
 		closed:   make(chan struct{}),
 	}
@@ -80,8 +90,12 @@ func New(config Config) *Server {
 
 // Handle registers (or replaces) a v1 method. Methods run on the reading
 // goroutine of their connection; long work must spawn its own goroutine.
-func (s *Server) Handle(method string, run handler) {
-	s.handlers[method] = run
+func (s *Server) Handle(method string, run Handler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlers[method] = func(_ *connection, params []byte) (any, *proto.Error) {
+		return run(params)
+	}
 }
 
 // Serve accepts connections until ctx ends, the listener dies, or a client
@@ -156,8 +170,12 @@ func (s *Server) Close() {
 // connection. Delivery is best-effort: a stalled subscriber drops events.
 func (s *Server) EmitNodeEvent(event proto.NodeEvent) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	connections := make([]*connection, 0, len(s.conns))
 	for conn := range s.conns {
+		connections = append(connections, conn)
+	}
+	s.mu.Unlock()
+	for _, conn := range connections {
 		conn.sendNodeEvent(event)
 	}
 }
@@ -216,8 +234,7 @@ func (s *Server) handleGetNodeStatus(*connection, []byte) (any, *proto.Error) {
 	return s.nodeStatusSnapshot(), nil
 }
 
-func (s *Server) handleSubscribeNode(conn *connection, _ []byte) (any, *proto.Error) {
-	conn.setNodeSubscribed(true)
+func (s *Server) handleSubscribeNode(_ *connection, _ []byte) (any, *proto.Error) {
 	return s.nodeStatusSnapshot(), nil
 }
 
@@ -232,18 +249,32 @@ func (s *Server) handleShutdown(conn *connection, params []byte) (any, *proto.Er
 	s.mu.Lock()
 	already := s.shutdown
 	s.shutdown = true
-	s.mu.Unlock()
 	if !already {
-		go func() {
-			// Let the ack flush, then tear everything down (RFC §3).
-			time.Sleep(50 * time.Millisecond)
-			if s.config.OnShutdown != nil {
-				s.config.OnShutdown()
-			}
-			s.Close()
-		}()
+		s.shutdownAfterAck = true
 	}
+	s.mu.Unlock()
 	return map[string]any{}, nil
+}
+
+func (s *Server) isShuttingDown() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.shutdown
+}
+
+func (s *Server) shutdownAfterAckCallback() func() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.shutdownAfterAck {
+		return nil
+	}
+	s.shutdownAfterAck = false
+	return func() {
+		if s.config.OnShutdown != nil {
+			s.config.OnShutdown()
+		}
+		s.Close()
+	}
 }
 
 func decodeParams(params []byte, out any) *proto.Error {

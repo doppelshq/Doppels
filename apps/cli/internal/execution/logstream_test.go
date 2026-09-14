@@ -220,6 +220,33 @@ func TestStreamedRedactorDoesNotSplitCompleteOccurrence(t *testing.T) {
 	}
 }
 
+func TestStreamedRedactorMatchesSequentialRedactionAcrossReplacementBoundaries(t *testing.T) {
+	tests := []struct {
+		name    string
+		secrets []string
+		chunks  []string
+	}{
+		{name: "prefix overlap", secrets: []string{"abcdef", "ab"}, chunks: []string{"ab", "cdef"}},
+		{name: "replacement creates match", secrets: []string{"abcd", "D]x"}, chunks: []string{"abcd", "x"}},
+		{name: "nested replacement", secrets: []string{"bcdef", "abc"}, chunks: []string{"abcd", "ef"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := strings.Join(tt.chunks, "")
+			redactor := newStreamedRedactor(tt.secrets)
+			var live bytes.Buffer
+			for _, chunk := range tt.chunks {
+				live.Write(redactor.feed([]byte(chunk)))
+			}
+			live.Write(redactor.close())
+			want := redact([]byte(raw), tt.secrets)
+			if !bytes.Equal(live.Bytes(), want) {
+				t.Fatalf("live=%q want=%q", live.String(), string(want))
+			}
+		})
+	}
+}
+
 // TestStreamedRedactorNilSafe verifies a nil-redactor pipeline still produces
 // raw output. This is the path callers take when no host_env secrets are
 // involved.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // ProtocolVersion is the major protocol number; there is no minor (RFC §7).
@@ -59,12 +60,21 @@ func (id *ID) UnmarshalJSON(data []byte) error {
 		id.raw = nil
 		return nil
 	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.UseNumber()
 	var probe any
-	if err := json.Unmarshal(trimmed, &probe); err != nil {
+	if err := decoder.Decode(&probe); err != nil {
 		return err
 	}
 	switch probe.(type) {
-	case string, float64:
+	case string:
+		id.raw = trimmed
+		return nil
+	case json.Number:
+		text := string(trimmed)
+		if bytes.ContainsAny([]byte(text), ".eE") {
+			return fmt.Errorf("jsonrpc id must be an integer")
+		}
 		id.raw = trimmed
 		return nil
 	default:
@@ -89,9 +99,33 @@ type Message struct {
 	ID      ID              `json:"id"`
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
+	HasID   bool            `json:"-"`
 }
 
-func (m *Message) IsNotification() bool { return m.ID.Empty() }
+func (m *Message) IsNotification() bool { return !m.HasID }
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	var wire struct {
+		JSONRPC string          `json:"jsonrpc"`
+		ID      json.RawMessage `json:"id"`
+		Method  string          `json:"method"`
+		Params  json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	if len(wire.ID) > 0 && bytes.Equal(bytes.TrimSpace(wire.ID), []byte("null")) {
+		return fmt.Errorf("jsonrpc id must not be null")
+	}
+	m.JSONRPC, m.Method, m.Params = wire.JSONRPC, wire.Method, wire.Params
+	if len(wire.ID) > 0 {
+		if err := json.Unmarshal(wire.ID, &m.ID); err != nil {
+			return err
+		}
+		m.HasID = true
+	}
+	return nil
+}
 
 // Error is the JSON-RPC error object; Data carries diagnostics payloads.
 type Error struct {
@@ -196,6 +230,12 @@ func DecodeMessage(data []byte) (*Message, *Error) {
 	var message Message
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	if err := decoder.Decode(&message); err != nil {
+		return nil, &Error{Code: CodeParse, Message: "malformed JSON frame"}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		return nil, &Error{Code: CodeParse, Message: "trailing JSON value"}
+	} else if !errors.Is(err, io.EOF) {
 		return nil, &Error{Code: CodeParse, Message: "malformed JSON frame"}
 	}
 	if message.JSONRPC != "2.0" {

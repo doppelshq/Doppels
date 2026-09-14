@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -70,7 +71,7 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	config := server.Config{
 		Token:         token,
 		RunnerVersion: runnerVersion,
-		Capabilities:  []string{proto.CapabilityLiveLogs},
+		Capabilities:  []string{},
 		NodeStatus: func() proto.NodeStatus {
 			return proto.NodeStatus{
 				State:           "online",
@@ -103,13 +104,12 @@ func runnerConfigDir() (string, error) {
 // token, otherwise generates + persists a fresh 32-byte hex one.
 func resolveToken(flagValue, path string) (string, error) {
 	if flagValue != "" {
-		return flagValue, nil
+		return validateToken(flagValue)
 	}
 	if data, err := os.ReadFile(path); err == nil {
-		text := string(data)
-		if len(text) >= 32 {
-			return text[:len(text)-len(text)%64], nil // tolerate trailing newline
-		}
+		return validateToken(string(data))
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("read token: %w", err)
 	}
 	token, err := generateToken()
 	if err != nil {
@@ -118,10 +118,41 @@ func resolveToken(flagValue, path string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			data, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return "", fmt.Errorf("read token after race: %w", readErr)
+			}
+			return validateToken(string(data))
+		}
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	if _, err := file.WriteString(token); err != nil {
+		file.Close()
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	if err := file.Close(); err != nil {
 		return "", fmt.Errorf("persist token: %w", err)
 	}
 	return token, nil
+}
+
+func validateToken(raw string) (string, error) {
+	if strings.HasSuffix(raw, "\n") {
+		raw = strings.TrimSuffix(raw, "\n")
+		if strings.HasSuffix(raw, "\r") {
+			raw = strings.TrimSuffix(raw, "\r")
+		}
+	}
+	if len(raw) != 64 {
+		return "", fmt.Errorf("runner token must be exactly 32 bytes encoded as 64 hex characters")
+	}
+	if _, err := hex.DecodeString(raw); err != nil {
+		return "", fmt.Errorf("runner token is not valid hex: %w", err)
+	}
+	return raw, nil
 }
 
 func generateToken() (string, error) {
@@ -131,5 +162,3 @@ func generateToken() (string, error) {
 	}
 	return hex.EncodeToString(buf[:]), nil
 }
-
-var _ = errors.New

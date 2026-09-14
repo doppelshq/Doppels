@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -65,7 +66,8 @@ func Open(projectRoot string) (*Index, error) {
 		return nil, fmt.Errorf("create .doppels: %w", err)
 	}
 	dbPath := filepath.Join(dir, "runs.db")
-	db, err := sql.Open("sqlite", dbPath)
+	dsn := (&url.URL{Scheme: "file", Path: dbPath}).String() + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open runs.db: %w", err)
 	}
@@ -74,18 +76,6 @@ func Open(projectRoot string) (*Index, error) {
 	// database engine; concurrent writers across Index instances (daemon +
 	// CLI smoke) must rely on WAL + busy_timeout.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	if _, err := db.Exec(fmt.Sprintf(`PRAGMA busy_timeout = %d`, busyTimeoutMS)); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 	idx := &Index{db: db, root: root}
 	if err := idx.migrate(); err != nil {
 		_ = db.Close()

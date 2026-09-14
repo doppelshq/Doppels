@@ -81,18 +81,16 @@ func (r *streamedRedactor) feed(chunk []byte) []byte {
 	return out
 }
 
-// close flushes the buffered tail at end of step and returns the final bytes
-// to emit. The tail is emitted literally: a complete secret can never sit in
-// the tail (redactWithCarry always emits past the end of the last complete
-// occurrence), and a partial prefix truncated at EOF must reach the live
-// stream exactly like it reaches the redacted disk file, keeping both
-// recovery paths identical.
+// close flushes the buffered tail at end of step using the same sequential
+// replacement pass as the disk path. The conservative carry policy may retain
+// a complete occurrence when a replacement marker can interact with future
+// bytes, so emitting the tail literally would diverge and leak it.
 func (r *streamedRedactor) close() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	carry := r.tail
 	r.tail = nil
-	return carry
+	return redact(carry, r.secrets)
 }
 
 // redactWithCarry redacts buf and splits it into (out, carry). carry holds
@@ -109,38 +107,32 @@ func redactWithCarry(buf []byte, secrets []string) (out []byte, carry []byte) {
 	if boundary < 0 {
 		boundary = 0
 	}
-	if lastEnd := lastOccurrenceEnd(buf, secrets); lastEnd > boundary {
-		boundary = lastEnd
+	// A replacement can itself end with a prefix of another secret. Such a
+	// marker must stay in carry until the future bytes are known; otherwise
+	// sequential ReplaceAll over the complete output can redact across the
+	// chunk boundary and live output diverges from disk. Walk backwards to the
+	// largest safe raw boundary. This is intentionally conservative for
+	// pathological marker/secret overlaps, but preserves exact semantics.
+	for ; boundary > 0; boundary-- {
+		candidate := redact(buf[:boundary], secrets)
+		if !endsWithSecretPrefix(candidate, secrets) {
+			out = candidate
+			break
+		}
 	}
-	// Same replacement semantics as redact(): sequential ReplaceAll,
-	// longest-first. redact() re-sorts a copy, which is a no-op here.
-	out = redact(buf[:boundary], secrets)
+	if boundary == 0 {
+		out = nil
+	}
 	return out, append([]byte(nil), buf[boundary:]...)
 }
 
-// lastOccurrenceEnd scans buf left-to-right, preferring the longest secret
-// at each position (secrets must be sorted longest-first), and returns the
-// end offset of the last complete occurrence found, or -1 when none match.
-func lastOccurrenceEnd(buf []byte, secrets []string) int {
-	lastEnd := -1
-	for i := 0; i < len(buf); {
-		matched := 0
-		for _, s := range secrets {
-			n := len(s)
-			if n == 0 || n > len(buf)-i {
-				continue
-			}
-			if string(buf[i:i+n]) == s {
-				matched = n
-				break
+func endsWithSecretPrefix(buf []byte, secrets []string) bool {
+	for _, secret := range secrets {
+		for n := 1; n < len(secret) && n <= len(buf); n++ {
+			if string(buf[len(buf)-n:]) == secret[:n] {
+				return true
 			}
 		}
-		if matched > 0 {
-			lastEnd = i + matched
-			i += matched
-			continue
-		}
-		i++
 	}
-	return lastEnd
+	return false
 }

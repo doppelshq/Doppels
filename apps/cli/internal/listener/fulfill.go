@@ -62,6 +62,12 @@ func ResolveCapabilityArgument(catalog *manifest.Catalog, resource string) (mani
 // one exists) that fulfills a Space Request. Multiple Recipes route through
 // Approvals.PickRecipe unless approveAll short-circuits.
 func ResolveSpaceFulfillment(catalog *manifest.Catalog, request execution.RequestRecord, approvals ApprovalPort, approveAll bool) (manifest.CapabilityDefinition, *manifest.RecipeDefinition, error) {
+	return ResolveSpaceFulfillmentContext(context.Background(), catalog, request, approvals, approveAll)
+}
+
+// ResolveSpaceFulfillmentContext preserves cancellation while a headless
+// consumer asks an ApprovalPort to choose among Recipes.
+func ResolveSpaceFulfillmentContext(ctx context.Context, catalog *manifest.Catalog, request execution.RequestRecord, approvals ApprovalPort, approveAll bool) (manifest.CapabilityDefinition, *manifest.RecipeDefinition, error) {
 	capabilityDefinition, err := FindCapability(catalog, request.Capability.Name, request.Capability.Version)
 	if err != nil {
 		return manifest.CapabilityDefinition{}, nil, fmt.Errorf("local Capability for Request: %w", err)
@@ -74,7 +80,7 @@ func ResolveSpaceFulfillment(catalog *manifest.Catalog, request execution.Reques
 		if approveAll {
 			return capabilityDefinition, nil, nil
 		}
-		picked, pickErr := pickRecipe(catalog, request.Capability.Name, approvals, approveAll)
+		picked, pickErr := pickRecipe(ctx, catalog, request.Capability.Name, approvals, approveAll)
 		if pickErr != nil {
 			return manifest.CapabilityDefinition{}, nil, pickErr
 		}
@@ -87,6 +93,12 @@ func ResolveSpaceFulfillment(catalog *manifest.Catalog, request execution.Reques
 // ResolveShareFulfillment resolves the local definitions a Share demands,
 // refusing digest drift between the Share contract and the local catalog.
 func ResolveShareFulfillment(catalog *manifest.Catalog, share shareclient.Share, approvals ApprovalPort, approveAll bool) (manifest.CapabilityDefinition, *manifest.RecipeDefinition, error) {
+	return ResolveShareFulfillmentContext(context.Background(), catalog, share, approvals, approveAll)
+}
+
+// ResolveShareFulfillmentContext is the cancellable variant used by active
+// listeners and future Runner consumers.
+func ResolveShareFulfillmentContext(ctx context.Context, catalog *manifest.Catalog, share shareclient.Share, approvals ApprovalPort, approveAll bool) (manifest.CapabilityDefinition, *manifest.RecipeDefinition, error) {
 	var empty manifest.CapabilityDefinition
 	capabilityDefinition, err := ResolveCapabilityArgument(catalog, "capability/"+share.CapabilityRevision.Name+"@"+share.CapabilityRevision.Version)
 	if err != nil {
@@ -118,7 +130,7 @@ func ResolveShareFulfillment(catalog *manifest.Catalog, share shareclient.Share,
 			recipeDefinition = &selected
 		case errors.Is(selectionErr, manifest.ErrRecipeNotFound):
 		case errors.Is(selectionErr, manifest.ErrRecipeAmbiguous):
-			picked, pickErr := pickRecipe(catalog, share.CapabilityRevision.Name, approvals, approveAll)
+			picked, pickErr := pickRecipe(ctx, catalog, share.CapabilityRevision.Name, approvals, approveAll)
 			if pickErr != nil {
 				return empty, nil, pickErr
 			}
@@ -130,7 +142,7 @@ func ResolveShareFulfillment(catalog *manifest.Catalog, share shareclient.Share,
 	return capabilityDefinition, recipeDefinition, nil
 }
 
-func pickRecipe(catalog *manifest.Catalog, capability string, approvals ApprovalPort, approveAll bool) (manifest.RecipeDefinition, error) {
+func pickRecipe(ctx context.Context, catalog *manifest.Catalog, capability string, approvals ApprovalPort, approveAll bool) (manifest.RecipeDefinition, error) {
 	matches := catalog.RecipesForCapability(capability)
 	if len(matches) == 0 {
 		return manifest.RecipeDefinition{}, manifest.ErrRecipeNotFound
@@ -144,7 +156,7 @@ func pickRecipe(catalog *manifest.Catalog, capability string, approvals Approval
 	if approvals == nil {
 		return manifest.RecipeDefinition{}, fmt.Errorf("%w for %s; select one explicitly", manifest.ErrRecipeAmbiguous, capability)
 	}
-	return approvals.PickRecipe(context.Background(), capability, matches)
+	return approvals.PickRecipe(ctx, capability, matches)
 }
 
 // ApproveError reports a failed operator approve against the control plane
@@ -169,11 +181,17 @@ type SpaceFulfillConfig struct {
 	Catalog       *manifest.Catalog
 	Approvals     ApprovalPort
 	ApproveAll    bool
-	Output        io.Writer // runtime stdout sink (the CLI applies line prefixes)
-	Err           io.Writer // warnings (outbox flush)
-	Environment   []string
-	Now           func() time.Time
-	OnEvent       execution.EventFunc // presentation timeline hook; nil ok
+	// Preapproved tells FulfillSpace that the consumer already posted the
+	// remote operator approval against the control plane. Setting this keeps
+	// the pre-resolve/validate precedence of the original `node up` flow:
+	// a network error reaching the registry prints "Unable to approve" before
+	// any local resolution runs.
+	Preapproved bool
+	Output      io.Writer // runtime stdout sink (the CLI applies line prefixes)
+	Err         io.Writer // warnings (outbox flush)
+	Environment []string
+	Now         func() time.Time
+	OnEvent     execution.EventFunc // presentation timeline hook; nil ok
 }
 
 // FulfillSpace approves (when needed), executes, and syncs a Space-origin
@@ -212,7 +230,7 @@ func FulfillSpace(ctx context.Context, cfg SpaceFulfillConfig, job Job, capabili
 		options.Approve = cfg.Approvals.ApproveStep
 		options.Manual = cfg.Approvals.FulfillManual
 	}
-	if strings.ToLower(strings.TrimSpace(job.Request.OperatorDecision)) != "approve" && cfg.Registry != nil {
+	if !cfg.Preapproved && strings.ToLower(strings.TrimSpace(job.Request.OperatorDecision)) != "approve" && cfg.Registry != nil {
 		if _, err := cfg.Registry.DecideRequest(ctx, cfg.Token, job.Organization, job.Space, job.Request.ID, "approve"); err != nil {
 			return execution.Result{}, &ApproveError{Err: err}
 		}
@@ -230,6 +248,8 @@ func FulfillSpace(ctx context.Context, cfg SpaceFulfillConfig, job Job, capabili
 type ShareFulfillConfig struct {
 	Root          string
 	NodeID        string
+	Approvals     ApprovalPort
+	ApproveAll    bool
 	BeforeSuccess execution.BeforeSuccessFunc // artifact upload; nil skips
 	Output        io.Writer
 	Err           io.Writer
@@ -284,6 +304,11 @@ func FulfillShare(ctx context.Context, cfg ShareFulfillConfig, job Job, capabili
 			return err
 		},
 	}
+	if cfg.Approvals != nil {
+		options.Approve = cfg.Approvals.ApproveStep
+		options.Manual = cfg.Approvals.FulfillManual
+	}
+	options.ApproveAll = cfg.ApproveAll
 	return execution.Execute(ctx, invocation, options)
 }
 

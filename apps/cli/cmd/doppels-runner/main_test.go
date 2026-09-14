@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ import (
 func TestDoppelsRunnerBinaryAcceptsHandshake(t *testing.T) {
 	configDir := t.TempDir()
 	socketPath := filepath.Join(configDir, "runner.sock")
-	token := "smoke-token-fixed"
+	token := strings.Repeat("a", 64)
 	port := pickFreePort(t)
 
 	cmd := exec.Command("/tmp/doppels-runner",
@@ -124,6 +125,16 @@ func TestDoppelsRunnerBinaryAcceptsHandshake(t *testing.T) {
 		if capability == "" {
 			t.Fatalf("empty capability advertised")
 		}
+	}
+}
+
+func TestResolveTokenRejectsMalformedPersistedToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.token")
+	if err := os.WriteFile(path, []byte(strings.Repeat("0", 32)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveToken("", path); err == nil {
+		t.Fatal("expected malformed token to be rejected")
 	}
 }
 

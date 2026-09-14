@@ -315,6 +315,54 @@ func TestProducerClosesJobsOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestProducerDrainsWatchersOnReturn pins the post-return cleanup: when
+// RunProducer returns (ctx cancel, watcher error, anything), in-flight
+// watchers must exit so their claims free up. Otherwise stale claims block
+// the next session from accepting the same Share.
+func TestProducerDrainsWatchersOnReturn(t *testing.T) {
+	// Use a registry with a stuck share that opens a Phoenix channel via the
+	// real share client; watchShare will block in AwaitSharedRequest. The
+	// mock httptest server returns no inbox items so no watcher spawns; the
+	// first poll completes, then ctx is cancelled and we assert the
+	// producer + drain cycle completes within the timeout.
+	registry := &fakeRegistry{payload: map[string]any{
+		"scopes":   []map[string]any{},
+		"shares":   []map[string]any{},
+		"requests": []map[string]any{},
+	}}
+	reg, shares := newListenerClients(t, registry)
+	jobs := make(chan Job, 16)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	started := time.Now()
+	go func() {
+		errCh <- RunProducer(ctx, ProducerConfig{
+			Registry:  reg,
+			Shares:    shares,
+			Token:     "token-1",
+			Filters:   Filters{Organization: "acme"},
+			PollEvery: 5 * time.Millisecond,
+			Jobs:      jobs,
+		})
+	}()
+
+	waitForPolls(t, registry, 2)
+	cancel()
+
+	select {
+	case err := <-errCh:
+		if err != nil && ctx.Err() == nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	case <-time.After(WatcherDrainTimeout + 2*time.Second):
+		t.Fatal("RunProducer did not return within drain window")
+	}
+	if elapsed := time.Since(started); elapsed > WatcherDrainTimeout+time.Second {
+		t.Fatalf("RunProducer took %s, want under %s", elapsed, WatcherDrainTimeout)
+	}
+}
+
 func TestProducerReportsScopeStatus(t *testing.T) {
 	registry := &fakeRegistry{payload: spaceRequestPayload("req-1", "requested")}
 	reg, shares := newListenerClients(t, registry)
@@ -350,6 +398,74 @@ func TestProducerReportsScopeStatus(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	t.Fatal("reporter never received scope status")
+}
+
+// TestProducerReportsTotalSharesOpen pins the pre-refactor status line:
+// SharesOpen is the raw inbox.Shares count (all Shares the control plane
+// considers open for this Node, regardless of whether they already carry a
+// Request). The original `node up` banner used len(inbox.Shares); the
+// replacement must match or the visible totals shrink and review tests of
+// the banner break.
+func TestProducerReportsTotalSharesOpen(t *testing.T) {
+	registry := &fakeRegistry{payload: map[string]any{
+		"scopes": []map[string]any{},
+		"shares": []map[string]any{
+			shareItem("s-awaiting", true, false), // AwaitingFulfillment=true  → SharesReady
+			shareItem("s-with-req", false, true), //                              → SharesOpen
+			shareItem("s-no-req", false, false),  //                              → SharesOpen
+		},
+		"requests": []map[string]any{},
+	}}
+	reg, shares := newListenerClients(t, registry)
+	reporter := &recordingReporter{}
+	jobs := make(chan Job, 16)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunProducer(ctx, ProducerConfig{
+			Registry:  reg,
+			Shares:    shares,
+			Token:     "token-1",
+			Filters:   Filters{Organization: "acme"},
+			PollEvery: 5 * time.Millisecond,
+			Jobs:      jobs,
+			Reporter:  reporter,
+		})
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if counts := reporter.lastCounts(); counts != nil {
+			if counts.SharesOpen != 3 {
+				t.Fatalf("sharesOpen = %d, want 3 (all inbox.Shares)", counts.SharesOpen)
+			}
+			if counts.SharesReady != 1 {
+				t.Fatalf("sharesReady = %d, want 1 (awaiting fulfillment)", counts.SharesReady)
+			}
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatal("reporter never received scope status")
+}
+
+func shareItem(id string, awaiting, hasRequest bool) map[string]any {
+	return map[string]any{
+		"share": map[string]any{
+			"id":                 id,
+			"state":              "active",
+			"expiresAt":          "2030-01-01T00:00:00Z",
+			"capabilityRevision": map[string]any{"name": "x", "version": "1.0.0"},
+			"recipe":             nil,
+			"sharedBy":           map[string]any{"id": "u", "kind": "identity"},
+			"runnerTokenHash":    "h",
+			"publicTokenHash":    "ph",
+			"createdAt":          "2026-09-13T00:00:00Z",
+		},
+		"hasRequest":          hasRequest,
+		"awaitingFulfillment": awaiting,
+	}
 }
 
 func waitForPolls(t *testing.T, registry *fakeRegistry, want int) {

@@ -32,6 +32,9 @@ func (e *Encoder) WriteFrame(value any) error {
 	if err != nil {
 		return err
 	}
+	if len(encoded)+1 > MaxFrameBytes {
+		return ErrFrameTooLarge
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if _, err := e.writer.Write(append(encoded, '\n')); err != nil {

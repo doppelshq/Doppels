@@ -71,3 +71,10 @@ func TestFrameAcceptsLineAtExactLimit(t *testing.T) {
 		t.Fatalf("len = %d", len(frame))
 	}
 }
+
+func TestEncoderRejectsFrameThatExceedsWireLimit(t *testing.T) {
+	var wire bytes.Buffer
+	if err := NewEncoder(&wire).WriteFrame(strings.Repeat("x", MaxFrameBytes)); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
+	}
+}

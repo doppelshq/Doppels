@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -38,15 +39,20 @@ func (Unix) Listen(path string) (Listener, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("socket directory: %w", err)
 	}
+	lock, err := acquireInstanceLock(path + ".lock")
+	if err != nil {
+		return nil, err
+	}
 	listener, err := net.Listen("unix", path)
 	if err == nil {
 		// The socket grants access purely to the same user (RFC §3); the
 		// umask could have made it looser.
 		if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
 			listener.Close()
+			_ = lock.Close()
 			return nil, fmt.Errorf("socket permissions: %w", chmodErr)
 		}
-		return &unixListener{Listener: listener}, nil
+		return &unixListener{Listener: listener, lock: lock}, nil
 	}
 	// A leftover socket from a crashed runner is not a live listener: probe
 	// it, reclaim the path, and listen again. A live runner keeps ownership.
@@ -58,12 +64,15 @@ func (Unix) Listen(path string) (Listener, error) {
 		if retryErr == nil {
 			if chmodErr := os.Chmod(path, 0o600); chmodErr != nil {
 				listener.Close()
+				_ = lock.Close()
 				return nil, fmt.Errorf("socket permissions: %w", chmodErr)
 			}
-			return &unixListener{Listener: listener}, nil
+			return &unixListener{Listener: listener, lock: lock}, nil
 		}
+		_ = lock.Close()
 		return nil, fmt.Errorf("listen after stale cleanup: %w", retryErr)
 	}
+	_ = lock.Close()
 	return nil, err
 }
 
@@ -74,20 +83,36 @@ func (Unix) Dial(path string) (net.Conn, error) {
 
 type unixListener struct {
 	net.Listener
+	lock      *os.File
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (l *unixListener) Close() error {
-	// net.UnixListener unlinks by default unless SetUnlinkOnClose(false);
-	// keep explicit best-effort removal for the documented shutdown path.
-	if err := l.Listener.Close(); err != nil {
-		return err
-	}
-	if addr := l.Addr(); addr != nil {
-		if path := addr.String(); path != "" {
-			_ = os.Remove(path)
+	l.closeOnce.Do(func() {
+		l.closeErr = l.Listener.Close()
+		if l.lock != nil {
+			if lockErr := l.lock.Close(); l.closeErr == nil {
+				l.closeErr = lockErr
+			}
 		}
+	})
+	return l.closeErr
+}
+
+func acquireInstanceLock(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("instance lock: %w", err)
 	}
-	return nil
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = lock.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("runner already owns instance: %w", err)
+		}
+		return nil, fmt.Errorf("instance lock: %w", err)
+	}
+	return lock, nil
 }
 
 // isStaleSocket reports whether a blocking path is a socket nobody is
@@ -111,8 +136,9 @@ func isStaleSocket(path string) bool {
 		errno   syscall.Errno
 		dialErr *net.OpError
 	)
-	if errors.As(err, &dialErr) || errors.As(err, &errno) {
-		// Connection refused / ECONNREFUSED means no accept loop remains.
+	if errors.As(err, &dialErr) && errors.Is(err, syscall.ECONNREFUSED) || errors.As(err, &errno) && errno == syscall.ECONNREFUSED {
+		// Only ECONNREFUSED proves no accept loop remains. Timeouts and
+		// permission errors must never authorize unlinking the path.
 		return true
 	}
 	return false

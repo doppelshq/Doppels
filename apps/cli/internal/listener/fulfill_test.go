@@ -256,6 +256,47 @@ func TestFulfillSpaceSkipsDecideWhenOperatorAlreadyApproved(t *testing.T) {
 	}
 }
 
+// TestFulfillSpaceSkipsDecideWhenPreapproved pins the post-resolve call site:
+// the consumer (CLI `node up`) posts the operator approval before local
+// resolve so a failing registry call aborts with "Unable to approve" before
+// the catalog is even touched. FulfillSpace must not double-post.
+func TestFulfillSpaceSkipsDecideWhenPreapproved(t *testing.T) {
+	root := writeSpaceProject(t)
+	catalog := loadCatalog(t, root)
+
+	registry := &recordingRegistry{}
+	server := httptest.NewServer(registry)
+	t.Cleanup(server.Close)
+	reg, err := registryclient.New(server.URL, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	draft := spaceJob(execution.DefinitionReference{Name: "sync-invoices", Version: "1.1.0"})
+	capability, recipe, resolveErr := ResolveSpaceFulfillment(catalog, *draft.Request, autoPort{}, true)
+	if resolveErr != nil {
+		t.Fatalf("resolve: %v", resolveErr)
+	}
+	job := spaceJob(execution.ReferenceCapability(capability))
+
+	cfg := SpaceFulfillConfig{
+		Registry: reg, Token: "token-1", Identity: "identity-1", NodeID: "node-1",
+		Root: root, Catalog: catalog, Approvals: autoPort{}, ApproveAll: true,
+		Preapproved: true,
+		Output:      io.Discard, Err: io.Discard, Environment: os.Environ(),
+		Now: func() time.Time { return time.Now().UTC() },
+	}
+	if _, runErr := FulfillSpace(context.Background(), cfg, job, capability, recipe); runErr != nil {
+		t.Fatalf("fulfill: %v", runErr)
+	}
+	if registry.decideCount() != 0 {
+		t.Fatalf("decide calls = %d, want 0 (Preapproved skips internal DecideRequest)", registry.decideCount())
+	}
+	if registry.ingestCount() != 1 {
+		t.Fatalf("ingest calls = %d, want 1 (outbox flush after run)", registry.ingestCount())
+	}
+}
+
 func TestResolveSpaceFulfillmentMissingCapability(t *testing.T) {
 	root := writeSpaceProject(t)
 	catalog := loadCatalog(t, root)

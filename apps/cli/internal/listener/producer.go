@@ -117,8 +117,18 @@ type ProducerConfig struct {
 //     unwatched items are released for the next poll.
 //   - Watcher errors abort the producer (returned) so the consumer decides
 //     whether the Node stays online.
+//   - On return, RunProducer waits for in-flight share watchers to release
+//     their claims (capped by WatcherDrainTimeout). This guarantees no
+//     orphan claims survive a normal shutdown or an explicit error path,
+//     since the watchers run on a cancellable context derived from ctx.
 func RunProducer(ctx context.Context, cfg ProducerConfig) error {
-	defer close(cfg.Jobs)
+	var watchers sync.WaitGroup
+	watcherCtx, watcherCancel := context.WithCancel(ctx)
+	defer func() {
+		watcherCancel()
+		drainWatchers(&watchers, WatcherDrainTimeout)
+		close(cfg.Jobs)
+	}()
 
 	var mu sync.Mutex
 	claimedShares := map[string]bool{}
@@ -167,13 +177,10 @@ func RunProducer(ctx context.Context, cfg ProducerConfig) error {
 		if err != nil {
 			return err
 		}
-		counts := InboxCounts{Scopes: len(inbox.Scopes), Requests: len(inbox.Requests)}
+		counts := InboxCounts{Scopes: len(inbox.Scopes), SharesOpen: len(inbox.Shares), Requests: len(inbox.Requests)}
 		for _, item := range inbox.Shares {
-			switch {
-			case item.AwaitingFulfillment:
+			if item.AwaitingFulfillment {
 				counts.SharesReady++
-			case !item.HasRequest:
-				counts.SharesOpen++
 			}
 		}
 		if cfg.Reporter != nil {
@@ -187,11 +194,13 @@ func RunProducer(ctx context.Context, cfg ProducerConfig) error {
 				continue
 			}
 			shareID := item.Share.ID
+			watchers.Add(1)
 			go func(item shareclient.InboxItem) {
-				handedOff, err := watchShare(ctx, cfg, item)
+				defer watchers.Done()
+				handedOff, err := watchShare(watcherCtx, cfg, item)
 				if err != nil {
 					releaseShare(shareID)
-					if ctx.Err() == nil {
+					if watcherCtx.Err() == nil {
 						select {
 						case watcherErr <- err:
 						default:
@@ -255,6 +264,24 @@ func RunProducer(ctx context.Context, cfg ProducerConfig) error {
 		}
 	}
 }
+
+// drainWatchers blocks until every spawned watcher exits, then cancels any
+// still-pending context so the connection's read deadline fires even when
+// the watcher is stuck in a synchronous channel call. Bounded so a stalled
+// watcher cannot keep the producer alive past its return path.
+func drainWatchers(watchers *sync.WaitGroup, timeout time.Duration) {
+	done := make(chan struct{})
+	go func() { watchers.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+	}
+}
+
+// WatcherDrainTimeout bounds how long RunProducer waits for in-flight
+// watchers after returning. After this it cancels the watcher context
+// unconditionally; the channel goroutines unblock on the next read.
+const WatcherDrainTimeout = 5 * time.Second
 
 // watchShare attaches to one Share and waits for its recipient to submit a
 // Request. handedOff reports whether the channel was handed to a consumer

@@ -196,3 +196,120 @@ func TestFingerprintStableAcrossKeyOrder(t *testing.T) {
 		t.Fatalf("fingerprint differs across key order: %s vs %s", a, b)
 	}
 }
+
+func TestFingerprintPreservesExactLargeNumbers(t *testing.T) {
+	left, err := Fingerprint(json.RawMessage(`{"n":9007199254740993.0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := Fingerprint(json.RawMessage(`{"n":9007199254740992}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if left == right {
+		t.Fatal("distinct exact numbers must not share a fingerprint")
+	}
+}
+
+func TestDecodeMessageRejectsTrailingJSON(t *testing.T) {
+	_, protoErr := DecodeMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"v1/ping"} garbage`))
+	if protoErr == nil || protoErr.Code != CodeParse {
+		t.Fatalf("err = %+v, want parse error", protoErr)
+	}
+}
+
+func TestDecodeMessageRejectsFractionalID(t *testing.T) {
+	_, protoErr := DecodeMessage([]byte(`{"jsonrpc":"2.0","id":1.5,"method":"v1/ping"}`))
+	if protoErr == nil || protoErr.Code != CodeParse {
+		t.Fatalf("err = %+v, want parse error", protoErr)
+	}
+}
+
+// TestFingerprintCollidesForSemanticallyEqualNumbers pins the deliberate
+// idempotency: 1 and 1.0 are the same number, two exponents of the same
+// value collapse to the same canonical bytes, and exponent-free integers
+// render as plain decimals. Any caller relying on the fingerprint to
+// reject "same value spelled differently" must look elsewhere.
+func TestFingerprintCollidesForSemanticallyEqualNumbers(t *testing.T) {
+	cases := [][]string{
+		{"1", "1.0", "1e0", "1E0"},
+		{"1000", "1e3", "1.0e3"},
+		{"0", "0.0", "0e0", "-0"},
+	}
+	for _, group := range cases {
+		digests := make(map[string]string)
+		for _, spelling := range group {
+			digest, err := Fingerprint(json.RawMessage(spelling))
+			if err != nil {
+				t.Fatalf("%s: %v", spelling, err)
+			}
+			digests[spelling] = digest
+		}
+		for spelling, digest := range digests {
+			for other, otherDigest := range digests {
+				if digest != otherDigest {
+					t.Fatalf("expected %s and %s to collide, got %s vs %s",
+						spelling, other, digest, otherDigest)
+				}
+			}
+		}
+	}
+}
+
+// TestFingerprintDifferentiatesByContent pins the discriminative side:
+// payloads that share structure but differ in values produce different
+// fingerprints. The canonical form is byte-stable but not collision-free.
+func TestFingerprintDifferentiatesByContent(t *testing.T) {
+	a, err := Fingerprint(json.RawMessage(`{"capability":"a","inputs":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Fingerprint(json.RawMessage(`{"capability":"b","inputs":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("different capability strings produced same fingerprint")
+	}
+	c, err := Fingerprint(json.RawMessage(`{"capability":"a","inputs":{"x":1}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == c {
+		t.Fatal("presence of an input key did not affect fingerprint")
+	}
+}
+
+// TestFingerprintPreservesArrayOrder pins that array order matters for
+// idempotency: requests with shuffled inputs are distinct operations even
+// when the inputs land in the same set.
+func TestFingerprintPreservesArrayOrder(t *testing.T) {
+	a, err := Fingerprint(json.RawMessage(`{"a":[1,2,3]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Fingerprint(json.RawMessage(`{"a":[3,2,1]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("array reorder must produce a different fingerprint")
+	}
+}
+
+// TestFingerprintHandlesUnicodeKeys pins the UTF-8 byte-sort stability of
+// Go's sort.Strings: distinct keys serialize in their canonical Code Point
+// order regardless of the input order.
+func TestFingerprintHandlesUnicodeKeys(t *testing.T) {
+	a, err := Fingerprint(json.RawMessage(`{"α":1,"β":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Fingerprint(json.RawMessage(`{"β":2,"α":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatalf("unicode key order diverges: %s vs %s", a, b)
+	}
+}

@@ -63,6 +63,30 @@ func TestSanitizeRunEventTruncatesTimestampToMillisecond(t *testing.T) {
 	}
 }
 
+// TestTruncateRunTimestampForWire pins the Run.CreatedAt truncation that
+// SubmitRun performs before sending the envelope. The control plane
+// (Postgres + Ash) stores microseconds and re-emits the same value in the
+// `run_recorded` ack; payload comparison is exact (`time.Equal`), so the
+// wire bytes must already be millisecond-aligned. A nanosecond clock
+// would otherwise fail every submission with "Cloud acknowledgement
+// changed the submitted payload" — the bug this truncation fixes.
+func TestTruncateRunTimestampForWire(t *testing.T) {
+	raw := testNow.Add(987654321 * time.Nanosecond)
+	truncated := truncateRunTimestamp(raw)
+	if truncated.Nanosecond()%int(time.Millisecond) != 0 {
+		t.Fatalf("truncated createdAt kept sub-millisecond digits: %v", truncated)
+	}
+	want := testNow.Add(987 * time.Millisecond)
+	if !truncated.Equal(want) {
+		t.Fatalf("createdAt = %v, want %v", truncated, want)
+	}
+	// Reapplying truncation is idempotent — a second pass leaves the
+	// value unchanged, so a retry of the same envelope round-trips.
+	if !truncateRunTimestamp(truncated).Equal(truncated) {
+		t.Fatalf("truncate(truncate(x)) diverged")
+	}
+}
+
 func TestSanitizeStepEventKeepsOnlySafeStatus(t *testing.T) {
 	event := execution.RunEvent{Type: "step_failed", Data: map[string]any{"status": "failed", "exitCode": 2, "timedOut": false, "error": "contains secret", "products": map[string]any{"x": "y"}}}
 	public := SanitizeRunEvent(event)

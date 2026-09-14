@@ -27,6 +27,11 @@ type connection struct {
 	closed         bool
 }
 
+type outboundFrame struct {
+	value any
+	after func()
+}
+
 func newConnection(server *Server, conn net.Conn) *connection {
 	return &connection{
 		server:   server,
@@ -59,7 +64,7 @@ func (c *connection) serve() {
 		if protoErr != nil {
 			// Protocol errors answer with id null and keep the connection
 			// alive (§15: only framing corruption forces a close).
-			c.enqueue(proto.NewErrorResponse(nil, protoErr))
+			c.enqueue(proto.NewErrorResponse(nil, protoErr), true)
 			continue
 		}
 		if message.IsNotification() {
@@ -70,7 +75,7 @@ func (c *connection) serve() {
 			c.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{
 				Code:    proto.CodeNotInitialized,
 				Message: "initialize is required before any other method",
-			}))
+			}), true)
 			continue
 		}
 		c.server.dispatch(c, message)
@@ -86,21 +91,47 @@ func (c *connection) writeLoop(done chan struct{}) {
 	for {
 		select {
 		case frame := <-c.outbound:
-			if err := encoder.WriteFrame(frame); err != nil {
+			value := frame
+			after := func() {}
+			if deferred, ok := frame.(outboundFrame); ok {
+				value, after = deferred.value, deferred.after
+				if after == nil {
+					after = func() {}
+				}
+			}
+			if err := encoder.WriteFrame(value); err != nil {
+				c.server.config.Log("runner client writer failed: %v", err)
+				c.close()
 				return
 			}
+			after()
 		case <-c.stop:
 			return
 		}
 	}
 }
 
-func (c *connection) enqueue(value any) {
+// enqueue queues a frame for the writer goroutine. Required frames are RPC
+// responses the client is waiting on: if the outbound queue is saturated,
+// dropping them would leave the client hanging until the read deadline, so
+// we close the connection instead (RFC §15: clients must reconnect after
+// framing issues). Best-effort frames (notifications) drop with a log.
+func (c *connection) enqueue(value any, required bool) bool {
+	return c.enqueueFrame(outboundFrame{value: value}, required)
+}
+
+func (c *connection) enqueueFrame(frame outboundFrame, required bool) bool {
 	select {
-	case c.outbound <- value:
+	case c.outbound <- frame:
+		return true
 	default:
-		// Subscriber too slow: drop rather than block the dispatch loop.
+		if required {
+			c.server.config.Log("outbound saturated; closing slow client %q", c.clientName)
+			c.close()
+			return false
+		}
 		c.server.config.Log("dropping outbound frame for slow client %q", c.clientName)
+		return false
 	}
 }
 
@@ -133,7 +164,7 @@ func (c *connection) sendNodeEvent(event proto.NodeEvent) {
 	if !subscribed {
 		return
 	}
-	c.enqueue(proto.NewNotification("v1/nodeEvent", event))
+	c.enqueue(proto.NewNotification("v1/nodeEvent", event), false)
 }
 
 func (c *connection) close() {
@@ -163,15 +194,30 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{
 			Code:    proto.CodeMethodNotFound,
 			Message: "unknown method: " + message.Method,
-		}))
+		}), true)
+		return
+	}
+	if message.Method != "v1/shutdown" && message.Method != "v1/initialize" && s.isShuttingDown() {
+		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}), true)
 		return
 	}
 	result, protoErr := handler(conn, message.Params)
 	if protoErr != nil {
-		conn.enqueue(proto.NewErrorResponse(message.ID, protoErr))
+		conn.enqueue(proto.NewErrorResponse(message.ID, protoErr), true)
 		return
 	}
-	conn.enqueue(proto.NewResponse(message.ID, result))
+	if message.Method == "v1/shutdown" {
+		after := s.shutdownAfterAckCallback()
+		if !conn.enqueueFrame(outboundFrame{value: proto.NewResponse(message.ID, result), after: after}, true) && after != nil {
+			after()
+		}
+		return
+	}
+	if conn.enqueue(proto.NewResponse(message.ID, result), true) && message.Method == "v1/subscribeNode" {
+		// Activate only after the snapshot is in the connection FIFO. A
+		// concurrent event can then never be queued ahead of that response.
+		conn.setNodeSubscribed(true)
+	}
 }
 
 // unmarshalParams decodes params ignoring unknown fields (RFC §5).

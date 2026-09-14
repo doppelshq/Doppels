@@ -456,7 +456,7 @@ func (r *runner) executeStep(ctx context.Context, step manifest.Step, workingDir
 	if limit <= 0 {
 		limit = DefaultLogStreamLimit
 	}
-stdout := newCappedWriter(limit)
+	stdout := newCappedWriter(limit)
 	stderr := newCappedWriter(limit)
 	var stdoutRedactor, stderrRedactor *streamedRedactor
 	if r.options.LogStream != nil {
