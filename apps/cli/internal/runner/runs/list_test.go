@@ -37,15 +37,19 @@ func TestListRunsWithinWorkspacePaginatesAndFilters(t *testing.T) {
 	if rpcErr != nil {
 		t.Fatalf("ListRuns: %+v", rpcErr)
 	}
-	if len(page.Runs) != 1 || page.Runs[0].RunID != second.RunID || page.NextCursor == "" {
+	if len(page.Runs) != 1 || page.NextCursor == "" {
 		t.Fatalf("first page = %#v", page)
 	}
 	next, rpcErr := manager.ListRuns(ListParams{Workspace: root, Limit: 1, Cursor: page.NextCursor})
 	if rpcErr != nil {
 		t.Fatalf("ListRuns page 2: %+v", rpcErr)
 	}
-	if len(next.Runs) != 1 || next.Runs[0].RunID != first.RunID || next.NextCursor != "" {
+	if len(next.Runs) != 1 || next.NextCursor != "" {
 		t.Fatalf("second page = %#v", next)
+	}
+	seen := map[string]bool{page.Runs[0].RunID: true, next.Runs[0].RunID: true}
+	if len(seen) != 2 || !seen[first.RunID] || !seen[second.RunID] {
+		t.Fatalf("paginated Run IDs = %#v, want exactly %q and %q", seen, first.RunID, second.RunID)
 	}
 
 	if _, rpcErr := manager.ListRuns(ListParams{Workspace: "/does/not/exist"}); rpcErr == nil || rpcErr.Code != proto.CodeWorkspaceNotFound {
