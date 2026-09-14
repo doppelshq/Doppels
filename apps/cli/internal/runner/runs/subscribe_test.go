@@ -37,6 +37,9 @@ func (f *fakeSubscriber) DeliverRunGap(runID string, fromSequence int) {
 	f.notify <- struct{}{}
 }
 
+func (f *fakeSubscriber) Defer(fn func())     { fn() }
+func (f *fakeSubscriber) NotifyClosed(func()) {}
+
 func (f *fakeSubscriber) waitForEvents(t *testing.T, n int) []proto.RunEventPayload {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
@@ -202,6 +205,9 @@ func (r *rejectingSubscriber) DeliverRunGap(_ string, fromSequence int) {
 	r.notify <- struct{}{}
 }
 
+func (r *rejectingSubscriber) Defer(fn func())     { fn() }
+func (r *rejectingSubscriber) NotifyClosed(func()) {}
+
 func (r *rejectingSubscriber) waitForGap(t *testing.T) int {
 	t.Helper()
 	deadline := time.After(5 * time.Second)
@@ -277,6 +283,153 @@ returns: {value: "{{ steps.run.value }}"}
 	sub.mu.Unlock()
 	if delivered != 0 {
 		t.Fatalf("forwarder delivered %d events after the first rejected send, want 0", delivered)
+	}
+}
+
+// captureDeferSubscriber records whatever RunEventSubscriber.Defer hands it
+// instead of running it immediately, so a test can control exactly when
+// live delivery activates.
+type captureDeferSubscriber struct {
+	mu       sync.Mutex
+	deferred func()
+	events   []proto.RunEventPayload
+	notify   chan struct{}
+	closedBy func()
+}
+
+func newCaptureDeferSubscriber() *captureDeferSubscriber {
+	return &captureDeferSubscriber{notify: make(chan struct{}, 256)}
+}
+
+func (c *captureDeferSubscriber) DeliverRunEvent(event proto.RunEventPayload) bool {
+	c.mu.Lock()
+	c.events = append(c.events, event)
+	c.mu.Unlock()
+	c.notify <- struct{}{}
+	return true
+}
+
+func (c *captureDeferSubscriber) DeliverRunGap(string, int) {}
+
+func (c *captureDeferSubscriber) Defer(fn func()) {
+	c.mu.Lock()
+	c.deferred = fn
+	c.mu.Unlock()
+}
+
+func (c *captureDeferSubscriber) NotifyClosed(fn func()) {
+	c.mu.Lock()
+	c.closedBy = fn
+	c.mu.Unlock()
+}
+
+func (c *captureDeferSubscriber) takeDeferred() func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.deferred
+}
+
+// TestSubscribeDefersLiveForwardingViaSubDefer reproduces review finding 4's
+// first half at the runs-package level: Manager.Subscribe must hand off
+// activation of live delivery through sub.Defer instead of starting the
+// forwarder immediately. Starting it immediately risks a live event racing
+// the RPC response itself onto a connection's outbound queue, breaking the
+// "replay first, then live" ordering guarantee (proved at the wire level in
+// server_test.go; this test proves the Manager-side contract).
+func TestSubscribeDefersLiveForwardingViaSubDefer(t *testing.T) {
+	service, root := runnerWorkspace(t, true)
+	writeRunFixture(t, filepath.Join(root, ".doppels", "recipes", "greet.yaml"), `apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: greet-shell, version: 1.0.0}
+provides: [greet]
+runtime: shell
+defaults: {approval: never}
+steps:
+  - id: run
+    name: Run
+    run: {shell: sh, script: "touch started; sleep 30; export VALUE=ok"}
+    produces: {value: {env: VALUE}}
+returns: {value: "{{ steps.run.value }}"}
+`)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test", Environment: []string{"PATH=" + os.Getenv("PATH")}})
+	defer manager.Close()
+
+	params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","inputs":{"count":1},"approvalMode":"auto","idempotencyKey":"defer-activation"}`)
+	started, rpcErr := manager.Start("cli", params)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+
+	sub := newCaptureDeferSubscriber()
+	if _, rpcErr := manager.Subscribe(started.RunID, 0, sub); rpcErr != nil {
+		t.Fatalf("Subscribe: %+v", rpcErr)
+	}
+	deferred := sub.takeDeferred()
+	if deferred == nil {
+		t.Fatal("Manager.Subscribe did not hand off activation via sub.Defer — live delivery could start before the RPC response is enqueued")
+	}
+
+	waitForFile(t, filepath.Join(root, "started"))
+	if _, rpcErr := manager.Cancel(started.RunID, ""); rpcErr != nil {
+		t.Fatalf("Cancel: %+v", rpcErr)
+	}
+
+	select {
+	case <-sub.notify:
+		t.Fatal("an event was delivered before the deferred activation ran")
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	deferred()
+
+	select {
+	case <-sub.notify:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no event delivered after activation ran")
+	}
+}
+
+// TestSubscribeUnsubscribesOnConnectionClose reproduces review finding 4's
+// second half: Manager.Subscribe must register cleanup via sub.NotifyClosed
+// so a disconnected client's subscription (and its forwarder goroutine)
+// does not leak forever.
+func TestSubscribeUnsubscribesOnConnectionClose(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","inputs":{"count":1},"approvalMode":"interactive","idempotencyKey":"unsub-close"}`)
+	started, rpcErr := manager.Start("cli", params)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	waitForStatus(t, root, started.RunID, "pending_manual")
+
+	sub := newCaptureDeferSubscriber()
+	if _, rpcErr := manager.Subscribe(started.RunID, 0, sub); rpcErr != nil {
+		t.Fatalf("Subscribe: %+v", rpcErr)
+	}
+
+	manager.subsMu.Lock()
+	before := len(manager.subs[started.RunID])
+	manager.subsMu.Unlock()
+	if before == 0 {
+		t.Fatal("subscriber was never registered")
+	}
+
+	sub.mu.Lock()
+	closedBy := sub.closedBy
+	sub.mu.Unlock()
+	if closedBy == nil {
+		t.Fatal("Manager.Subscribe did not register cleanup via sub.NotifyClosed")
+	}
+	closedBy() // simulate the underlying connection disconnecting
+
+	manager.subsMu.Lock()
+	after := len(manager.subs[started.RunID])
+	manager.subsMu.Unlock()
+	if after != 0 {
+		t.Fatalf("subscriber list for %s still has %d entries after disconnect, want 0", started.RunID, after)
 	}
 }
 

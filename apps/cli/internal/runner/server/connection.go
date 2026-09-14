@@ -20,13 +20,15 @@ type connection struct {
 	outbound chan any
 	stop     chan struct{}
 
-	mu              sync.Mutex
-	initialized     bool
-	clientName      string
-	nodeSubscribed  bool
-	nodeSubscribing bool
-	pendingEvents   []proto.NodeEvent
-	closed          bool
+	mu                sync.Mutex
+	initialized       bool
+	clientName        string
+	nodeSubscribed    bool
+	nodeSubscribing   bool
+	pendingEvents     []proto.NodeEvent
+	closed            bool
+	pendingActivation func()
+	onClose           []func()
 }
 
 type outboundFrame struct {
@@ -285,6 +287,44 @@ func (c *connection) DeliverRunGap(runID string, fromSequence int) {
 	}), true)
 }
 
+// Defer implements RunEventSubscriber: fn runs once the response to the
+// in-flight RPC call has been enqueued (see dispatch's consumePendingActivation),
+// never before and never if that response could not be enqueued at all. At
+// most one activation is ever pending: methods run on a connection's single
+// reading goroutine, so dispatch always consumes it before the next call.
+func (c *connection) Defer(fn func()) {
+	c.mu.Lock()
+	c.pendingActivation = fn
+	c.mu.Unlock()
+}
+
+// consumePendingActivation clears whatever Defer registered during the
+// current dispatch and runs it only if succeeded is true.
+func (c *connection) consumePendingActivation(succeeded bool) {
+	c.mu.Lock()
+	fn := c.pendingActivation
+	c.pendingActivation = nil
+	c.mu.Unlock()
+	if succeeded && fn != nil {
+		fn()
+	}
+}
+
+// NotifyClosed implements RunEventSubscriber: fn runs when this connection
+// closes, or immediately if it already has. Domain subscribers (e.g.
+// runs.Manager) use this to unsubscribe on disconnect instead of leaking a
+// subscription (and its forwarder goroutine) forever.
+func (c *connection) NotifyClosed(fn func()) {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		fn()
+		return
+	}
+	c.onClose = append(c.onClose, fn)
+	c.mu.Unlock()
+}
+
 func (c *connection) close() {
 	c.mu.Lock()
 	if c.closed {
@@ -292,9 +332,14 @@ func (c *connection) close() {
 		return
 	}
 	c.closed = true
+	callbacks := c.onClose
+	c.onClose = nil
 	c.mu.Unlock()
 	close(c.stop)
 	_ = c.conn.Close()
+	for _, fn := range callbacks {
+		fn()
+	}
 }
 
 func (s *Server) removeConnection(conn *connection) {
@@ -321,10 +366,15 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 	}
 	result, protoErr := handler(conn, message.Params)
 	if protoErr != nil {
+		// A handler that errored never reaches the success path below, so
+		// any Defer it may have registered (it shouldn't, but defensively)
+		// must not fire for a response that was never sent.
+		conn.consumePendingActivation(false)
 		conn.enqueue(proto.NewErrorResponse(message.ID, protoErr), true)
 		return
 	}
 	if message.Method == "v1/shutdown" {
+		conn.consumePendingActivation(false)
 		after := s.shutdownAfterAckCallback()
 		if !conn.enqueueFrame(outboundFrame{value: proto.NewResponse(message.ID, result), after: after}, true) && after != nil {
 			after()
@@ -332,6 +382,11 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 		return
 	}
 	queued := conn.enqueue(proto.NewResponse(message.ID, result), true)
+	// Runs any RunEventSubscriber.Defer callback the handler registered
+	// (e.g. v1/subscribeRun activating live delivery) only now that the
+	// response is ahead of it in the outbound FIFO — and never at all if the
+	// response could not be enqueued.
+	conn.consumePendingActivation(queued)
 	if message.Method == "v1/subscribeNode" {
 		// Activate only after the snapshot is in the connection FIFO. A
 		// concurrent event can then never be queued ahead of that response,

@@ -222,6 +222,12 @@ func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventS
 		return SubscribeResult{}, subscribeFindError(err)
 	}
 	entry := m.addSubscriber(runID, sub)
+	// If the underlying connection disconnects, its RunEventSubscriber must
+	// tell us so this subscription doesn't leak forever (review finding 4).
+	sub.NotifyClosed(func() {
+		entry.close()
+		m.removeSubscriber(runID, entry)
+	})
 	detail, err := runstate.LoadWithIndex(root, runID, idx)
 	if err != nil {
 		entry.close()
@@ -230,7 +236,12 @@ func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventS
 	}
 	lastSequence := len(detail.Events) - 1
 	entry.setReplayBoundary(lastSequence)
-	entry.start()
+	// Activation must wait until the synchronous RPC response carrying this
+	// replay snapshot is ahead of it on the wire (review finding 4): handing
+	// this off via sub.Defer lets the transport (server.dispatch) guarantee
+	// that ordering instead of starting the forwarder eagerly here, which
+	// could race a live event onto the connection before its own response.
+	sub.Defer(entry.start)
 
 	events := make([]proto.RunEventPayload, 0, len(detail.Events))
 	for _, event := range detail.Events {

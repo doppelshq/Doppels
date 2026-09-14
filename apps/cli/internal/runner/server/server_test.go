@@ -366,6 +366,98 @@ func TestDeliverRunEventReportsDropAndDeliverRunGapClosesOnSaturation(t *testing
 	}
 }
 
+// TestSubscribeResponseIsQueuedBeforeAnyDeferredLiveEvent reproduces review
+// finding 4's first half: a domain handler that starts forwarding live
+// events synchronously (inside the handler, before its RPC response is
+// enqueued) can lose the ordering guarantee "replay/snapshot first, live
+// events after" — a live notification can win the race for the connection's
+// outbound queue and reach the wire before the RPC response that is
+// supposed to precede it. RunEventSubscriber.Defer lets the handler hand off
+// activation of live delivery to run only once dispatch has confirmed the
+// response was queued (mirroring the existing v1/subscribeNode pattern).
+func TestSubscribeResponseIsQueuedBeforeAnyDeferredLiveEvent(t *testing.T) {
+	ts := startServer(t, testConfig())
+	ts.HandleSubscribe("v1/subscribeRun", func(sub RunEventSubscriber, params []byte) (any, *proto.Error) {
+		// A handler using Defer correctly: activation of live delivery must
+		// not race the RPC response onto the wire.
+		sub.Defer(func() {
+			sub.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 5, Type: "step_started"})
+		})
+		return map[string]any{"status": "running"}, nil
+	})
+
+	client := dialClient(t, ts)
+	if response := client.initialize(); response.Err != nil {
+		t.Fatalf("initialize: %+v", response.Err)
+	}
+	if err := client.encoder.WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "sub-1", "method": "v1/subscribeRun",
+		"params": map[string]any{"runId": "r-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := client.decoder.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(first, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Method != "" {
+		t.Fatalf("first frame after subscribeRun was a %q notification, want the RPC response first", envelope.Method)
+	}
+
+	method, _ := client.readNotification(t)
+	if method != "v1/runEvent" {
+		t.Fatalf("second frame method = %s, want the deferred v1/runEvent", method)
+	}
+}
+
+// TestConnectionCloseUnsubscribesRunEventSubscriptions reproduces review
+// finding 4's second half: NotifyClosed must let a domain subscriber (e.g.
+// runs.Manager) learn a connection died so it can unsubscribe, instead of
+// leaking a subscriber-list entry (and its forwarder goroutine) forever.
+func TestConnectionCloseUnsubscribesRunEventSubscriptions(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	conn := newConnection(server, clientEnd)
+
+	notified := make(chan struct{}, 1)
+	conn.NotifyClosed(func() { notified <- struct{}{} })
+
+	conn.close()
+
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyClosed callback never ran after the connection closed")
+	}
+}
+
+// TestNotifyClosedRunsImmediatelyOnAnAlreadyClosedConnection guards the
+// registration-after-close race: a subscriber that registers cleanup after
+// the connection already died must still get its callback, or it leaks
+// forever waiting for a close that already happened.
+func TestNotifyClosedRunsImmediatelyOnAnAlreadyClosedConnection(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	conn := newConnection(server, clientEnd)
+	conn.close()
+
+	notified := make(chan struct{}, 1)
+	conn.NotifyClosed(func() { notified <- struct{}{} })
+
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyClosed registered on an already-closed connection was never invoked")
+	}
+}
+
 func TestHandleSubscribeDeliversOnlyToCallingConnection(t *testing.T) {
 	ts := startServer(t, testConfig())
 	var captured RunEventSubscriber
