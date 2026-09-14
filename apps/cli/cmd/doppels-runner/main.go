@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -59,6 +60,9 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	log.Printf("doppels-runner: listening on %s", socketPath)
 	listener, err := transport.Unix{}.Listen(socketPath)
 	if err != nil {
+		if existingRunner(token, socketPath) {
+			return nil
+		}
 		return fmt.Errorf("listen: %w", err)
 	}
 
@@ -85,6 +89,33 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	}
 	srv := server.New(config)
 	return srv.Serve(ctx, listener)
+}
+
+func existingRunner(token, socketPath string) bool {
+	conn, err := transport.Unix{}.Dial(socketPath)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	if err := proto.NewEncoder(conn).WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "probe", "method": "v1/initialize",
+		"params": map[string]any{
+			"protocolVersion": proto.ProtocolVersion,
+			"token":           token,
+			"client":          map[string]any{"name": "doppels-runner", "version": "probe"},
+		},
+	}); err != nil {
+		return false
+	}
+	frame, err := proto.NewDecoder(conn).ReadFrame()
+	if err != nil {
+		return false
+	}
+	var response proto.Response
+	if err := json.Unmarshal(frame, &response); err != nil {
+		return false
+	}
+	return response.Err == nil
 }
 
 // runnerConfigDir resolves the runner's config directory under the user's
