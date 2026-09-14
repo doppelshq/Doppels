@@ -433,6 +433,78 @@ func TestSubscribeUnsubscribesOnConnectionClose(t *testing.T) {
 	}
 }
 
+// TestByteBudgetTracksBacklogNotLifetimeTotal reproduces review finding 5:
+// deliver() added to e.bytes on every send but forward() never subtracted
+// after dequeuing, so the "4 MiB per subscriber" budget (RFC §10) measured
+// cumulative lifetime traffic instead of actual pending backlog. A
+// subscriber drained promptly must never be gapped merely because it has
+// received more than 4 MiB in total over its lifetime.
+func TestByteBudgetTracksBacklogNotLifetimeTotal(t *testing.T) {
+	m := &Manager{subs: make(map[string][]*runSubscriber)}
+	sub := newFakeSubscriber()
+	entry := m.addSubscriber("run-x", sub)
+	entry.setReplayBoundary(-1)
+	entry.start()
+
+	payload := make([]byte, 64<<10) // 64 KiB per event
+	for i := range payload {
+		payload[i] = 'x'
+	}
+	const events = 200 // 200 * 64 KiB = 12.5 MiB total, well over the 4 MiB budget
+	for i := 0; i < events; i++ {
+		entry.deliver(proto.RunEventPayload{
+			RunID: "run-x", Sequence: i, Type: "step_started",
+			Data: map[string]any{"blob": string(payload)},
+		})
+		// Pace to the consumer so the *pending backlog* never approaches the
+		// budget: this isolates "cumulative lifetime total" (the bug) from
+		// "genuine backlog overflow" (tested separately below), which would
+		// otherwise legitimately gap if the producer outran the forwarder.
+		<-sub.notify
+	}
+
+	delivered := sub.waitForEvents(t, events)
+	if len(delivered) != events {
+		t.Fatalf("delivered = %d, want %d", len(delivered), events)
+	}
+	sub.mu.Lock()
+	gaps := len(sub.gaps)
+	sub.mu.Unlock()
+	if gaps != 0 {
+		t.Fatalf("subscriber was gapped despite being drained promptly: %d gaps", gaps)
+	}
+}
+
+// TestByteBudgetStillGapsOnRealBacklogOverflow guards the other side of
+// finding 5's fix: an undrained subscriber whose *pending* backlog exceeds
+// the byte budget must still be gapped, and must receive nothing delivered
+// after the point of overflow.
+func TestByteBudgetStillGapsOnRealBacklogOverflow(t *testing.T) {
+	m := &Manager{subs: make(map[string][]*runSubscriber)}
+	sub := newFakeSubscriber()
+	entry := m.addSubscriber("run-x", sub)
+	entry.setReplayBoundary(-1)
+	// Deliberately never call entry.start(): the backlog must accumulate
+	// undrained so the byte budget alone forces a gap.
+
+	payload := make([]byte, 512<<10) // 512 KiB per event; 4 MiB / 512 KiB = 8 events
+	for i := range payload {
+		payload[i] = 'x'
+	}
+	for i := 0; i < 20; i++ {
+		entry.deliver(proto.RunEventPayload{
+			RunID: "run-x", Sequence: i, Type: "step_started",
+			Data: map[string]any{"blob": string(payload)},
+		})
+	}
+	entry.mu.Lock()
+	stopped := entry.stopped
+	entry.mu.Unlock()
+	if !stopped {
+		t.Fatal("subscriber was never gapped despite a backlog far exceeding the 4 MiB budget")
+	}
+}
+
 func addSubscriberForTest(m *Manager, runID string) *runSubscriber {
 	sub := newFakeSubscriber()
 	entry := m.addSubscriber(runID, sub)

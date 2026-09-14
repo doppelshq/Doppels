@@ -71,6 +71,10 @@ func (e *runSubscriber) forward() {
 	for event := range e.events {
 		e.mu.Lock()
 		skip := event.Sequence <= e.lastReplay
+		// The byte budget tracks pending backlog, not lifetime traffic: an
+		// event leaving the queue here frees its share of the budget for
+		// whatever deliver() admits next.
+		e.bytes -= approxEventSize(event)
 		e.mu.Unlock()
 		if skip {
 			continue
