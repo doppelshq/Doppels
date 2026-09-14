@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"doppels.so/cli/internal/listener"
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/projectlock"
@@ -476,17 +477,7 @@ func (app *App) writeJSON(value any) {
 }
 
 func findCapability(catalog *manifest.Catalog, name, version string) (manifest.CapabilityDefinition, error) {
-	matches := catalog.Capabilities[name]
-	if version != "" {
-		matches = filterCapabilities(matches, version)
-	}
-	if len(matches) == 0 {
-		return manifest.CapabilityDefinition{}, fmt.Errorf("Capability %s not found", name)
-	}
-	if len(matches) > 1 {
-		return manifest.CapabilityDefinition{}, fmt.Errorf("Capability %s has multiple revisions; include @version", name)
-	}
-	return matches[0], nil
+	return listener.FindCapability(catalog, name, version)
 }
 
 func filterCapabilities(definitions []manifest.CapabilityDefinition, version string) []manifest.CapabilityDefinition {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"doppels.so/cli/internal/execution"
 )
@@ -40,6 +41,25 @@ func TestSanitizeRunEventNeverLeaksLocalExecutionData(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Errorf("sanitized event lost %q: %s", required, text)
 		}
+	}
+}
+
+// TestSanitizeRunEventTruncatesTimestampToMillisecond pins the wire format:
+// the control plane stores microsecond timestamps and echoes them back in
+// acknowledgements, so sub-millisecond digits would never round-trip and
+// every submission would fail payload comparison on nanosecond clocks.
+func TestSanitizeRunEventTruncatesTimestampToMillisecond(t *testing.T) {
+	event := execution.RunEvent{
+		APIVersion: APIVersion, Kind: "RunEvent", RunID: testRunID, Sequence: 0,
+		OccurredAt: testNow.Add(333445556 * time.Nanosecond), Type: "run_created",
+	}
+	public := SanitizeRunEvent(event)
+	if public.OccurredAt.Nanosecond()%int(time.Millisecond) != 0 {
+		t.Fatalf("occurredAt kept sub-millisecond digits: %v", public.OccurredAt)
+	}
+	want := testNow.Add(333 * time.Millisecond)
+	if !public.OccurredAt.Equal(want) {
+		t.Fatalf("occurredAt = %v, want %v", public.OccurredAt, want)
 	}
 }
 

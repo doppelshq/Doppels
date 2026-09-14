@@ -48,6 +48,13 @@ type Index struct {
 	root string
 }
 
+// busyTimeoutMS is the SQLITE_BUSY wait applied to every connection in the
+// pool. Long-lived daemon writers and migration tools may race briefly when
+// both touch the index; waiting up to this many milliseconds before returning
+// SQLITE_BUSY lets concurrent writers finish cleanly without holding a mutex
+// in Go. Tests in long_lived_test.go pin this contract.
+const busyTimeoutMS = 5000
+
 func Open(projectRoot string) (*Index, error) {
 	root, err := filepath.Abs(projectRoot)
 	if err != nil {
@@ -62,7 +69,20 @@ func Open(projectRoot string) (*Index, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open runs.db: %w", err)
 	}
+	// Long-lived daemon contract: a single writer connection per *Index
+	// instance. Concurrent writers inside the same Index are serialized by the
+	// database engine; concurrent writers across Index instances (daemon +
+	// CLI smoke) must rely on WAL + busy_timeout.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec(`PRAGMA foreign_keys = ON`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA busy_timeout = %d`, busyTimeoutMS)); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

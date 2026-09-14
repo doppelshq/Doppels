@@ -456,12 +456,35 @@ func (r *runner) executeStep(ctx context.Context, step manifest.Step, workingDir
 	if limit <= 0 {
 		limit = DefaultLogStreamLimit
 	}
-	stdout := newCappedWriter(limit)
+stdout := newCappedWriter(limit)
 	stderr := newCappedWriter(limit)
-	command.Stdout, command.Stderr = stdout, stderr
+	var stdoutRedactor, stderrRedactor *streamedRedactor
+	if r.options.LogStream != nil {
+		// Post-redact live stream: each subprocess chunk is fanned out raw to
+		// the capped disk writer and through the streamedRedactor to the
+		// LogFunc. The redactor keeps split-secret state so a token split
+		// across two writes still gets masked, and the live bytes match the
+		// disk bytes that redact() emits at end-of-step.
+		stdoutRedactor = newStreamedRedactor(secrets)
+		stderrRedactor = newStreamedRedactor(secrets)
+		command.Stdout = teeWriter{disk: stdout, live: LogFuncToWriter(stdoutRedactor.log(LogStreamStdout, r.options.LogStream), LogStreamStdout)}
+		command.Stderr = teeWriter{disk: stderr, live: LogFuncToWriter(stderrRedactor.log(LogStreamStderr, r.options.LogStream), LogStreamStderr)}
+	} else {
+		command.Stdout, command.Stderr = stdout, stderr
+	}
 	started := time.Now()
 	runErr := command.Run()
 	result.Duration = time.Since(started)
+	if stdoutRedactor != nil {
+		if leftover := stdoutRedactor.close(); len(leftover) > 0 {
+			r.options.LogStream(LogStreamStdout, leftover)
+		}
+	}
+	if stderrRedactor != nil {
+		if leftover := stderrRedactor.close(); len(leftover) > 0 {
+			r.options.LogStream(LogStreamStderr, leftover)
+		}
+	}
 	result.Truncated = stdout.Truncated() || stderr.Truncated()
 	redactedStdout := finalizeLogBytes(redact(stdout.Bytes(), secrets), stdout.Truncated(), limit)
 	redactedStderr := finalizeLogBytes(redact(stderr.Bytes(), secrets), stderr.Truncated(), limit)

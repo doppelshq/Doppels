@@ -394,6 +394,9 @@ func (channel *Channel) Next(ctx context.Context) (Update, error) {
 }
 
 func (channel *Channel) SubmitRun(ctx context.Context, run execution.RunRecord) (*ShareMessage, error) {
+	// Same wire-format truncation as SanitizeRunEvent: the ack comparison is
+	// exact, and the control plane cannot echo back sub-millisecond digits.
+	run.CreatedAt = run.CreatedAt.UTC().Truncate(time.Millisecond)
 	return channel.submit(ctx, "run_submitted", "run_recorded", run)
 }
 

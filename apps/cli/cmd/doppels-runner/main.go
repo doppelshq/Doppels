@@ -1,0 +1,135 @@
+// Command doppels-runner is the persistent Doppels Runner daemon (RFC 001):
+// it owns local execution authority and exposes the v1 IPC over a Unix Domain
+// Socket (or, post-alpha, a Windows Named Pipe). Desktop and CLI clients
+// connect to it; the Runner never executes Steps requested through any other
+// channel.
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
+
+	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runner/server"
+	"doppels.so/cli/internal/runner/transport"
+)
+
+func main() {
+	socket := flag.String("socket", "", "path to the IPC socket (default: <configdir>/runner.sock)")
+	tokenFlag := flag.String("token", "", "runner token clients must present at initialize (default: read from <socket-dir>/runner.token or generated)")
+	runnerVersion := flag.String("runner-version", "0.1.0-dev", "runner version reported in initialize")
+	configDir := flag.String("config", "", "runner config dir (default: XDG user config + /doppels)")
+	flag.Parse()
+
+	if err := run(*socket, *tokenFlag, *runnerVersion, *configDir); err != nil {
+		log.Fatalf("doppels-runner: %v", err)
+	}
+}
+
+func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
+	if configDir == "" {
+		defaultDir, err := runnerConfigDir()
+		if err != nil {
+			return err
+		}
+		configDir = defaultDir
+	}
+	if socketPath == "" {
+		socketPath = filepath.Join(configDir, "runner.sock")
+	}
+	token, err := resolveToken(tokenFlag, filepath.Join(configDir, "runner.token"))
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return fmt.Errorf("config dir: %w", err)
+	}
+
+	log.Printf("doppels-runner: listening on %s", socketPath)
+	listener, err := transport.Unix{}.Listen(socketPath)
+	if err != nil {
+		return fmt.Errorf("listen: %w", err)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	startedAt := time.Now().UTC().Format(time.RFC3339)
+	hostname, _ := os.Hostname()
+	_ = hostname
+	config := server.Config{
+		Token:         token,
+		RunnerVersion: runnerVersion,
+		Capabilities:  []string{proto.CapabilityLiveLogs},
+		NodeStatus: func() proto.NodeStatus {
+			return proto.NodeStatus{
+				State:           "online",
+				RunnerVersion:   runnerVersion,
+				ProtocolVersion: proto.ProtocolVersion,
+				StartedAt:       startedAt,
+				Workspaces:      []proto.WorkspaceSummary{},
+			}
+		},
+		Log: log.Printf,
+	}
+	srv := server.New(config)
+	return srv.Serve(ctx, listener)
+}
+
+// runnerConfigDir resolves the runner's config directory under the user's
+// config root; DOPPELS_RUNNER_CONFIG overrides.
+func runnerConfigDir() (string, error) {
+	if override := os.Getenv("DOPPELS_RUNNER_CONFIG"); override != "" {
+		return override, nil
+	}
+	base, err := os.UserConfigDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "doppels"), nil
+}
+
+// resolveToken honours the explicit flag, otherwise reads a persisted
+// token, otherwise generates + persists a fresh 32-byte hex one.
+func resolveToken(flagValue, path string) (string, error) {
+	if flagValue != "" {
+		return flagValue, nil
+	}
+	if data, err := os.ReadFile(path); err == nil {
+		text := string(data)
+		if len(text) >= 32 {
+			return text[:len(text)-len(text)%64], nil // tolerate trailing newline
+		}
+	}
+	token, err := generateToken()
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	return token, nil
+}
+
+func generateToken() (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf[:]), nil
+}
+
+var _ = errors.New

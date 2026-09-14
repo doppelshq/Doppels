@@ -1,0 +1,257 @@
+// Package server implements the Doppels Runner JSON-RPC dispatch loop
+// (RFC 001): handshake enforcement, token auth, subscriptions, and the
+// v1 method surface. Domain behavior is injected through Config so the
+// server core stays wire-protocol-only.
+package server
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"sync"
+	"time"
+
+	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runner/transport"
+)
+
+// Config wires the domain into the wire protocol.
+type Config struct {
+	// Token authenticates clients (socket permissions are the other half).
+	Token string
+	// RunnerVersion is reported by initialize/getNodeStatus.
+	RunnerVersion string
+	// NodeStatus snapshots the current node state.
+	NodeStatus func() proto.NodeStatus
+	// Capabilities advertises optional features (RFC §7).
+	Capabilities []string
+	// OnShutdown runs after the shutdown ack is flushed.
+	OnShutdown func()
+	// HandshakeTimeout bounds how long a connection may live without
+	// initialize (default 10s per RFC §6).
+	HandshakeTimeout time.Duration
+	// Log receives one-line diagnostics (nil-safe).
+	Log func(format string, args ...any)
+}
+
+type handler func(conn *connection, params []byte) (any, *proto.Error)
+
+// Server dispatches v1 methods over accepted connections.
+type Server struct {
+	config   Config
+	handlers map[string]handler
+
+	mu       sync.Mutex
+	conns    map[*connection]struct{}
+	shutdown bool
+	closed   chan struct{}
+	closeOne sync.Once
+	listener transport.Listener
+}
+
+// New builds a Server with the core v1 method surface. Domain methods
+// (workspaces, capabilities, runs, approvals) attach via Handle.
+func New(config Config) *Server {
+	if config.HandshakeTimeout <= 0 {
+		config.HandshakeTimeout = 10 * time.Second
+	}
+	if config.NodeStatus == nil {
+		config.NodeStatus = func() proto.NodeStatus {
+			return proto.NodeStatus{State: "degraded", Workspaces: []proto.WorkspaceSummary{}}
+		}
+	}
+	if config.Log == nil {
+		config.Log = func(string, ...any) {}
+	}
+	server := &Server{
+		config:   config,
+		handlers: make(map[string]handler),
+		conns:    make(map[*connection]struct{}),
+		closed:   make(chan struct{}),
+	}
+	server.handlers["v1/initialize"] = server.handleInitialize
+	server.handlers["v1/ping"] = server.handlePing
+	server.handlers["v1/getNodeStatus"] = server.handleGetNodeStatus
+	server.handlers["v1/subscribeNode"] = server.handleSubscribeNode
+	server.handlers["v1/shutdown"] = server.handleShutdown
+	return server
+}
+
+// Handle registers (or replaces) a v1 method. Methods run on the reading
+// goroutine of their connection; long work must spawn its own goroutine.
+func (s *Server) Handle(method string, run handler) {
+	s.handlers[method] = run
+}
+
+// Serve accepts connections until ctx ends, the listener dies, or a client
+// requests shutdown. It always closes the listener.
+func (s *Server) Serve(ctx context.Context, listener transport.Listener) error {
+	defer listener.Close()
+	s.mu.Lock()
+	s.listener = listener
+	stopping := s.shutdown
+	select {
+	case <-s.closed:
+		stopping = true
+	default:
+	}
+	s.mu.Unlock()
+	if stopping {
+		return nil
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			s.Close()
+		case <-s.closed:
+		}
+	}()
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			select {
+			case <-s.closed:
+				return nil
+			default:
+			}
+			if errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("accept: %w", err)
+		}
+		connection := newConnection(s, conn)
+		s.mu.Lock()
+		if s.shutdown {
+			s.mu.Unlock()
+			conn.Close()
+			continue
+		}
+		s.conns[connection] = struct{}{}
+		s.mu.Unlock()
+		go connection.serve()
+	}
+}
+
+// Close stops accepting, closes every connection, and signals Serve to
+// return. Safe to call multiple times.
+func (s *Server) Close() {
+	s.closeOne.Do(func() {
+		close(s.closed)
+	})
+	s.mu.Lock()
+	listener := s.listener
+	s.listener = nil
+	for conn := range s.conns {
+		conn.close()
+	}
+	s.conns = make(map[*connection]struct{})
+	s.mu.Unlock()
+	if listener != nil {
+		listener.Close()
+	}
+}
+
+// EmitNodeEvent delivers a v1/nodeEvent notification to every subscribed
+// connection. Delivery is best-effort: a stalled subscriber drops events.
+func (s *Server) EmitNodeEvent(event proto.NodeEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for conn := range s.conns {
+		conn.sendNodeEvent(event)
+	}
+}
+
+func (s *Server) nodeStatusSnapshot() proto.NodeStatus {
+	status := s.config.NodeStatus()
+	if status.ProtocolVersion == 0 {
+		status.ProtocolVersion = proto.ProtocolVersion
+	}
+	if status.RunnerVersion == "" {
+		status.RunnerVersion = s.config.RunnerVersion
+	}
+	if status.Workspaces == nil {
+		status.Workspaces = []proto.WorkspaceSummary{}
+	}
+	return status
+}
+
+func (s *Server) handleInitialize(conn *connection, params []byte) (any, *proto.Error) {
+	var request proto.InitializeParams
+	if err := decodeParams(params, &request); err != nil {
+		return nil, err
+	}
+	if request.Token != s.config.Token {
+		return nil, &proto.Error{Code: proto.CodeAuthFailed, Message: "invalid runner token"}
+	}
+	var versioned struct {
+		ProtocolVersion int `json:"protocolVersion"`
+	}
+	_ = decodeParams(params, &versioned)
+	if versioned.ProtocolVersion != 0 && versioned.ProtocolVersion != proto.ProtocolVersion {
+		return nil, &proto.Error{
+			Code:    proto.CodeVersionMismatch,
+			Message: "protocol version not supported",
+			Data:    map[string]int{"expected": versioned.ProtocolVersion, "supported": proto.ProtocolVersion},
+		}
+	}
+	conn.initialize(request.Client.Name)
+	capabilities := s.config.Capabilities
+	if capabilities == nil {
+		capabilities = []string{}
+	}
+	return proto.InitializeResult{
+		ProtocolVersion: proto.ProtocolVersion,
+		RunnerVersion:   s.config.RunnerVersion,
+		Capabilities:    capabilities,
+		NodeStatus:      s.nodeStatusSnapshot(),
+	}, nil
+}
+
+func (s *Server) handlePing(*connection, []byte) (any, *proto.Error) {
+	return map[string]string{"pong": time.Now().UTC().Format(time.RFC3339Nano)}, nil
+}
+
+func (s *Server) handleGetNodeStatus(*connection, []byte) (any, *proto.Error) {
+	return s.nodeStatusSnapshot(), nil
+}
+
+func (s *Server) handleSubscribeNode(conn *connection, _ []byte) (any, *proto.Error) {
+	conn.setNodeSubscribed(true)
+	return s.nodeStatusSnapshot(), nil
+}
+
+func (s *Server) handleShutdown(conn *connection, params []byte) (any, *proto.Error) {
+	var request struct {
+		Reason string `json:"reason"`
+	}
+	if len(params) > 0 {
+		_ = decodeParams(params, &request)
+	}
+	s.config.Log("shutdown requested: %s", request.Reason)
+	s.mu.Lock()
+	already := s.shutdown
+	s.shutdown = true
+	s.mu.Unlock()
+	if !already {
+		go func() {
+			// Let the ack flush, then tear everything down (RFC §3).
+			time.Sleep(50 * time.Millisecond)
+			if s.config.OnShutdown != nil {
+				s.config.OnShutdown()
+			}
+			s.Close()
+		}()
+	}
+	return map[string]any{}, nil
+}
+
+func decodeParams(params []byte, out any) *proto.Error {
+	if len(params) == 0 {
+		return nil
+	}
+	if err := unmarshalParams(params, out); err != nil {
+		return &proto.Error{Code: proto.CodeInvalidParams, Message: err.Error()}
+	}
+	return nil
+}

@@ -9,16 +9,13 @@ import (
 	"time"
 
 	"doppels.so/cli/internal/configstore"
+	"doppels.so/cli/internal/listener"
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/projectlock"
 	"doppels.so/cli/internal/registryclient"
 )
 
-type listenFilters struct {
-	Organization string
-	Space        string
-	Capability   string
-}
+type listenFilters = listener.Filters
 
 type listenCapabilityView struct {
 	Organization   string
@@ -87,13 +84,13 @@ type listenPromptQueue struct {
 	Queued []string
 }
 
-type fulfillDecision int
+type fulfillDecision = listener.Decision
 
 const (
-	fulfillApprove fulfillDecision = iota
-	fulfillReject
-	fulfillSkip
-	fulfillBackground
+	fulfillApprove    fulfillDecision = listener.DecisionApprove
+	fulfillReject     fulfillDecision = listener.DecisionReject
+	fulfillSkip       fulfillDecision = listener.DecisionSkip
+	fulfillBackground fulfillDecision = listener.DecisionBackground
 )
 
 func (app *App) resolveListenScope(server, apiToken string, store *configstore.Store, catalog *manifest.Catalog, filters listenFilters) (listenScopeView, listenFilters, *registryclient.Client, error) {
