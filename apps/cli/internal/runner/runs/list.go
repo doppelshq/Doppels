@@ -104,6 +104,23 @@ func (m *Manager) listRunsAcrossWorkspaces(params ListParams) (ListResult, *prot
 		if decoded.Capability != params.Capability || decoded.Status != params.Status {
 			return ListResult{}, invalidParams("cursor filters do not match request")
 		}
+		// The cursor is client-supplied and opaque: its "roots" are never
+		// authoritative on their own. m.index() creates a .doppels
+		// directory as a side effect (runindex.Open), so a forged cursor
+		// or one naming a workspace removed since it was issued must be
+		// rejected here — before any lookup — never used to touch the
+		// filesystem outside the current registry.
+		registered := map[string]bool{}
+		for _, summary := range m.workspaces.ListWorkspaces() {
+			if summary.Health != "missingRoot" {
+				registered[summary.Root] = true
+			}
+		}
+		for root := range decoded.Roots {
+			if !registered[root] {
+				return ListResult{}, &proto.Error{Code: proto.CodeWorkspaceNotFound, Message: "cursor references a workspace that is no longer registered: " + root}
+			}
+		}
 		roots = decoded.Roots
 	} else {
 		for _, summary := range m.workspaces.ListWorkspaces() {

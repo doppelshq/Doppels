@@ -2,6 +2,8 @@ package runs
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,12 +53,74 @@ func TestListRunsWithinWorkspacePaginatesAndFilters(t *testing.T) {
 	}
 }
 
-func TestListRunsAcrossWorkspacesMergesByCreatedAtDesc(t *testing.T) {
+// TestListRunsRejectsCursorReferencingAnUnregisteredRoot reproduces review
+// finding 6: the cross-workspace cursor is client-supplied and opaque, but
+// its "roots" map was trusted as authoritative — listRuns called m.index()
+// (which MkdirAll's a .doppels directory) on whatever path a cursor named,
+// registered or not. A forged cursor must be rejected as a domain/params
+// error before any filesystem mutation, never silently create state outside
+// the registry.
+func TestListRunsRejectsCursorReferencingAnUnregisteredRoot(t *testing.T) {
 	base := t.TempDir()
 	registry := workspace.NewRegistry(filepath.Join(base, "workspaces.json"))
 	service := workspace.NewService(registry, workspace.Deps{Host: manifest.OSHost{}})
-	rootA := filepath.Join(base, "a")
-	rootB := filepath.Join(base, "b")
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	forgedRoot := filepath.Join(base, "not-a-registered-workspace")
+	cursor := forgeCrossCursor(t, map[string]string{forgedRoot: ""})
+
+	if _, rpcErr := manager.ListRuns(ListParams{Cursor: cursor}); rpcErr == nil {
+		t.Fatal("ListRuns with a cursor naming an unregistered root should have errored")
+	}
+	if _, err := os.Stat(filepath.Join(forgedRoot, ".doppels")); !os.IsNotExist(err) {
+		t.Fatalf(".doppels was created outside the registry at %s (stat err = %v)", forgedRoot, err)
+	}
+}
+
+// TestListRunsRejectsCursorForARemovedWorkspace covers the legitimate
+// version of the same bug: a client held a valid cursor, the workspace was
+// then removed from the registry, and the client resumes pagination. The
+// cursor is now stale — reject it rather than silently creating (or
+// resurrecting) filesystem state for a root the registry no longer knows
+// about.
+func TestListRunsRejectsCursorForARemovedWorkspace(t *testing.T) {
+	service, rootA, rootB := twoWorkspaceService(t)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test", Environment: []string{"PATH=" + os.Getenv("PATH")}})
+	defer manager.Close()
+
+	startAndFinish(t, manager, rootA, "removed-a1")
+	startAndFinish(t, manager, rootB, "removed-b1")
+
+	cursor := forgeCrossCursor(t, map[string]string{rootA: "", rootB: ""})
+	if _, err := service.RemoveWorkspace(rootB); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, rpcErr := manager.ListRuns(ListParams{Cursor: cursor}); rpcErr == nil {
+		t.Fatal("ListRuns with a cursor for a removed workspace should have errored")
+	}
+}
+
+func forgeCrossCursor(t *testing.T, roots map[string]string) string {
+	t.Helper()
+	data, err := json.Marshal(crossCursor{Version: 1, Roots: roots})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(data)
+}
+
+// twoWorkspaceService registers two independent, runnable workspaces (each
+// with a "greet" Capability+Recipe) under one registry, for tests that need
+// genuine cross-workspace aggregation.
+func twoWorkspaceService(t *testing.T) (service *workspace.Service, rootA, rootB string) {
+	t.Helper()
+	base := t.TempDir()
+	registry := workspace.NewRegistry(filepath.Join(base, "workspaces.json"))
+	service = workspace.NewService(registry, workspace.Deps{Host: manifest.OSHost{}})
+	rootA = filepath.Join(base, "a")
+	rootB = filepath.Join(base, "b")
 	for _, root := range []string{rootA, rootB} {
 		if _, err := project.Init(root); err != nil {
 			t.Fatal(err)
@@ -91,6 +155,11 @@ returns:
 			t.Fatal(err)
 		}
 	}
+	return service, rootA, rootB
+}
+
+func TestListRunsAcrossWorkspacesMergesByCreatedAtDesc(t *testing.T) {
+	service, rootA, rootB := twoWorkspaceService(t)
 	manager := NewManager(context.Background(), service, Config{NodeID: "node-test", Environment: []string{"PATH=" + os.Getenv("PATH")}})
 	defer manager.Close()
 
