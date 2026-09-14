@@ -176,20 +176,30 @@ func (r *runner) emit(eventType, stepID string, data map[string]any) error {
 }
 
 func (r *runner) indexRun(status string, enqueueOutbox bool) error {
-	idx, err := runindex.Open(r.invocation.ProjectRoot)
-	if err != nil {
-		return fmt.Errorf("open run index: %w", err)
+	idx := r.options.RunIndex
+	if idx == nil {
+		opened, err := runindex.Open(r.invocation.ProjectRoot)
+		if err != nil {
+			return fmt.Errorf("open run index: %w", err)
+		}
+		defer opened.Close()
+		idx = opened
 	}
-	defer idx.Close()
 	recipe := ""
 	if r.result.Run.Recipe != nil {
 		recipe = r.result.Run.Recipe.Name + "@" + r.result.Run.Recipe.Version
 	}
 	record := runindex.Record{
 		ID: r.result.Run.ID, RequestID: r.result.Run.RequestID, Status: status,
-		Source: runindex.SourceLocal, Capability: r.result.Run.Capability.Name + "@" + r.result.Run.Capability.Version,
+		Source: r.invocation.Source, Capability: r.result.Run.Capability.Name + "@" + r.result.Run.Capability.Version,
 		Recipe: recipe, CreatedAt: r.result.Run.CreatedAt.UTC().Format(time.RFC3339Nano),
-		StateDir: r.result.StateDir, SyncStatus: runindex.SyncNone,
+		NodeID: r.invocation.NodeID, StateDir: r.result.StateDir, SyncStatus: runindex.SyncNone,
+	}
+	if record.Source == "" {
+		record.Source = runindex.SourceLocal
+	}
+	if enqueueOutbox {
+		record.FinishedAt = r.now().UTC().Format(time.RFC3339Nano)
 	}
 	if err := idx.Upsert(record); err != nil {
 		return fmt.Errorf("index Run: %w", err)

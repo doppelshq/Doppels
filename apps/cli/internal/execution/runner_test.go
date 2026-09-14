@@ -236,6 +236,48 @@ func TestExecuteIndexesSucceededEvenIfTerminalPublishFails(t *testing.T) {
 	assertIndexedStatus(t, root, result.Run.ID, "succeeded")
 }
 
+func TestExecuteUsesInjectedLongLivedIndex(t *testing.T) {
+	root := t.TempDir()
+	index := &recordingRunIndex{}
+	inv := invocation(root, scalarCapability(), scalarRecipe("export VALUE=ok"))
+	inv.Source = "desktop"
+	result, err := Execute(context.Background(), inv, Options{
+		Environment: []string{"PATH=" + os.Getenv("PATH")},
+		RunIndex:    index,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".doppels", "runs.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Execute opened a second short-lived runs.db: %v", err)
+	}
+	if len(index.records) < 2 {
+		t.Fatalf("indexed records = %#v", index.records)
+	}
+	last := index.records[len(index.records)-1]
+	if last.ID != result.Run.ID || last.Status != "succeeded" || last.Source != "desktop" || last.NodeID != "local" || last.FinishedAt == "" {
+		t.Fatalf("terminal indexed record = %#v", last)
+	}
+	if index.enqueued != 1 {
+		t.Fatalf("outbox enqueue calls = %d, want 1", index.enqueued)
+	}
+}
+
+type recordingRunIndex struct {
+	records  []runindex.Record
+	enqueued int
+}
+
+func (i *recordingRunIndex) Upsert(record runindex.Record) error {
+	i.records = append(i.records, record)
+	return nil
+}
+
+func (i *recordingRunIndex) EnqueueOutbox(string, any) error {
+	i.enqueued++
+	return nil
+}
+
 func assertIndexedStatus(t *testing.T, root, runID, want string) {
 	t.Helper()
 	idx, err := runindex.Open(root)

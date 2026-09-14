@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"doppels.so/cli/internal/manifest"
+	"doppels.so/cli/internal/runindex"
 )
 
 const APIVersion = manifest.APIVersion
@@ -178,6 +179,7 @@ type Invocation struct {
 	Executor         ActorReference
 	AssignedTo       *AssignmentReference
 	NodeID           string
+	Source           string
 	Space            string
 	ShareID          string
 	IdempotencyKey   string
@@ -202,6 +204,10 @@ type Options struct {
 	Environment   []string
 	LookupCommand func(string) (string, error)
 	Now           func() time.Time
+	// RunIndex lets a long-lived coordinator own one SQLite handle for the
+	// workspace. Nil preserves standalone CLI behavior by opening an index for
+	// each update.
+	RunIndex RunIndex
 	// LogStreamLimit caps retained stdout/stderr bytes per Step stream.
 	// Zero means DefaultLogStreamLimit.
 	LogStreamLimit int
@@ -212,6 +218,11 @@ type Options struct {
 	// this to forward live output to Desktop subscribers; nil keeps the
 	// legacy path.
 	LogStream LogFunc
+}
+
+type RunIndex interface {
+	Upsert(runindex.Record) error
+	EnqueueOutbox(runID string, payload any) error
 }
 
 type StepResult struct {
