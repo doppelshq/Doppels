@@ -21,9 +21,11 @@ import (
 	"syscall"
 	"time"
 
+	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/server"
 	"doppels.so/cli/internal/runner/transport"
+	"doppels.so/cli/internal/runner/workspace"
 )
 
 func main() {
@@ -56,6 +58,11 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return fmt.Errorf("config dir: %w", err)
 	}
+	registry := workspace.NewRegistry(filepath.Join(configDir, "workspaces.json"))
+	if err := registry.Load(); err != nil {
+		return err
+	}
+	workspaces := workspace.NewService(registry, workspace.Deps{Host: manifest.OSHost{}})
 
 	log.Printf("doppels-runner: listening on %s", socketPath)
 	listener, err := transport.Unix{}.Listen(socketPath)
@@ -70,24 +77,22 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	defer cancel()
 
 	startedAt := time.Now().UTC().Format(time.RFC3339)
-	hostname, _ := os.Hostname()
-	_ = hostname
 	config := server.Config{
 		Token:         token,
 		RunnerVersion: runnerVersion,
 		Capabilities:  []string{},
 		NodeStatus: func() proto.NodeStatus {
-			return proto.NodeStatus{
+			return workspaces.NodeStatus(proto.NodeStatus{
 				State:           "online",
 				RunnerVersion:   runnerVersion,
 				ProtocolVersion: proto.ProtocolVersion,
 				StartedAt:       startedAt,
-				Workspaces:      []proto.WorkspaceSummary{},
-			}
+			})
 		},
 		Log: log.Printf,
 	}
 	srv := server.New(config)
+	workspace.RegisterRPC(srv, workspaces)
 	return srv.Serve(ctx, listener)
 }
 
