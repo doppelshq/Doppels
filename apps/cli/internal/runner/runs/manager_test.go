@@ -19,6 +19,34 @@ import (
 	"doppels.so/cli/internal/runstate"
 )
 
+// TestSourceForClientRecognizesOfficialHandshakeNames reproduces review
+// finding 11: the RFC's own handshake example (docs/runner-protocol.md §6)
+// sends client.name "doppels-desktop", and this codebase's established CLI
+// User-Agent convention (internal/shareclient, internal/registryclient) is
+// "doppels-cli" — but sourceForClient only recognized the bare "cli"/
+// "desktop" strings. Every real CLI- or Desktop-originated Run fell through
+// to "local", the same source recorded for a local-only client that never
+// identified itself at all.
+func TestSourceForClientRecognizesOfficialHandshakeNames(t *testing.T) {
+	tests := []struct {
+		name string
+		want string
+	}{
+		{"doppels-cli", "cli"},
+		{"doppels-desktop", "desktop"},
+		{"cli", "cli"},
+		{"desktop", "desktop"},
+		{"DOPPELS-CLI", "cli"},
+		{"", "local"},
+		{"something-else", "local"},
+	}
+	for _, tt := range tests {
+		if got := sourceForClient(tt.name); got != tt.want {
+			t.Errorf("sourceForClient(%q) = %q, want %q", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestStartIsAsyncPersistedAndIdempotentAcrossRestart(t *testing.T) {
 	service, root := runnerWorkspace(t, true)
 	ctx, cancel := context.WithCancel(context.Background())

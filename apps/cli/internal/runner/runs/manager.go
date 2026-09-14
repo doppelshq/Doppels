@@ -608,9 +608,9 @@ func requestFingerprint(capability string, recipe *string, inputs json.RawMessag
 
 func sourceForClient(name string) string {
 	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "cli":
+	case "cli", "doppels-cli":
 		return "cli"
-	case "desktop":
+	case "desktop", "doppels-desktop":
 		return "desktop"
 	default:
 		return "local"

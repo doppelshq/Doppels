@@ -230,6 +230,221 @@ outputs: {message: {type: string}}
 	}
 }
 
+// TestDoppelsRunnerEmitsRunStartedAndRunFinishedNodeEvents reproduces review
+// finding 11: cmd/doppels-runner built its runs.Manager without wiring
+// Config.OnStarted/OnFinished, so v1/nodeEvent {kind: runStarted|
+// runFinished} (RFC §10) was never emitted by the real daemon for genuine
+// Runs — only workspace-related node events were reachable. It also proves
+// the official handshake client name "doppels-cli" (this codebase's
+// established User-Agent convention; the RFC's own handshake example in
+// docs/runner-protocol.md §6 uses "doppels-desktop") is recorded as the
+// Run's source rather than falling through to "local".
+func TestDoppelsRunnerEmitsRunStartedAndRunFinishedNodeEvents(t *testing.T) {
+	configDir := t.TempDir()
+	socketPath := filepath.Join(configDir, "runner.sock")
+	token := strings.Repeat("b", 64)
+	binaryPath := filepath.Join(t.TempDir(), "doppels-runner")
+	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build runner binary: %v\n%s", err, output)
+	}
+
+	cmd := exec.Command(binaryPath, "--socket="+socketPath, "--token="+token, "--config="+configDir)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start binary: %v", err)
+	}
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	}()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var conn net.Conn
+	var err error
+	for time.Now().Before(deadline) {
+		conn, err = net.DialTimeout("unix", socketPath, 250*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if conn == nil {
+		t.Fatalf("dial: %v\nstderr: %s", err, stderr.String())
+	}
+	defer conn.Close()
+
+	encoder := proto.NewEncoder(conn)
+	decoder := proto.NewDecoder(conn)
+
+	if err := encoder.WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "init", "method": "v1/initialize",
+		"params": map[string]any{"token": token, "client": map[string]any{"name": "doppels-cli", "version": "0.0.0"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	initFrame, err := decoder.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var initResponse proto.Response
+	if err := json.Unmarshal(initFrame, &initResponse); err != nil {
+		t.Fatal(err)
+	}
+	if initResponse.Err != nil {
+		t.Fatalf("initialize err: %+v", initResponse.Err)
+	}
+
+	workspaceRoot := filepath.Join(configDir, "workspace")
+	if _, err := project.Init(workspaceRoot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".doppels", "capabilities", "greet.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+kind: Capability
+metadata: {name: greet, version: 1.0.0}
+inputs: {}
+outputs: {value: {type: string}}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspaceRoot, ".doppels", "recipes", "greet.yaml"), []byte(`apiVersion: doppels.so/v1alpha1
+kind: Recipe
+metadata: {name: greet-shell, version: 1.0.0}
+provides: [greet]
+runtime: shell
+defaults: {approval: never}
+steps:
+  - id: run
+    name: Run
+    run: {shell: sh, script: "export VALUE=ok"}
+    produces: {value: {env: VALUE}}
+returns: {value: "{{ steps.run.value }}"}
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	type nodeNotification struct {
+		Method string          `json:"method"`
+		Params proto.NodeEvent `json:"params"`
+	}
+	var kinds []string
+	call := func(id, method string, params any) proto.Response {
+		t.Helper()
+		if err := encoder.WriteFrame(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			frame, err := decoder.ReadFrame()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var notification nodeNotification
+			if err := json.Unmarshal(frame, &notification); err != nil {
+				t.Fatal(err)
+			}
+			if notification.Method != "" {
+				if notification.Method == "v1/nodeEvent" {
+					kinds = append(kinds, notification.Params.Kind)
+				}
+				continue
+			}
+			var got proto.Response
+			if err := json.Unmarshal(frame, &got); err != nil {
+				t.Fatal(err)
+			}
+			return got
+		}
+		t.Fatal("timed out waiting for a response")
+		return proto.Response{}
+	}
+
+	if r := call("subscribe", "v1/subscribeNode", map[string]any{}); r.Err != nil {
+		t.Fatalf("subscribeNode: %+v", r.Err)
+	}
+	if r := call("add", "v1/addWorkspace", map[string]any{"root": workspaceRoot}); r.Err != nil {
+		t.Fatalf("addWorkspace: %+v", r.Err)
+	}
+
+	started := call("start", "v1/startRun", map[string]any{
+		"workspace": workspaceRoot, "capability": "greet", "inputs": map[string]any{},
+		"approvalMode": "auto", "idempotencyKey": "e2e-node-events",
+	})
+	if started.Err != nil {
+		t.Fatalf("startRun: %+v", started.Err)
+	}
+	var startResult struct {
+		RunID string `json:"runId"`
+	}
+	if err := unmarshalResult(started.Result, &startResult); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for run_finished to actually reach the wire: node events are
+	// notifications, decoupled from the startRun response.
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		hasStarted, hasFinished := false, false
+		for _, kind := range kinds {
+			if kind == proto.NodeEventRunStarted {
+				hasStarted = true
+			}
+			if kind == proto.NodeEventRunFinished {
+				hasFinished = true
+			}
+		}
+		if hasStarted && hasFinished {
+			break
+		}
+		call("poll", "v1/ping", map[string]any{})
+	}
+	foundStarted, foundFinished := false, false
+	startedIndex, finishedIndex := -1, -1
+	for i, kind := range kinds {
+		if kind == proto.NodeEventRunStarted {
+			foundStarted, startedIndex = true, i
+		}
+		if kind == proto.NodeEventRunFinished {
+			foundFinished, finishedIndex = true, i
+		}
+	}
+	if !foundStarted || !foundFinished {
+		t.Fatalf("node event kinds = %v, want runStarted and runFinished", kinds)
+	}
+	if startedIndex > finishedIndex {
+		t.Fatalf("runFinished (index %d) arrived before runStarted (index %d)", finishedIndex, startedIndex)
+	}
+
+	got := call("get", "v1/getRun", map[string]any{"runId": startResult.RunID})
+	if got.Err != nil {
+		t.Fatalf("getRun: %+v", got.Err)
+	}
+	var summary struct {
+		Summary struct {
+			Source string `json:"source"`
+			Status string `json:"status"`
+		} `json:"summary"`
+	}
+	if err := unmarshalResult(got.Result, &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.Summary.Source != "cli" {
+		t.Fatalf("Run source = %q, want %q for handshake client.name %q", summary.Summary.Source, "cli", "doppels-cli")
+	}
+	if summary.Summary.Status != "succeeded" {
+		t.Fatalf("Run status = %q, want succeeded", summary.Summary.Status)
+	}
+}
+
 func TestResolveTokenRejectsMalformedPersistedToken(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "runner.token")
 	if err := os.WriteFile(path, []byte(strings.Repeat("0", 32)), 0o600); err != nil {

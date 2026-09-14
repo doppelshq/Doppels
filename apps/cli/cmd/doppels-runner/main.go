@@ -77,7 +77,19 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	manager := runs.NewManager(ctx, workspaces, runs.Config{Log: log.Printf})
+	// srv is assigned below, after config is built; OnStarted/OnFinished
+	// only fire once Runs actually start, well after that assignment
+	// completes, so closing over it here is safe.
+	var srv *server.Server
+	manager := runs.NewManager(ctx, workspaces, runs.Config{
+		Log: log.Printf,
+		OnStarted: func(summary proto.RunSummary) {
+			srv.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventRunStarted, Payload: summary})
+		},
+		OnFinished: func(summary proto.RunSummary) {
+			srv.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventRunFinished, Payload: summary})
+		},
+	})
 	defer manager.Close()
 
 	startedAt := time.Now().UTC().Format(time.RFC3339)
@@ -100,7 +112,7 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 		},
 		Log: log.Printf,
 	}
-	srv := server.New(config)
+	srv = server.New(config)
 	workspace.RegisterRPC(srv, workspaces)
 	runs.RegisterRPC(srv, manager)
 	return srv.Serve(ctx, listener)
