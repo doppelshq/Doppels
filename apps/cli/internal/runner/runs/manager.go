@@ -25,6 +25,20 @@ import (
 	"doppels.so/cli/internal/runstate"
 )
 
+// runIndex is the subset of *runindex.Index the Manager depends on. It
+// exists so tests can inject a decorator (e.g. a fault-injecting Upsert) to
+// deterministically reproduce persistence-ordering bugs without sleeps or
+// timing races.
+type runIndex interface {
+	Get(id string) (runindex.Record, error)
+	Upsert(record runindex.Record) error
+	ReserveStart(record runindex.Record, key, fingerprint string) (runindex.IdempotencyRecord, bool, error)
+	EnqueueOutbox(runID string, payload any) error
+	List() ([]runindex.Record, error)
+	ListPage(query runindex.ListQuery) (runindex.Page, error)
+	Close() error
+}
+
 type Config struct {
 	NodeID      string
 	Environment []string
@@ -52,7 +66,7 @@ type Manager struct {
 	config     Config
 
 	mu      sync.Mutex
-	indexes map[string]*runindex.Index
+	indexes map[string]runIndex
 	active  map[string]*activeRun
 	closed  bool
 	wg      sync.WaitGroup
@@ -66,6 +80,12 @@ type Manager struct {
 	// before Start would durably reserve, letting tests deterministically
 	// interleave Start with a concurrent Close. Always nil in production.
 	testBeforeReserve func()
+
+	// openIndex constructs the runIndex for a workspace root. Overridable in
+	// tests to wrap the real *runindex.Index in a fault-injecting decorator
+	// (e.g. a failing Upsert), reproducing persistence-ordering bugs
+	// deterministically instead of via timing.
+	openIndex func(root string) (runIndex, error)
 }
 
 func NewManager(ctx context.Context, workspaces *workspace.Service, config Config) *Manager {
@@ -84,8 +104,9 @@ func NewManager(ctx context.Context, workspaces *workspace.Service, config Confi
 	}
 	return &Manager{
 		ctx: ctx, cancel: cancel, workspaces: workspaces, config: config,
-		indexes: make(map[string]*runindex.Index), active: make(map[string]*activeRun),
-		subs: make(map[string][]*runSubscriber),
+		indexes: make(map[string]runIndex), active: make(map[string]*activeRun),
+		subs:      make(map[string][]*runSubscriber),
+		openIndex: func(root string) (runIndex, error) { return runindex.Open(root) },
 	}
 }
 
@@ -215,7 +236,7 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 	return result, nil
 }
 
-func (m *Manager) execute(ctx context.Context, active *activeRun, idx *runindex.Index, resolved workspace.Execution, inputs map[string]any, key string, ids StartResult, source, approvalMode string, createdAt time.Time) {
+func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, resolved workspace.Execution, inputs map[string]any, key string, ids StartResult, source, approvalMode string, createdAt time.Time) {
 	defer m.wg.Done()
 	defer close(active.done)
 	defer active.cancel()
@@ -264,7 +285,7 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx *runindex.
 	}
 }
 
-func (m *Manager) index(root string) (*runindex.Index, error) {
+func (m *Manager) index(root string) (runIndex, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.closed {
@@ -273,7 +294,7 @@ func (m *Manager) index(root string) (*runindex.Index, error) {
 	if idx := m.indexes[root]; idx != nil {
 		return idx, nil
 	}
-	idx, err := runindex.Open(root)
+	idx, err := m.openIndex(root)
 	if err != nil {
 		return nil, err
 	}
@@ -298,7 +319,7 @@ func (m *Manager) index(root string) (*runindex.Index, error) {
 // Without this reconciliation, a durable idempotent retry for an orphaned
 // reservation would return a stable {requestId, runId} that can never be
 // loaded (no files were ever written) and would stay "running" forever.
-func reconcileOrphanedReservations(root string, idx *runindex.Index, now func() time.Time) error {
+func reconcileOrphanedReservations(root string, idx runIndex, now func() time.Time) error {
 	records, err := idx.List()
 	if err != nil {
 		return err
@@ -326,7 +347,7 @@ func reconcileOrphanedReservations(root string, idx *runindex.Index, now func() 
 // runner.initialize() persists them) followed by run_created and
 // run_interrupted. This keeps the idempotency contract's promise that a
 // retry with the same key always returns the same, loadable reference.
-func materializeOrphanedReservation(root, runDir string, record runindex.Record, now func() time.Time, idx *runindex.Index) error {
+func materializeOrphanedReservation(root, runDir string, record runindex.Record, now func() time.Time, idx runIndex) error {
 	// A partially-initialized directory (crash mid-Open, before run.json) has
 	// no observers depending on its contents: safe to clear and retry.
 	if err := os.RemoveAll(runDir); err != nil {
@@ -432,9 +453,19 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 		return "", internalError(err)
 	}
 	if isTerminal(detail.Summary.Status) {
+		// events.jsonl already has the terminal event (e.g. a previous
+		// Cancel appended it but failed to persist the index update, or the
+		// engine finished independently); reconcile the stale index row
+		// without re-emitting the event, but still broadcast it — a live
+		// subscriber that was registered before this happened must not be
+		// left waiting forever for a terminal event that already occurred.
+		wasStale := record.Status != detail.Summary.Status
 		record.Status = detail.Summary.Status
 		if err := idx.Upsert(record); err != nil {
 			return "", internalError(err)
+		}
+		if wasStale && len(detail.Events) > 0 {
+			m.broadcast(runID, payloadFromEvent(detail.Events[len(detail.Events)-1]))
 		}
 		return wireStatus(record.Status), nil
 	}
@@ -453,9 +484,11 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 	if err := store.AppendEvent(event); err != nil {
 		return "", internalError(err)
 	}
-	m.broadcast(runID, payloadFromEvent(event))
 	record.Status = status
 	record.FinishedAt = event.OccurredAt.Format(time.RFC3339Nano)
+	// The index write must complete before any notification: a subscriber
+	// reacting to the terminal event (e.g. by calling listRuns) must never
+	// observe a stale, non-terminal index row.
 	if err := idx.Upsert(record); err != nil {
 		return "", internalError(err)
 	}
@@ -466,13 +499,14 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 	}); err != nil {
 		return "", internalError(err)
 	}
+	m.broadcast(runID, payloadFromEvent(event))
 	if m.config.OnFinished != nil {
 		m.config.OnFinished(summaryFromRecord(root, record))
 	}
 	return wireStatus(status), nil
 }
 
-func (m *Manager) findRecord(runID string) (string, *runindex.Index, runindex.Record, error) {
+func (m *Manager) findRecord(runID string) (string, runIndex, runindex.Record, error) {
 	for _, summary := range m.workspaces.ListWorkspaces() {
 		if summary.Health == "missingRoot" {
 			continue
@@ -547,7 +581,7 @@ func (m *Manager) Close() error {
 			result = errors.Join(result, fmt.Errorf("close run index %s: %w", root, err))
 		}
 	}
-	m.indexes = make(map[string]*runindex.Index)
+	m.indexes = make(map[string]runIndex)
 	return result
 }
 
