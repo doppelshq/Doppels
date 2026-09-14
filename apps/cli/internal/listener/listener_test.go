@@ -3,6 +3,7 @@ package listener
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -509,3 +510,107 @@ var (
 	_               = fmt.Sprintf
 	_               = execution.APIVersion
 )
+
+// TestJobSinkDropsSendsAfterClose pins the shutdown safety of the Jobs
+// channel: the drain is bounded, so a watcher stuck in a non-cancellable
+// network call can resume after RunProducer returned. Its Job must be
+// dropped, never sent on a closed channel (that panics the whole `node up`).
+func TestJobSinkDropsSendsAfterClose(t *testing.T) {
+	jobs := make(chan Job, 1)
+	sink := &jobSink{jobs: jobs}
+	if !sink.send(context.Background(), Job{Origin: "share"}) {
+		t.Fatal("first send must be accepted")
+	}
+	<-jobs
+	sink.close()
+	sink.close() // idempotent: the deferred close may race a second caller
+	if sink.send(context.Background(), Job{Origin: "share"}) {
+		t.Fatal("send after close must be refused")
+	}
+	if sink.trySend(Job{Origin: "space"}) {
+		t.Fatal("trySend after close must be refused")
+	}
+	if _, open := <-jobs; open {
+		t.Fatal("Jobs must be closed for the consumer")
+	}
+}
+
+// TestJobSinkReleasesBlockedSenderOnCancel pins that a watcher blocked on a
+// full Jobs channel unblocks when the producer's context ends, so the drain
+// can complete instead of timing out.
+func TestJobSinkReleasesBlockedSenderOnCancel(t *testing.T) {
+	sink := &jobSink{jobs: make(chan Job)} // unbuffered: the send blocks
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan bool, 1)
+	go func() { done <- sink.send(ctx, Job{Origin: "share"}) }()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	select {
+	case sent := <-done:
+		if sent {
+			t.Fatal("send reported success without a consumer")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("blocked sender never released")
+	}
+	sink.close()
+}
+
+// TestProducerReturnsWhileWatcherIsStuck pins the liveness half: a watcher
+// blocked inside a network dial cannot hold `node up` open past the drain
+// window, and the Jobs channel still closes exactly once.
+func TestProducerReturnsWhileWatcherIsStuck(t *testing.T) {
+	registry := &fakeRegistry{payload: map[string]any{
+		"scopes": []map[string]any{},
+		"shares": []map[string]any{{
+			"share": map[string]any{
+				"id":         "11111111-1111-4111-8111-111111111111",
+				"expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339),
+			},
+			"awaiting_fulfillment": true,
+		}},
+		"requests": []map[string]any{},
+	}}
+	reg, _ := newListenerClients(t, registry)
+
+	dialing := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	shares, err := shareclient.New(shareclient.Options{
+		Server: "http://127.0.0.1",
+		Dial: func(context.Context, string) (shareclient.Socket, error) {
+			once.Do(func() { close(dialing) })
+			<-release
+			return nil, errors.New("dial released")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer close(release)
+
+	jobs := make(chan Job, 4)
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- RunProducer(ctx, ProducerConfig{
+			Registry:     reg,
+			Shares:       shares,
+			Token:        "token-1",
+			PollEvery:    time.Hour,
+			Jobs:         jobs,
+			DrainTimeout: 100 * time.Millisecond,
+		})
+	}()
+
+	<-dialing
+	cancel()
+	select {
+	case <-errCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a stuck watcher held RunProducer past the drain window")
+	}
+	if _, open := <-jobs; open {
+		t.Fatal("Jobs must be closed when RunProducer returns")
+	}
+}

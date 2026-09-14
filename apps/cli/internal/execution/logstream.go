@@ -1,9 +1,40 @@
 package execution
 
 import (
+	"bytes"
 	"sort"
 	"sync"
 )
+
+// redactedMarker is what replaces every secret occurrence, on disk and live.
+var redactedMarker = []byte("[REDACTED]")
+
+// normalizeSecrets returns the secret list both redaction paths agree on:
+// blanks and duplicates removed, longest first, ties broken lexicographically.
+// Determinism matters twice over — an unstable order would make two runs of
+// the same output differ, and any divergence between the live stream and the
+// file on disk is a leak.
+func normalizeSecrets(secrets []string) []string {
+	unique := make([]string, 0, len(secrets))
+	seen := make(map[string]struct{}, len(secrets))
+	for _, secret := range secrets {
+		if secret == "" {
+			continue
+		}
+		if _, ok := seen[secret]; ok {
+			continue
+		}
+		seen[secret] = struct{}{}
+		unique = append(unique, secret)
+	}
+	sort.Slice(unique, func(i, j int) bool {
+		if len(unique[i]) != len(unique[j]) {
+			return len(unique[i]) > len(unique[j])
+		}
+		return unique[i] < unique[j]
+	})
+	return unique
+}
 
 // streamedRedactor is a stateful byte filter that replaces secret substrings
 // with [REDACTED] while the subprocess is still writing.
@@ -11,34 +42,28 @@ import (
 // Contract (see Options.LogStream):
 //   - Inputs are unredacted subprocess chunks (raw stdout / stderr bytes).
 //   - Outputs are redacted chunks emitted incrementally: post-redact, pre-cap.
-//   - The redactor buffers trailing bytes across calls so a secret split
-//     between two chunks is still masked.
 //   - The concatenation of everything emitted through feed+close equals
 //     redact(fullRawOutput, secrets) byte-for-byte, so the live stream and
 //     the redacted-on-disk file cannot diverge.
+//   - Buffered bytes never exceed the sum of the secret lengths, so a Run
+//     that prints megabytes streams instead of accumulating in memory.
+//
+// It is a pipeline of single-secret stages, one per secret in the same order
+// the disk path applies them. Each stage is exactly bytes.ReplaceAll for its
+// own secret, expressed incrementally, so chaining them reproduces the
+// sequential passes of redact() by construction instead of by heuristic.
 type streamedRedactor struct {
-	mu      sync.Mutex
-	secrets []string // unique, sorted longest-first
-	tail    []byte   // unemitted bytes that may start a split secret
+	mu     sync.Mutex
+	stages []*secretStage
 }
 
 func newStreamedRedactor(secrets []string) *streamedRedactor {
-	uniq := make([]string, 0, len(secrets))
-	seen := make(map[string]struct{}, len(secrets))
-	for _, s := range secrets {
-		if s == "" {
-			continue
-		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		uniq = append(uniq, s)
+	normalized := normalizeSecrets(secrets)
+	stages := make([]*secretStage, 0, len(normalized))
+	for _, secret := range normalized {
+		stages = append(stages, &secretStage{secret: []byte(secret)})
 	}
-	// Longest first: prevents a shorter secret replacing the inside of a
-	// longer one and bounds the split-secret tail buffer.
-	sort.Slice(uniq, func(i, j int) bool { return len(uniq[i]) > len(uniq[j]) })
-	return &streamedRedactor{secrets: uniq}
+	return &streamedRedactor{stages: stages}
 }
 
 // log returns a LogFunc bound to stream that redacts each chunk with this
@@ -49,7 +74,7 @@ func (r *streamedRedactor) log(stream LogStream, sink LogFunc) LogFunc {
 	if sink == nil {
 		return func(LogStream, []byte) {}
 	}
-	if len(r.secrets) == 0 {
+	if len(r.stages) == 0 {
 		return sink
 	}
 	return func(s LogStream, chunk []byte) {
@@ -69,70 +94,77 @@ func (r *streamedRedactor) feed(chunk []byte) []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(r.secrets) == 0 {
-		return chunk
+	data := chunk
+	for _, stage := range r.stages {
+		data = stage.feed(data)
 	}
-
-	combined := append(append([]byte(nil), r.tail...), chunk...)
-	r.tail = nil
-
-	out, carry := redactWithCarry(combined, r.secrets)
-	r.tail = carry
-	return out
+	return data
 }
 
-// close flushes the buffered tail at end of step using the same sequential
-// replacement pass as the disk path. The conservative carry policy may retain
-// a complete occurrence when a replacement marker can interact with future
-// bytes, so emitting the tail literally would diverge and leak it.
+// close flushes every stage at end of step: each stage's residue cannot
+// contain its own secret (it is shorter than it), but it still has to travel
+// through the stages downstream, which may yet match on it.
 func (r *streamedRedactor) close() []byte {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	carry := r.tail
-	r.tail = nil
-	return redact(carry, r.secrets)
+
+	var data []byte
+	for _, stage := range r.stages {
+		data = append(stage.feed(data), stage.flush()...)
+	}
+	return data
 }
 
-// redactWithCarry redacts buf and splits it into (out, carry). carry holds
-// the trailing bytes that could be the start of a secret split across chunk
-// boundaries; the caller must prepend them to the next chunk.
-//
-// The emit boundary is chosen so no complete occurrence is ever split: a
-// naive len(buf)-(maxSecret-1) cut can slice through a secret that fits
-// entirely within the buffer and leak its head bytes, so the boundary also
-// extends past the end of the last complete occurrence when needed.
-func redactWithCarry(buf []byte, secrets []string) (out []byte, carry []byte) {
-	maxSecret := len(secrets[0])
-	boundary := len(buf) - (maxSecret - 1)
-	if boundary < 0 {
-		boundary = 0
+// buffered reports how many bytes are held back waiting for more input.
+func (r *streamedRedactor) buffered() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	total := 0
+	for _, stage := range r.stages {
+		total += len(stage.tail)
 	}
-	// A replacement can itself end with a prefix of another secret. Such a
-	// marker must stay in carry until the future bytes are known; otherwise
-	// sequential ReplaceAll over the complete output can redact across the
-	// chunk boundary and live output diverges from disk. Walk backwards to the
-	// largest safe raw boundary. This is intentionally conservative for
-	// pathological marker/secret overlaps, but preserves exact semantics.
-	for ; boundary > 0; boundary-- {
-		candidate := redact(buf[:boundary], secrets)
-		if !endsWithSecretPrefix(candidate, secrets) {
-			out = candidate
+	return total
+}
+
+// secretStage is the incremental form of bytes.ReplaceAll for one secret:
+// occurrences are matched left to right and never rescanned, and the only
+// bytes held back are the last len(secret)-1, which are the ones a future
+// chunk could complete into an occurrence.
+type secretStage struct {
+	secret []byte
+	tail   []byte
+}
+
+func (s *secretStage) feed(chunk []byte) []byte {
+	if len(chunk) == 0 && len(s.tail) == 0 {
+		return nil
+	}
+	buf := append(append([]byte(nil), s.tail...), chunk...)
+	var out []byte
+	cursor := 0
+	for {
+		index := bytes.Index(buf[cursor:], s.secret)
+		if index < 0 {
 			break
 		}
+		out = append(out, buf[cursor:cursor+index]...)
+		out = append(out, redactedMarker...)
+		cursor += index + len(s.secret)
 	}
-	if boundary == 0 {
-		out = nil
+	hold := len(s.secret) - 1
+	if remaining := len(buf) - cursor; hold > remaining {
+		hold = remaining
 	}
-	return out, append([]byte(nil), buf[boundary:]...)
+	out = append(out, buf[cursor:len(buf)-hold]...)
+	s.tail = append([]byte(nil), buf[len(buf)-hold:]...)
+	return out
 }
 
-func endsWithSecretPrefix(buf []byte, secrets []string) bool {
-	for _, secret := range secrets {
-		for n := 1; n < len(secret) && n <= len(buf); n++ {
-			if string(buf[len(buf)-n:]) == secret[:n] {
-				return true
-			}
-		}
-	}
-	return false
+// flush returns the residue left after the last feed. It is shorter than the
+// secret, so it cannot contain an occurrence of it.
+func (s *secretStage) flush() []byte {
+	tail := s.tail
+	s.tail = nil
+	return tail
 }

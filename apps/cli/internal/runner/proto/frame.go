@@ -32,7 +32,9 @@ func (e *Encoder) WriteFrame(value any) error {
 	if err != nil {
 		return err
 	}
-	if len(encoded)+1 > MaxFrameBytes {
+	// MaxFrameBytes bounds the JSON payload, not the payload plus its
+	// newline: the decoder accepts a line of exactly MaxFrameBytes.
+	if len(encoded) > MaxFrameBytes {
 		return ErrFrameTooLarge
 	}
 	e.mu.Lock()

@@ -106,6 +106,59 @@ type ProducerConfig struct {
 	PollEvery time.Duration
 	Jobs      chan<- Job
 	Reporter  Reporter
+	// DrainTimeout bounds how long RunProducer waits for in-flight watchers
+	// before returning (default WatcherDrainTimeout).
+	DrainTimeout time.Duration
+}
+
+// jobSink owns cfg.Jobs. Watchers can outlive the bounded drain (a stuck
+// network call is not always cancellable), and a watcher that resumes after
+// RunProducer returned must drop its Job, not panic the process with a send
+// on a closed channel.
+type jobSink struct {
+	mu     sync.RWMutex
+	jobs   chan<- Job
+	closed bool
+}
+
+// send blocks until the Job is queued, the context ends, or the sink closes.
+func (s *jobSink) send(ctx context.Context, job Job) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.jobs <- job:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// trySend queues a Job only if the consumer has room right now.
+func (s *jobSink) trySend(job Job) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed {
+		return false
+	}
+	select {
+	case s.jobs <- job:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *jobSink) close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	s.closed = true
+	close(s.jobs)
 }
 
 // RunProducer polls the registry inbox and watches claimed Shares, feeding
@@ -118,16 +171,27 @@ type ProducerConfig struct {
 //   - Watcher errors abort the producer (returned) so the consumer decides
 //     whether the Node stays online.
 //   - On return, RunProducer waits for in-flight share watchers to release
-//     their claims (capped by WatcherDrainTimeout). This guarantees no
-//     orphan claims survive a normal shutdown or an explicit error path,
-//     since the watchers run on a cancellable context derived from ctx.
+//     their claims (capped by cfg.DrainTimeout, default WatcherDrainTimeout).
+//     This guarantees no orphan claims survive a normal shutdown or an
+//     explicit error path, since the watchers run on a cancellable context
+//     derived from ctx.
+//   - The drain is bounded on purpose: a watcher stuck in a network call
+//     that ignores cancellation must not keep `node up` alive forever. Such
+//     a watcher may therefore resume after RunProducer returned, so every
+//     send goes through jobSink and is dropped once cfg.Jobs is closed
+//     instead of panicking the process.
 func RunProducer(ctx context.Context, cfg ProducerConfig) error {
 	var watchers sync.WaitGroup
+	drainTimeout := cfg.DrainTimeout
+	if drainTimeout <= 0 {
+		drainTimeout = WatcherDrainTimeout
+	}
+	sink := &jobSink{jobs: cfg.Jobs}
 	watcherCtx, watcherCancel := context.WithCancel(ctx)
 	defer func() {
 		watcherCancel()
-		drainWatchers(&watchers, WatcherDrainTimeout)
-		close(cfg.Jobs)
+		drainWatchers(&watchers, drainTimeout)
+		sink.close()
 	}()
 
 	var mu sync.Mutex
@@ -197,7 +261,7 @@ func RunProducer(ctx context.Context, cfg ProducerConfig) error {
 			watchers.Add(1)
 			go func(item shareclient.InboxItem) {
 				defer watchers.Done()
-				handedOff, err := watchShare(watcherCtx, cfg, item)
+				handedOff, err := watchShare(watcherCtx, cfg, sink, item)
 				if err != nil {
 					releaseShare(shareID)
 					if watcherCtx.Err() == nil {
@@ -232,13 +296,14 @@ func RunProducer(ctx context.Context, cfg ProducerConfig) error {
 			case <-ctx.Done():
 				releaseRequest(requestID)
 				return ctx.Err()
-			case cfg.Jobs <- Job{
+			default:
+			}
+			if !sink.trySend(Job{
 				Origin:       "space",
 				Request:      &request,
 				Organization: org,
 				Space:        space,
-			}:
-			default:
+			}) {
 				releaseRequest(requestID)
 			}
 		}
@@ -287,7 +352,7 @@ const WatcherDrainTimeout = 5 * time.Second
 // Request. handedOff reports whether the channel was handed to a consumer
 // via cfg.Jobs (the consumer then owns closing it); otherwise the channel is
 // closed before returning.
-func watchShare(ctx context.Context, cfg ProducerConfig, item shareclient.InboxItem) (handedOff bool, err error) {
+func watchShare(ctx context.Context, cfg ProducerConfig, sink *jobSink, item shareclient.InboxItem) (handedOff bool, err error) {
 	created := &shareclient.ShareCreated{
 		Share:       item.Share,
 		RunnerToken: cfg.Token,
@@ -320,11 +385,14 @@ func watchShare(ctx context.Context, cfg ProducerConfig, item shareclient.InboxI
 		return false, nil
 	}
 
-	select {
-	case <-ctx.Done():
-		return false, ctx.Err()
-	case cfg.Jobs <- Job{Origin: "share", Created: created, Channel: channel, Request: request}:
-		keepOpen = true
-		return true, nil
+	if !sink.send(ctx, Job{Origin: "share", Created: created, Channel: channel, Request: request}) {
+		// The consumer is gone (cancelled or already drained): the deferred
+		// close releases the channel and the caller releases the claim.
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, nil
 	}
+	keepOpen = true
+	return true, nil
 }

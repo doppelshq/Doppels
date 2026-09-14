@@ -304,3 +304,90 @@ func TestExecuteStepRespectsContextCancellation(t *testing.T) {
 		t.Fatal("expected ctx.Err()")
 	}
 }
+
+// TestStreamedRedactorMatchesDiskOverEveryPartition is the property the
+// contract actually claims: for any way the subprocess happens to split its
+// output, the live stream must equal the redacted file byte-for-byte. It
+// enumerates every partition of each raw string, which is where boundary
+// heuristics leak (a cut inside a complete occurrence let a shorter secret
+// match its head) and where a duplicated secret used to mangle the disk side.
+func TestStreamedRedactorMatchesDiskOverEveryPartition(t *testing.T) {
+	tests := []struct {
+		name    string
+		raw     string
+		secrets []string
+	}{
+		{name: "prefix", raw: "abcdefZZZZ", secrets: []string{"abcdef", "ab"}},
+		{name: "overlap", raw: "abcdefZZZZ", secrets: []string{"bcdef", "abc"}},
+		{name: "marker creates match", raw: "abcdxZZZZ", secrets: []string{"abcd", "D]x"}},
+		{name: "duplicates", raw: "EZZZZ", secrets: []string{"E", "E"}},
+		{name: "single byte", raw: "aaaZbaa", secrets: []string{"a", "ab"}},
+		{name: "repeated occurrence", raw: "s3cr3t s3cr3t", secrets: []string{"s3cr3t"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			want := redact([]byte(tt.raw), tt.secrets)
+			for mask := 0; mask < 1<<(len(tt.raw)-1); mask++ {
+				redactor := newStreamedRedactor(tt.secrets)
+				var live []byte
+				start := 0
+				for index := 1; index < len(tt.raw); index++ {
+					if mask&(1<<(index-1)) == 0 {
+						continue
+					}
+					live = append(live, redactor.feed([]byte(tt.raw[start:index]))...)
+					start = index
+				}
+				live = append(live, redactor.feed([]byte(tt.raw[start:]))...)
+				live = append(live, redactor.close()...)
+				if !bytes.Equal(live, want) {
+					t.Fatalf("mask=%d raw=%q live=%q disk=%q", mask, tt.raw, live, want)
+				}
+			}
+		})
+	}
+}
+
+// TestStreamedRedactorBuffersBoundedBytes pins that a long run of secrets —
+// including the pathological case where the [REDACTED] marker itself feeds
+// the next secret — streams instead of accumulating the whole output in
+// memory. A Run printing megabytes must not be held back until it exits.
+func TestStreamedRedactorBuffersBoundedBytes(t *testing.T) {
+	secrets := []string{"abcd", "]x"}
+	redactor := newStreamedRedactor(secrets)
+	raw := strings.Repeat("abcd", 4096)
+	emitted := redactor.feed([]byte(raw))
+	budget := 0
+	for _, secret := range secrets {
+		budget += len(secret)
+	}
+	if buffered := redactor.buffered(); buffered > budget {
+		t.Fatalf("buffered %d bytes, budget %d (emitted %d)", buffered, budget, len(emitted))
+	}
+	if len(emitted) == 0 {
+		t.Fatal("nothing emitted for a 16 KiB run of secrets")
+	}
+	emitted = append(emitted, redactor.close()...)
+	if want := redact([]byte(raw), secrets); !bytes.Equal(emitted, want) {
+		t.Fatalf("live and disk diverge on a long run (live %d bytes, disk %d)", len(emitted), len(want))
+	}
+}
+
+// TestRedactIsStableRegardlessOfSecretOrder pins that the disk path does not
+// depend on the order or multiplicity of the secret list: two callers holding
+// the same secrets in different order must produce identical files, and a
+// duplicated secret must not rewrite the marker it just inserted.
+func TestRedactIsStableRegardlessOfSecretOrder(t *testing.T) {
+	raw := []byte("E ab abcdef")
+	first := redact(raw, []string{"ab", "abcdef", "E"})
+	second := redact(raw, []string{"E", "abcdef", "ab"})
+	if !bytes.Equal(first, second) {
+		t.Fatalf("order changed redaction: %q vs %q", first, second)
+	}
+	if duplicated := redact(raw, []string{"E", "E", "ab", "abcdef"}); !bytes.Equal(duplicated, first) {
+		t.Fatalf("duplicate secret changed redaction: %q vs %q", duplicated, first)
+	}
+	if bytes.Contains(first, []byte("abcdef")) || bytes.Contains(first, []byte("E ")) {
+		t.Fatalf("secret survived redaction: %q", first)
+	}
+}

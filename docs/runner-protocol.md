@@ -138,8 +138,10 @@ acción "restart" de la UI de Desktop = `shutdown` + relaunch por Tauri.
 NDJSON: una línea UTF-8 por mensaje JSON, terminada en `\n`. Sin long-lived
 writes parciales: cada mensaje se escribe completo.
 
-- Tamaño máximo por línea: **4 MiB**. El Runner nunca emite eventos que lo
-  excedan (los payloads de logs van por `getRunLogs` paginado, no por
+- Tamaño máximo por línea: **4 MiB**. El límite se aplica al payload JSON
+  sin contar el `\n`, y es simétrico: lo que un extremo acepta al leer es
+  exactamente lo que el otro puede escribir. El Runner nunca emite eventos
+  que lo excedan (los payloads de logs van por `getRunLogs` paginado, no por
   eventos).
 - Sin compresión, sin batching. Un mensaje JSON-RPC por línea.
 - El cliente debe cerrar la conexión ante un frame ilegible (no hay
@@ -370,6 +372,21 @@ El cliente CLI mapea estos códigos a sus exit codes existentes
   `request_fingerprint` = SHA-256 del JSON canónico (claves ordenadas
   recursivamente, UTF-8, sin espacios) de
   `{ capability: "name@version", recipe, inputs }`.
+  Forma canónica (obligatoria para cualquier cliente, incluido el futuro
+  cliente Rust):
+  - Claves ordenadas por sus bytes UTF-8 ya decodificados, de forma
+    recursiva; `"\u0062"` y `"b"` son la misma clave.
+  - **Claves duplicadas: rechazo.** Un payload cuyo significado dependa de
+    si el parser conserva la primera o la última ocurrencia no puede tener
+    fingerprint estable.
+  - Números: expansión decimal exacta, sin exponente, sin ceros a la
+    izquierda ni ceros finales de la parte fraccionaria, signo conservado y
+    `-0` → `0`. Nunca se pasa por `float64`: `9007199254740993` y
+    `9007199254740992` son distintos. `1`, `1.0` y `1e0` son el mismo
+    número y colisionan a propósito.
+  - Un exponente cuya expansión supere 1024 dígitos (o la longitud del
+    literal original, si es mayor) se rechaza con `-32602`: `1e100000` son
+    ocho bytes en el wire y 100 KB al expandir.
   Retry con misma clave y **mismo fingerprint** → devuelve el
   `{requestId, runId}` original; misma clave con **fingerprint distinto** →
   `-32602` (protege contra repetir una operación peligrosa tras un restart).

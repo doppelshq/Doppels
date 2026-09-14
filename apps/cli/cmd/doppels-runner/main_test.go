@@ -157,3 +157,136 @@ func pickFreePort(t *testing.T) int {
 }
 
 var _ = context.Background
+
+// TestExistingRunnerRequiresAuthenticatedHandshake pins what "another runner
+// already owns this socket" means: a successful v1/initialize result with our
+// token, not merely something that answered. Anything else must let the
+// startup fail loudly instead of exiting 0 and leaving the user with no
+// runner at all.
+func TestExistingRunnerRequiresAuthenticatedHandshake(t *testing.T) {
+	token := strings.Repeat("a", 64)
+	tests := []struct {
+		name  string
+		reply string
+		want  bool
+	}{
+		{name: "empty object", reply: `{}`, want: false},
+		{name: "auth error", reply: `{"jsonrpc":"2.0","id":"probe","error":{"code":-32001,"message":"unauthorized"}}`, want: false},
+		{name: "other id", reply: `{"jsonrpc":"2.0","id":"other","result":{"protocolVersion":1,"runnerVersion":"x"}}`, want: false},
+		{name: "wrong jsonrpc", reply: `{"jsonrpc":"1.0","id":"probe","result":{"protocolVersion":1,"runnerVersion":"x"}}`, want: false},
+		{name: "not json", reply: `garbage`, want: false},
+		{name: "authenticated", reply: fmt.Sprintf(`{"jsonrpc":"2.0","id":"probe","result":{"protocolVersion":%d,"runnerVersion":"0.1.0-dev"}}`, proto.ProtocolVersion), want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			socketPath := filepath.Join(t.TempDir(), "runner.sock")
+			listener, err := net.Listen("unix", socketPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.Close()
+			go func() {
+				conn, err := listener.Accept()
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+				if _, err := proto.NewDecoder(conn).ReadFrame(); err != nil {
+					return
+				}
+				_, _ = conn.Write([]byte(tt.reply + "\n"))
+			}()
+			if got := existingRunner(token, socketPath); got != tt.want {
+				t.Fatalf("existingRunner = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestExistingRunnerProbeIsBounded pins that a peer which accepts and then
+// stays silent cannot hang the runner's startup forever.
+func TestExistingRunnerProbeIsBounded(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		accepted <- conn
+	}()
+	done := make(chan bool, 1)
+	go func() { done <- existingRunner(strings.Repeat("a", 64), socketPath) }()
+	conn := <-accepted
+	defer conn.Close()
+	select {
+	case alive := <-done:
+		if alive {
+			t.Fatal("a silent peer must not count as a live runner")
+		}
+	case <-time.After(probeTimeout + 2*time.Second):
+		t.Fatal("probe never timed out")
+	}
+}
+
+// TestResolveTokenRejectsLooseTokenPermissions pins that a token readable by
+// other users is not silently trusted: it is the whole authority to execute
+// Steps on this host.
+func TestResolveTokenRejectsLooseTokenPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "runner.token")
+	if err := os.WriteFile(path, []byte(strings.Repeat("a", 64)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveToken("", path); err == nil {
+		t.Fatal("world-readable token accepted")
+	}
+}
+
+// TestResolveTokenIsAtomicUnderConcurrency pins the startup race: several
+// runners (or a supervisor restarting one) can call resolveToken at the same
+// time on a fresh config dir. Every caller must end up with the same valid
+// token; none may observe a half-written file.
+func TestResolveTokenIsAtomicUnderConcurrency(t *testing.T) {
+	for round := 0; round < 20; round++ {
+		path := filepath.Join(t.TempDir(), "runner.token")
+		gate := make(chan struct{})
+		type outcome struct {
+			token string
+			err   error
+		}
+		results := make(chan outcome, 16)
+		for worker := 0; worker < 16; worker++ {
+			go func() {
+				<-gate
+				token, err := resolveToken("", path)
+				results <- outcome{token: token, err: err}
+			}()
+		}
+		close(gate)
+		first := ""
+		for worker := 0; worker < 16; worker++ {
+			got := <-results
+			if got.err != nil {
+				t.Fatalf("round %d: %v", round, got.err)
+			}
+			if first == "" {
+				first = got.token
+			}
+			if got.token != first {
+				t.Fatalf("round %d: concurrent callers disagree: %s vs %s", round, first, got.token)
+			}
+		}
+		persisted, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(persisted) != first {
+			t.Fatalf("persisted token %q != returned %q", persisted, first)
+		}
+	}
+}

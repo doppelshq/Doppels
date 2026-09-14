@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -591,14 +590,13 @@ func readEnvironmentSnapshot(path string) (map[string]string, error) {
 	return result, nil
 }
 
+// redact is the reference redaction: one ReplaceAll pass per secret, in the
+// order normalizeSecrets fixes. streamedRedactor reproduces exactly these
+// passes incrementally, so the live stream and the file cannot diverge.
 func redact(data []byte, secrets []string) []byte {
 	result := append([]byte(nil), data...)
-	secrets = append([]string(nil), secrets...)
-	sort.Slice(secrets, func(i, j int) bool { return len(secrets[i]) > len(secrets[j]) })
-	for _, secret := range secrets {
-		if secret != "" {
-			result = bytes.ReplaceAll(result, []byte(secret), []byte("[REDACTED]"))
-		}
+	for _, secret := range normalizeSecrets(secrets) {
+		result = bytes.ReplaceAll(result, []byte(secret), redactedMarker)
 	}
 	return result
 }

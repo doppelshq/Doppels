@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -573,4 +575,191 @@ func TestServerDropsExcessNotificationsWithoutClosing(t *testing.T) {
 	if _, err := decoder.ReadFrame(); err != nil {
 		t.Fatalf("expected at least one frame after notification flood; got %v", err)
 	}
+}
+
+// failingWriter fails every write, standing in for a client that vanished
+// between the dispatch and the flush of its response.
+type failingWriter struct {
+	net.Conn
+}
+
+func (failingWriter) Write([]byte) (int, error) { return 0, errors.New("peer gone") }
+
+// TestShutdownProceedsWhenAckCannotBeWritten pins that a client disappearing
+// mid-shutdown cannot strand the Runner: the ack is best-effort evidence for
+// the client, the shutdown itself is not conditional on it. Without this the
+// server stays in `draining` forever, refusing every new operation while
+// never running OnShutdown.
+func TestShutdownProceedsWhenAckCannotBeWritten(t *testing.T) {
+	var shutdowns atomic.Int32
+	config := testConfig()
+	config.OnShutdown = func() { shutdowns.Add(1) }
+	server := New(config)
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+
+	conn := newConnection(server, failingWriter{local})
+	message, protoErr := proto.DecodeMessage([]byte(`{"jsonrpc":"2.0","id":1,"method":"v1/shutdown"}`))
+	if protoErr != nil {
+		t.Fatal(protoErr)
+	}
+	server.dispatch(conn, message)
+	done := make(chan struct{})
+	go conn.writeLoop(done)
+	<-done
+
+	select {
+	case <-server.closed:
+	case <-time.After(time.Second):
+		t.Fatalf("server stranded draining after a failed ack (OnShutdown calls = %d)", shutdowns.Load())
+	}
+	if calls := shutdowns.Load(); calls != 1 {
+		t.Fatalf("OnShutdown ran %d times, want exactly 1", calls)
+	}
+	server.Close()
+}
+
+// TestSubscribeNodeDoesNotDropEventsDuringSnapshot pins the other half of the
+// subscribe ordering contract. Delivering the snapshot first is only correct
+// if nothing is lost in between: an event raised while the snapshot is being
+// computed must still reach the subscriber, after the response.
+func TestSubscribeNodeDoesNotDropEventsDuringSnapshot(t *testing.T) {
+	var server *testServer
+	var snapshots atomic.Int32
+	config := testConfig()
+	config.NodeStatus = func() proto.NodeStatus {
+		// The second snapshot is the subscribeNode one (the first belongs to
+		// initialize): raise an event while the handler is still inside it.
+		if snapshots.Add(1) == 2 {
+			server.EmitNodeEvent(proto.NodeEvent{Kind: "workspaceAdded", Payload: map[string]any{"root": "/tmp/late"}})
+		}
+		return proto.NodeStatus{State: "online", Workspaces: []proto.WorkspaceSummary{}}
+	}
+	server = startServer(t, config)
+	client := dialClient(t, server)
+	client.initialize()
+
+	if response := client.call(2, "v1/subscribeNode", nil); response.Err != nil {
+		t.Fatalf("subscribeNode: %+v", response.Err)
+	}
+	if err := client.conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	method, params := client.readNotification(t)
+	if method != "v1/nodeEvent" {
+		t.Fatalf("method = %s, want v1/nodeEvent", method)
+	}
+	if !bytes.Contains(params, []byte("/tmp/late")) {
+		t.Fatalf("event lost around the snapshot: %s", params)
+	}
+}
+
+// TestServeWaitsForInFlightHandlers pins that Serve returning means "no
+// Step-touching work is still running". A supervisor that sees the process
+// exit while a handler mutates state on disk gets corruption, not shutdown.
+func TestServeWaitsForInFlightHandlers(t *testing.T) {
+	server := startServer(t, testConfig())
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var finished atomic.Bool
+	server.Handle("v1/block", func([]byte) (any, *proto.Error) {
+		close(entered)
+		<-release
+		finished.Store(true)
+		return map[string]any{}, nil
+	})
+	client := dialClient(t, server)
+	client.initialize()
+	if err := client.encoder.WriteFrame(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "v1/block"}); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+
+	go server.Close()
+	select {
+	case <-server.done:
+		if !finished.Load() {
+			t.Fatal("Serve returned while a handler was still running")
+		}
+	case <-time.After(200 * time.Millisecond):
+		// Serve is correctly blocked on the handler; let it finish.
+	}
+	close(release)
+	select {
+	case <-server.done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Serve never returned after the handler finished")
+	}
+	if !finished.Load() {
+		t.Fatal("handler never completed")
+	}
+}
+
+// TestClosedConnectionStopsExecutingBufferedRequests pins that once a
+// connection is closed, requests already sitting in the read buffer are not
+// executed: a client pipelining `shutdown` plus a Run request must not have
+// the Run started by a connection that is already gone.
+func TestClosedConnectionStopsExecutingBufferedRequests(t *testing.T) {
+	server := New(testConfig())
+	local, remote := net.Pipe()
+	defer remote.Close()
+	conn := newConnection(server, local)
+	conn.initialize("test")
+	var executed atomic.Int32
+	server.Handle("v1/closeme", func([]byte) (any, *proto.Error) {
+		conn.close()
+		return map[string]any{}, nil
+	})
+	server.Handle("v1/effect", func([]byte) (any, *proto.Error) {
+		executed.Add(1)
+		return map[string]any{}, nil
+	})
+	done := make(chan struct{})
+	go func() {
+		conn.serve()
+		close(done)
+	}()
+	go func() {
+		_, _ = remote.Write([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"v1/closeme\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"v1/effect\"}\n"))
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("serve never returned after the connection closed")
+	}
+	if count := executed.Load(); count != 0 {
+		t.Fatalf("buffered request executed %d times after close", count)
+	}
+}
+
+// TestConnectionStateIsRaceFree pins that the diagnostic client name is read
+// under the same lock that initialize writes it: the overflow log path runs
+// on the emitting goroutine while the handshake runs on the reader.
+func TestConnectionStateIsRaceFree(t *testing.T) {
+	server := New(testConfig())
+	local, remote := net.Pipe()
+	defer local.Close()
+	defer remote.Close()
+	conn := newConnection(server, local)
+	conn.beginNodeSubscription()
+	conn.flushNodeSubscription()
+	for i := 0; i < outboundBufferSize; i++ {
+		conn.enqueue(proto.NewNotification("v1/nodeEvent", nil), false)
+	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			conn.initialize("client")
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 1000; i++ {
+			conn.sendNodeEvent(proto.NodeEvent{Kind: "workspaceAdded"})
+		}
+	}()
+	wg.Wait()
 }

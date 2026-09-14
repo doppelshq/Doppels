@@ -91,14 +91,26 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	return srv.Serve(ctx, listener)
 }
 
+// probeTimeout bounds the handshake probe against a socket that accepts but
+// never answers: startup must fail loudly instead of hanging forever.
+const probeTimeout = 5 * time.Second
+
+// existingRunner reports whether a live runner already owns socketPath. Only
+// a well-formed, authenticated v1/initialize result counts: a peer that
+// answers garbage, rejects our token or answers a different id is not a
+// runner we may defer to, and exiting 0 for it would leave the host without
+// any runner at all.
 func existingRunner(token, socketPath string) bool {
 	conn, err := transport.Unix{}.Dial(socketPath)
 	if err != nil {
 		return false
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(probeTimeout)); err != nil {
+		return false
+	}
 	if err := proto.NewEncoder(conn).WriteFrame(map[string]any{
-		"jsonrpc": "2.0", "id": "probe", "method": "v1/initialize",
+		"jsonrpc": "2.0", "id": probeID, "method": "v1/initialize",
 		"params": map[string]any{
 			"protocolVersion": proto.ProtocolVersion,
 			"token":           token,
@@ -111,12 +123,29 @@ func existingRunner(token, socketPath string) bool {
 	if err != nil {
 		return false
 	}
-	var response proto.Response
+	// Decoded locally instead of through proto.Response so the probe can
+	// check the envelope itself: version, id and the initialize result.
+	var response struct {
+		JSONRPC string `json:"jsonrpc"`
+		ID      string `json:"id"`
+		Error   *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+		Result struct {
+			ProtocolVersion int    `json:"protocolVersion"`
+			RunnerVersion   string `json:"runnerVersion"`
+		} `json:"result"`
+	}
 	if err := json.Unmarshal(frame, &response); err != nil {
 		return false
 	}
-	return response.Err == nil
+	if response.JSONRPC != "2.0" || response.Error != nil || response.ID != probeID {
+		return false
+	}
+	return response.Result.ProtocolVersion == proto.ProtocolVersion && response.Result.RunnerVersion != ""
 }
+
+const probeID = "probe"
 
 // runnerConfigDir resolves the runner's config directory under the user's
 // config root; DOPPELS_RUNNER_CONFIG overrides.
@@ -137,10 +166,11 @@ func resolveToken(flagValue, path string) (string, error) {
 	if flagValue != "" {
 		return validateToken(flagValue)
 	}
-	if data, err := os.ReadFile(path); err == nil {
-		return validateToken(string(data))
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("read token: %w", err)
+	switch token, err := readToken(path); {
+	case err == nil:
+		return token, nil
+	case !errors.Is(err, os.ErrNotExist):
+		return "", err
 	}
 	token, err := generateToken()
 	if err != nil {
@@ -149,25 +179,51 @@ func resolveToken(flagValue, path string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return "", err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Create the token in a temporary file and link it into place: link
+	// fails if the path already exists, so concurrent starts elect exactly
+	// one writer and every loser reads a file that is already complete. A
+	// bare O_EXCL create would expose an empty file to the losers between
+	// create and write.
+	staging, err := os.CreateTemp(filepath.Dir(path), ".runner.token-*")
 	if err != nil {
-		if errors.Is(err, os.ErrExist) {
-			data, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return "", fmt.Errorf("read token after race: %w", readErr)
-			}
-			return validateToken(string(data))
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	defer os.Remove(staging.Name())
+	if err := staging.Chmod(0o600); err != nil {
+		staging.Close()
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	if _, err := staging.WriteString(token); err != nil {
+		staging.Close()
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	if err := staging.Close(); err != nil {
+		return "", fmt.Errorf("persist token: %w", err)
+	}
+	if err := os.Link(staging.Name(), path); err != nil {
+		if !errors.Is(err, os.ErrExist) {
+			return "", fmt.Errorf("persist token: %w", err)
 		}
-		return "", fmt.Errorf("persist token: %w", err)
-	}
-	if _, err := file.WriteString(token); err != nil {
-		file.Close()
-		return "", fmt.Errorf("persist token: %w", err)
-	}
-	if err := file.Close(); err != nil {
-		return "", fmt.Errorf("persist token: %w", err)
+		return readToken(path)
 	}
 	return token, nil
+}
+
+// readToken loads a persisted token and refuses one that other users can
+// read: the token is the entire authority to execute Steps on this host.
+func readToken(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if mode := info.Mode(); mode.Perm()&0o077 != 0 {
+		return "", fmt.Errorf("runner token %s is accessible to other users (mode %#o); restore it with chmod 600", path, mode.Perm())
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read token: %w", err)
+	}
+	return validateToken(string(data))
 }
 
 func validateToken(raw string) (string, error) {

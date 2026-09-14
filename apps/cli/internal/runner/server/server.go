@@ -46,6 +46,10 @@ type Server struct {
 	config   Config
 	handlers map[string]internalHandler
 
+	// active tracks the per-connection goroutines so Serve can only return
+	// once no handler is still running.
+	active sync.WaitGroup
+
 	mu               sync.Mutex
 	conns            map[*connection]struct{}
 	shutdown         bool
@@ -101,6 +105,10 @@ func (s *Server) Handle(method string, run Handler) {
 // Serve accepts connections until ctx ends, the listener dies, or a client
 // requests shutdown. It always closes the listener.
 func (s *Server) Serve(ctx context.Context, listener transport.Listener) error {
+	// Wait for in-flight handlers before returning: a supervisor that sees
+	// the process exit while a handler is still touching disk state gets
+	// corruption, not a graceful shutdown.
+	defer s.active.Wait()
 	defer listener.Close()
 	s.mu.Lock()
 	s.listener = listener
@@ -143,7 +151,11 @@ func (s *Server) Serve(ctx context.Context, listener transport.Listener) error {
 		}
 		s.conns[connection] = struct{}{}
 		s.mu.Unlock()
-		go connection.serve()
+		s.active.Add(1)
+		go func() {
+			defer s.active.Done()
+			connection.serve()
+		}()
 	}
 }
 
@@ -234,7 +246,10 @@ func (s *Server) handleGetNodeStatus(*connection, []byte) (any, *proto.Error) {
 	return s.nodeStatusSnapshot(), nil
 }
 
-func (s *Server) handleSubscribeNode(_ *connection, _ []byte) (any, *proto.Error) {
+func (s *Server) handleSubscribeNode(conn *connection, _ []byte) (any, *proto.Error) {
+	// Open the buffering window before reading the status: an event raised
+	// while the snapshot is being built belongs to the subscriber.
+	conn.beginNodeSubscription()
 	return s.nodeStatusSnapshot(), nil
 }
 

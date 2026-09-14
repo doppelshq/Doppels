@@ -2,6 +2,7 @@ package proto
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"strings"
@@ -75,6 +76,30 @@ func TestFrameAcceptsLineAtExactLimit(t *testing.T) {
 func TestEncoderRejectsFrameThatExceedsWireLimit(t *testing.T) {
 	var wire bytes.Buffer
 	if err := NewEncoder(&wire).WriteFrame(strings.Repeat("x", MaxFrameBytes)); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
+	}
+}
+
+// TestFrameLimitIsSymmetric pins that MaxFrameBytes means the same thing in
+// both directions: a payload the decoder accepts must be writable, otherwise
+// two Runner processes could disagree about what is a legal frame.
+func TestFrameLimitIsSymmetric(t *testing.T) {
+	payload := json.RawMessage(`"` + strings.Repeat("x", MaxFrameBytes-2) + `"`)
+	if length := len(payload); length != MaxFrameBytes {
+		t.Fatalf("payload = %d bytes, want %d", length, MaxFrameBytes)
+	}
+	if _, err := NewDecoder(bytes.NewReader(append(payload, '\n'))).ReadFrame(); err != nil {
+		t.Fatalf("decoder rejected a frame of exactly MaxFrameBytes: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := NewEncoder(&buf).WriteFrame(payload); err != nil {
+		t.Fatalf("encoder rejected a frame the decoder accepts: %v", err)
+	}
+	oversized := json.RawMessage(`"` + strings.Repeat("x", MaxFrameBytes-1) + `"`)
+	if err := NewEncoder(&bytes.Buffer{}).WriteFrame(oversized); !errors.Is(err, ErrFrameTooLarge) {
+		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
+	}
+	if _, err := NewDecoder(bytes.NewReader(append(oversized, '\n'))).ReadFrame(); !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("err = %v, want ErrFrameTooLarge", err)
 	}
 }
