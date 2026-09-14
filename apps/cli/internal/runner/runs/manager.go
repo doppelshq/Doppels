@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -60,6 +61,11 @@ type Manager struct {
 
 	subsMu sync.Mutex
 	subs   map[string][]*runSubscriber
+
+	// testBeforeReserve is a test-only seam invoked synchronously right
+	// before Start would durably reserve, letting tests deterministically
+	// interleave Start with a concurrent Close. Always nil in production.
+	testBeforeReserve func()
 }
 
 func NewManager(ctx context.Context, workspaces *workspace.Service, config Config) *Manager {
@@ -167,26 +173,37 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 		CreatedAt: createdAt.Format(time.RFC3339Nano),
 		StateDir:  filepath.Join(resolved.Root, ".doppels", "runs", runID),
 	}
-	reservation, created, err := idx.ReserveStart(record, request.IdempotencyKey, fingerprint)
-	if errors.Is(err, runindex.ErrIdempotencyConflict) {
-		return StartResult{}, invalidParams("idempotencyKey was already used with different capability, recipe, or inputs")
+	if m.testBeforeReserve != nil {
+		m.testBeforeReserve()
 	}
+	// The closed check and the durable reservation must be atomic with
+	// respect to Close: a reservation that commits after Close has already
+	// flipped m.closed would return Busy to its caller while leaving a
+	// "running" row with no goroutine ever spawned to resume or finalize it
+	// (findings review, PR6). Holding m.mu across ReserveStart serializes it
+	// with Close, which takes the same lock to set closed and cancel active
+	// Runs.
+	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return StartResult{}, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}
+	}
+	reservation, created, err := idx.ReserveStart(record, request.IdempotencyKey, fingerprint)
 	if err != nil {
+		m.mu.Unlock()
+		if errors.Is(err, runindex.ErrIdempotencyConflict) {
+			return StartResult{}, invalidParams("idempotencyKey was already used with different capability, recipe, or inputs")
+		}
 		return StartResult{}, internalError(err)
 	}
 	result := StartResult{RequestID: reservation.RequestID, RunID: reservation.RunID}
 	if !created {
+		m.mu.Unlock()
 		return result, nil
 	}
 
 	runCtx, cancel := context.WithCancel(m.ctx)
 	active := &activeRun{cancel: cancel, done: make(chan struct{}), root: resolved.Root}
-	m.mu.Lock()
-	if m.closed {
-		m.mu.Unlock()
-		cancel()
-		return StartResult{}, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}
-	}
 	m.active[runID] = active
 	m.wg.Add(1)
 	m.mu.Unlock()
@@ -260,8 +277,120 @@ func (m *Manager) index(root string) (*runindex.Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := reconcileOrphanedReservations(root, idx, m.config.Now); err != nil {
+		idx.Close()
+		return nil, err
+	}
 	m.indexes[root] = idx
 	return idx, nil
+}
+
+// reconcileOrphanedReservations resolves Runs whose durable reservation
+// committed (a runindex row exists) but whose engine goroutine never reached
+// runner.initialize() — the Runner process exited between ReserveStart and
+// Execute. This is deliberately narrower than full crash recovery: a Run
+// whose on-disk request.json/run.json DO exist but never reached a terminal
+// event is a mid-Step kill -9 case, out of PR6's scope per the
+// desktop-first-runner plan (PR10 owns supervision/PGID recovery); it is
+// left untouched here and remains resolvable via an explicit cancelRun,
+// which already finalizes a durable Run from its on-disk state.
+//
+// Without this reconciliation, a durable idempotent retry for an orphaned
+// reservation would return a stable {requestId, runId} that can never be
+// loaded (no files were ever written) and would stay "running" forever.
+func reconcileOrphanedReservations(root string, idx *runindex.Index, now func() time.Time) error {
+	records, err := idx.List()
+	if err != nil {
+		return err
+	}
+	for _, record := range records {
+		if isTerminal(record.Status) || record.Status == "pending_manual" {
+			continue
+		}
+		runDir := filepath.Join(root, ".doppels", "runs", record.ID)
+		if _, statErr := os.Stat(filepath.Join(runDir, "run.json")); statErr == nil {
+			continue // engine initialized; resuming/finalizing it is PR10 territory.
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return statErr
+		}
+		if err := materializeOrphanedReservation(root, runDir, record, now, idx); err != nil {
+			return fmt.Errorf("reconcile orphaned Run %s: %w", record.ID, err)
+		}
+	}
+	return nil
+}
+
+// materializeOrphanedReservation synthesizes the minimal durable Run history
+// for a reservation that never reached execution: request.json/run.json (with
+// empty Inputs — the originals were never durably recorded, since only
+// runner.initialize() persists them) followed by run_created and
+// run_interrupted. This keeps the idempotency contract's promise that a
+// retry with the same key always returns the same, loadable reference.
+func materializeOrphanedReservation(root, runDir string, record runindex.Record, now func() time.Time, idx *runindex.Index) error {
+	// A partially-initialized directory (crash mid-Open, before run.json) has
+	// no observers depending on its contents: safe to clear and retry.
+	if err := os.RemoveAll(runDir); err != nil {
+		return err
+	}
+	store, err := localstate.Open(root, record.ID)
+	if err != nil {
+		return err
+	}
+	createdAt, err := time.Parse(time.RFC3339Nano, record.CreatedAt)
+	if err != nil {
+		createdAt = now().UTC()
+	}
+	occurred := now().UTC().Truncate(time.Millisecond)
+	capabilityRef := definitionReferenceFrom(record.Capability)
+	var recipeRef *execution.DefinitionReference
+	if record.Recipe != "" {
+		ref := definitionReferenceFrom(record.Recipe)
+		recipeRef = &ref
+	}
+	request := execution.RequestRecord{
+		APIVersion: execution.APIVersion, Kind: "Request", ID: record.RequestID,
+		CreatedAt: createdAt, IdempotencyKey: "local:" + record.RequestID,
+		Capability: capabilityRef, Inputs: map[string]any{},
+		RequestedBy: execution.ActorReference{Kind: "identity", ID: "local-operator"},
+		Origin:      "cli",
+	}
+	run := execution.RunRecord{
+		APIVersion: execution.APIVersion, Kind: "Run", ID: record.ID, RequestID: record.RequestID,
+		CreatedAt: createdAt, Capability: capabilityRef, Recipe: recipeRef, Inputs: map[string]any{},
+		Executor: execution.ActorReference{Kind: "service", ID: "doppels-runner"}, NodeID: record.NodeID,
+	}
+	if err := store.WriteRequest(request); err != nil {
+		return err
+	}
+	if err := store.WriteRun(run); err != nil {
+		return err
+	}
+	created := execution.RunEvent{APIVersion: execution.APIVersion, Kind: "RunEvent", RunID: record.ID, Sequence: 0, OccurredAt: createdAt, Type: "run_created"}
+	if err := store.AppendEvent(created); err != nil {
+		return err
+	}
+	interrupted := execution.RunEvent{
+		APIVersion: execution.APIVersion, Kind: "RunEvent", RunID: record.ID, Sequence: 1, OccurredAt: occurred, Type: "run_interrupted",
+		Data: map[string]any{"reason": "runner restarted before this Run began executing"},
+	}
+	if err := store.AppendEvent(interrupted); err != nil {
+		return err
+	}
+	record.Status = "interrupted"
+	record.FinishedAt = occurred.Format(time.RFC3339Nano)
+	if err := idx.Upsert(record); err != nil {
+		return err
+	}
+	return idx.EnqueueOutbox(record.ID, map[string]any{
+		"id": record.ID, "requestId": record.RequestID, "status": record.Status,
+		"capability": record.Capability, "recipe": record.Recipe,
+		"createdAt": record.CreatedAt, "finishedAt": record.FinishedAt,
+	})
+}
+
+func definitionReferenceFrom(value string) execution.DefinitionReference {
+	name, version, _ := strings.Cut(value, "@")
+	return execution.DefinitionReference{Name: name, Version: version}
 }
 
 func (m *Manager) Active() int {
