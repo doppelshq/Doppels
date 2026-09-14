@@ -2,8 +2,10 @@ package runindex
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -78,5 +80,167 @@ func TestBackfillFromDisk(t *testing.T) {
 	}
 	if len(items) != 1 || items[0].Status != "succeeded" || items[0].Capability != "greet@1.0.0" {
 		t.Fatalf("backfill items = %#v", items)
+	}
+}
+
+func TestReserveStartIsAtomicAcrossIndexesAndSurvivesRestart(t *testing.T) {
+	root := t.TempDir()
+	first, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const callers = 24
+	type outcome struct {
+		reservation IdempotencyRecord
+		created     bool
+		err         error
+	}
+	outcomes := make(chan outcome, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	start := make(chan struct{})
+	for i := 0; i < callers; i++ {
+		go func(i int) {
+			ready.Done()
+			<-start
+			idx := first
+			if i%2 == 1 {
+				idx = second
+			}
+			record := Record{
+				ID: "run-" + string(rune('a'+i)), RequestID: "request-" + string(rune('a'+i)),
+				Status: "running", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T12:00:00Z",
+				StateDir: filepath.Join(root, ".doppels", "runs", "candidate"),
+			}
+			reservation, created, err := idx.ReserveStart(record, "same-key", "same-fingerprint")
+			outcomes <- outcome{reservation: reservation, created: created, err: err}
+		}(i)
+	}
+	ready.Wait()
+	close(start)
+
+	var winner IdempotencyRecord
+	createdCount := 0
+	all := make([]outcome, 0, callers)
+	for i := 0; i < callers; i++ {
+		got := <-outcomes
+		all = append(all, got)
+		if got.err != nil {
+			t.Fatalf("ReserveStart: %v", got.err)
+		}
+		if got.created {
+			createdCount++
+			winner = got.reservation
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created reservations = %d, want 1", createdCount)
+	}
+	for _, got := range all {
+		if got.reservation != winner {
+			t.Fatalf("reservation = %#v, winner = %#v", got.reservation, winner)
+		}
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	retry, created, err := reopened.ReserveStart(Record{
+		ID: "other-run", RequestID: "other-request", Status: "running",
+		Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root,
+	}, "same-key", "same-fingerprint")
+	if err != nil || created || retry != winner {
+		t.Fatalf("retry = %#v, created=%v, err=%v; want original %#v", retry, created, err, winner)
+	}
+	if _, _, err := reopened.ReserveStart(Record{
+		ID: "collision", RequestID: "collision-request", Status: "running",
+		Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root,
+	}, "same-key", "different-fingerprint"); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("collision error = %v, want ErrIdempotencyConflict", err)
+	}
+	records, err := reopened.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 1 || records[0].ID != winner.RunID {
+		t.Fatalf("records = %#v, want only winning Run", records)
+	}
+}
+
+func TestListPageUsesStableCursorAndBoundedFilters(t *testing.T) {
+	root := t.TempDir()
+	idx, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	for _, record := range []Record{
+		{ID: "run-b", RequestID: "req-b", Status: "failed", Capability: "other@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root},
+		{ID: "run-c", RequestID: "req-c", Status: "running", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T14:00:00Z", StateDir: root},
+		{ID: "run-b2", RequestID: "req-b2", Status: "failed", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root},
+		{ID: "run-a", RequestID: "req-a", Status: "succeeded", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T13:00:00Z", StateDir: root},
+		{ID: "run-d", RequestID: "req-d", Status: "running", Capability: "greet@1.0.0", CreatedAt: "2026-09-14T12:00:00Z", StateDir: root},
+	} {
+		if err := idx.Upsert(record); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := idx.ListPage(ListQuery{Capability: "greet@1.0.0", Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRunIDs(t, first.Records, "run-c", "run-a")
+	if first.NextCursor == "" {
+		t.Fatal("first page has no next cursor")
+	}
+	second, err := idx.ListPage(ListQuery{Capability: "greet@1.0.0", Limit: 2, Cursor: first.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRunIDs(t, second.Records, "run-b2", "run-d")
+	if second.NextCursor != "" {
+		t.Fatalf("last page cursor = %q, want empty", second.NextCursor)
+	}
+
+	failed, err := idx.ListPage(ListQuery{Status: "failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRunIDs(t, failed.Records, "run-b", "run-b2")
+
+	if _, err := idx.ListPage(ListQuery{Capability: "other@1.0.0", Limit: 2, Cursor: first.NextCursor}); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("cursor reused with different filter: %v, want ErrInvalidCursor", err)
+	}
+	if _, err := idx.ListPage(ListQuery{Cursor: "not-an-opaque-cursor"}); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("malformed cursor: %v, want ErrInvalidCursor", err)
+	}
+	if _, err := idx.ListPage(ListQuery{Limit: MaxPageSize + 1}); !errors.Is(err, ErrInvalidLimit) {
+		t.Fatalf("oversize limit: %v, want ErrInvalidLimit", err)
+	}
+}
+
+func assertRunIDs(t *testing.T, records []Record, want ...string) {
+	t.Helper()
+	if len(records) != len(want) {
+		t.Fatalf("records = %#v, want ids %v", records, want)
+	}
+	for i := range want {
+		if records[i].ID != want[i] {
+			t.Fatalf("record %d id = %q, want %q (all = %#v)", i, records[i].ID, want[i], records)
+		}
 	}
 }
