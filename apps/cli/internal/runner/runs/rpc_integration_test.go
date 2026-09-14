@@ -134,6 +134,10 @@ returns: {value: "{{ steps.run.value }}"}
 		t.Fatal(err)
 	}
 
+	// startRun is deliberately asynchronous. Wait until the fixture Step has
+	// started so this test exercises its intended mid-flight subscription,
+	// with an initialized on-disk history available for replay.
+	waitForFile(t, filepath.Join(root, "started"))
 	subResponse := client.call("sub", "v1/subscribeRun", map[string]any{"runId": started.RunID})
 	if subResponse.Err != nil {
 		t.Fatalf("subscribeRun: %+v", subResponse.Err)
@@ -146,7 +150,6 @@ returns: {value: "{{ steps.run.value }}"}
 		t.Fatalf("subscribeRun snapshot = %#v", snapshot)
 	}
 
-	waitForFile(t, filepath.Join(root, "started"))
 	cancelResponse := client.call("cancel", "v1/cancelRun", map[string]any{"runId": started.RunID})
 	if cancelResponse.Err != nil {
 		t.Fatalf("cancelRun: %+v", cancelResponse.Err)
