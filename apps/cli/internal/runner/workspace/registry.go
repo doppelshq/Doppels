@@ -22,6 +22,17 @@ import (
 // (add) or is not registered (remove, scoped lookups) — RFC §11 -32003.
 var ErrWorkspaceNotFound = errors.New("workspace not found")
 
+// PostCommitWarning reports that a mutation reached its logical commit point
+// but lost the guarantee that the containing directory entry is durable. The
+// returned mutation result is authoritative for the running process and the
+// Registry remains fail-stop until restart.
+type PostCommitWarning struct {
+	cause error
+}
+
+func (w *PostCommitWarning) Error() string { return w.cause.Error() }
+func (w *PostCommitWarning) Unwrap() error { return w.cause }
+
 // registryFile is the on-disk persistence format under the Runner config
 // dir. It survives Runner restarts; roots are canonical absolute paths.
 type registryFile struct {
@@ -141,6 +152,14 @@ func (r *Registry) Contains(canonical string) bool {
 	return ok
 }
 
+// Degraded reports whether a post-commit durability failure has left the
+// Registry fail-stop until restart.
+func (r *Registry) Degraded() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.failed != nil
+}
+
 // Add registers root, canonicalizing it first. Idempotent: adding an
 // already-registered root (including via a symlink alias) succeeds with
 // added=false and does not duplicate the entry. The root must exist and be
@@ -173,6 +192,7 @@ func (r *Registry) Add(root string) (canonical string, added bool, err error) {
 	if err != nil {
 		if installed {
 			r.failed = err
+			return canonical, true, &PostCommitWarning{cause: err}
 		}
 		return "", false, err
 	}
@@ -211,6 +231,7 @@ func (r *Registry) Remove(root string) (canonical string, err error) {
 	if err != nil {
 		if installed {
 			r.failed = err
+			return canonical, &PostCommitWarning{cause: err}
 		}
 		return "", err
 	}

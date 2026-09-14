@@ -45,10 +45,10 @@ func (s *Service) AddWorkspace(root string) (proto.WorkspaceSummary, bool, error
 	s.mutationMu.Lock()
 	canonical, added, err := s.registry.Add(root)
 	s.mutationMu.Unlock()
-	if err != nil {
+	if _, committed := asPostCommitWarning(err); err != nil && !committed {
 		return proto.WorkspaceSummary{}, false, err
 	}
-	return BuildWorkspaceSummary(canonical, s.deps), added, nil
+	return BuildWorkspaceSummary(canonical, s.deps), added, err
 }
 
 func (s *Service) RemoveWorkspace(root string) (string, error) {
@@ -61,26 +61,34 @@ func (s *Service) addWorkspaceForEvent(root string) (proto.WorkspaceSummary, boo
 	s.mutationMu.Lock()
 	canonical, added, err := s.registry.Add(root)
 	var sequence uint64
-	if err == nil && added {
+	_, committed := asPostCommitWarning(err)
+	if (err == nil || committed) && added {
 		s.eventSequence++
 		sequence = s.eventSequence
 	}
 	s.mutationMu.Unlock()
-	if err != nil {
+	if err != nil && !committed {
 		return proto.WorkspaceSummary{}, false, 0, err
 	}
-	return BuildWorkspaceSummary(canonical, s.deps), added, sequence, nil
+	return BuildWorkspaceSummary(canonical, s.deps), added, sequence, err
 }
 
 func (s *Service) removeWorkspaceForEvent(root string) (string, uint64, error) {
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
 	canonical, err := s.registry.Remove(root)
-	if err != nil {
+	_, committed := asPostCommitWarning(err)
+	if err != nil && !committed {
 		return "", 0, err
 	}
 	s.eventSequence++
-	return canonical, s.eventSequence, nil
+	return canonical, s.eventSequence, err
+}
+
+func asPostCommitWarning(err error) (*PostCommitWarning, bool) {
+	var warning *PostCommitWarning
+	ok := errors.As(err, &warning)
+	return warning, ok
 }
 
 func (s *Service) ListWorkspaces() []proto.WorkspaceSummary {
@@ -97,6 +105,9 @@ func (s *Service) ListWorkspaces() []proto.WorkspaceSummary {
 // an already-degraded state is never promoted here.
 func (s *Service) NodeStatus(status proto.NodeStatus) proto.NodeStatus {
 	status.Workspaces = s.ListWorkspaces()
+	if s.registry.Degraded() {
+		status.State = "degraded"
+	}
 	for _, workspace := range status.Workspaces {
 		if workspace.Health != healthOK {
 			status.State = "degraded"

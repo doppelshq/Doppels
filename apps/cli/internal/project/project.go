@@ -204,15 +204,12 @@ func DiscoverWith(root string, discovery Discovery) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		resolvedDir, err := filepath.EvalSymlinks(clean)
-		if errors.Is(err, os.ErrNotExist) && !hasSymlinkComponent(canonicalRoot, clean) {
-			continue
-		}
+		resolvedDir, exists, err := resolveOptionalPath(canonicalRoot, clean)
 		if err != nil {
 			return nil, fmt.Errorf("resolve discovery path %s: %w", clean, err)
 		}
-		if !pathWithin(canonicalRoot, resolvedDir) {
-			return nil, fmt.Errorf("discovery path %q resolves outside Space root", relative)
+		if !exists {
+			continue
 		}
 		if _, ok := seenDirs[resolvedDir]; ok {
 			continue
@@ -269,26 +266,36 @@ func pathWithin(root, path string) bool {
 	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
-func hasSymlinkComponent(root, path string) bool {
-	relative, err := filepath.Rel(root, path)
-	if err != nil {
-		return false
+// resolveOptionalPath canonicalizes an existing discovery path. When only an
+// optional suffix is absent, it resolves the longest existing ancestor and
+// accepts the omission only if that ancestor remains inside root. An existing
+// symlink that itself cannot be resolved is dangling and remains an error.
+func resolveOptionalPath(root, path string) (resolved string, exists bool, err error) {
+	current := path
+	for {
+		resolved, err := filepath.EvalSymlinks(current)
+		if err == nil {
+			if !pathWithin(root, resolved) {
+				return "", false, fmt.Errorf("path resolves outside Space root")
+			}
+			return resolved, current == path, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", false, err
+		}
+		info, lstatErr := os.Lstat(current)
+		if lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", false, err
+		}
+		if lstatErr != nil && !errors.Is(lstatErr, os.ErrNotExist) {
+			return "", false, lstatErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", false, err
+		}
+		current = parent
 	}
-	current := root
-	for _, component := range strings.Split(relative, string(filepath.Separator)) {
-		if component == "." || component == "" {
-			continue
-		}
-		current = filepath.Join(current, component)
-		info, err := os.Lstat(current)
-		if err != nil {
-			return false
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func resolveUnderRoot(root, relative string) (string, error) {

@@ -38,13 +38,21 @@ func RegisterRPC(target RPCServer, service *Service) {
 			return nil, invalidParams("root is required")
 		}
 		summary, added, sequence, err := service.addWorkspaceForEvent(request.Root)
-		if err != nil {
+		warning, committed := asPostCommitWarning(err)
+		if err != nil && !committed {
 			return nil, domainError(err)
 		}
 		if added {
 			// Registry.Add synchronously commits before returning, so observers
 			// can always reload the root by the time they receive this event.
-			events.Publish(sequence, proto.NodeEvent{Kind: proto.NodeEventWorkspaceAdded, Payload: summary})
+			batch := []proto.NodeEvent{{Kind: proto.NodeEventWorkspaceAdded, Payload: summary}}
+			if committed {
+				batch = append(batch, registryDegradedEvent(warning))
+			}
+			events.Publish(sequence, batch...)
+		}
+		if committed {
+			return nil, postCommitRPCError(warning, summary)
 		}
 		return summary, nil
 	})
@@ -59,16 +67,25 @@ func RegisterRPC(target RPCServer, service *Service) {
 			return nil, invalidParams("root is required")
 		}
 		root, sequence, err := service.removeWorkspaceForEvent(request.Root)
-		if err != nil {
+		warning, committed := asPostCommitWarning(err)
+		if err != nil && !committed {
 			return nil, domainError(err)
 		}
 		// Registry.Remove has already atomically persisted the new set and
 		// never deletes workspace files.
-		events.Publish(sequence, proto.NodeEvent{
+		batch := []proto.NodeEvent{{
 			Kind:    proto.NodeEventWorkspaceRemoved,
 			Payload: map[string]string{"root": root},
-		})
-		return map[string]any{}, nil
+		}}
+		result := map[string]any{}
+		if committed {
+			batch = append(batch, registryDegradedEvent(warning))
+		}
+		events.Publish(sequence, batch...)
+		if committed {
+			return nil, postCommitRPCError(warning, result)
+		}
+		return result, nil
 	})
 	target.Handle("v1/listCapabilities", func(params []byte) (any, *proto.Error) {
 		var request struct {
@@ -124,27 +141,27 @@ type nodeEventSequencer struct {
 	mu         sync.Mutex
 	next       uint64
 	publishing bool
-	pending    map[uint64]proto.NodeEvent
+	pending    map[uint64][]proto.NodeEvent
 }
 
 func newNodeEventSequencer(target RPCServer) *nodeEventSequencer {
 	return &nodeEventSequencer{
 		target:  target,
 		next:    1,
-		pending: make(map[uint64]proto.NodeEvent),
+		pending: make(map[uint64][]proto.NodeEvent),
 	}
 }
 
-func (s *nodeEventSequencer) Publish(sequence uint64, event proto.NodeEvent) {
+func (s *nodeEventSequencer) Publish(sequence uint64, events ...proto.NodeEvent) {
 	s.mu.Lock()
-	s.pending[sequence] = event
+	s.pending[sequence] = append([]proto.NodeEvent(nil), events...)
 	if s.publishing {
 		s.mu.Unlock()
 		return
 	}
 	s.publishing = true
 	for {
-		event, ok := s.pending[s.next]
+		events, ok := s.pending[s.next]
 		if !ok {
 			s.publishing = false
 			s.mu.Unlock()
@@ -154,9 +171,34 @@ func (s *nodeEventSequencer) Publish(sequence uint64, event proto.NodeEvent) {
 		s.next++
 		s.mu.Unlock()
 
-		s.target.EmitNodeEvent(event)
+		for _, event := range events {
+			s.target.EmitNodeEvent(event)
+		}
 
 		s.mu.Lock()
+	}
+}
+
+func postCommitRPCError(warning *PostCommitWarning, result any) *proto.Error {
+	return &proto.Error{
+		Code:    proto.CodeInternal,
+		Message: "workspace registry commit applied with degraded durability: " + warning.Error(),
+		Data: map[string]any{
+			"committed": true,
+			"nodeState": "degraded",
+			"result":    result,
+		},
+	}
+}
+
+func registryDegradedEvent(warning *PostCommitWarning) proto.NodeEvent {
+	return proto.NodeEvent{
+		Kind: proto.NodeEventNodeDegraded,
+		Payload: map[string]any{
+			"state":   "degraded",
+			"reason":  "workspaceRegistryDurability",
+			"message": warning.Error(),
+		},
 	}
 }
 

@@ -206,6 +206,14 @@ func TestDiscoverRejectsSymlinkEscapes(t *testing.T) {
 			},
 		},
 		{
+			name: "external directory with missing optional suffix",
+			setup: func(t *testing.T, root, external string) {
+				if err := os.Symlink(external, filepath.Join(root, Directory)); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			},
+		},
+		{
 			name: "declared intermediate directory",
 			setup: func(t *testing.T, root, external string) {
 				if _, err := Init(root); err != nil {
@@ -335,6 +343,47 @@ func TestDiscoverResolvesContainedManifestSymlink(t *testing.T) {
 	}
 	if !reflect.DeepEqual(files, []string{target}) {
 		t.Fatalf("Discover = %#v, want contained canonical target", files)
+	}
+}
+
+func TestDiscoverOmitsMissingOptionalPathThroughContainedSymlink(t *testing.T) {
+	tests := []struct {
+		name      string
+		discovery Discovery
+		link      string
+		target    string
+	}{
+		{
+			name:      "default path",
+			discovery: DefaultDiscovery(),
+			link:      Directory,
+			target:    "metadata",
+		},
+		{
+			name: "multiple missing components",
+			discovery: Discovery{
+				Capabilities: []string{"catalog/not/yet/capabilities"},
+			},
+			link:   "catalog",
+			target: "metadata",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, tt.target)
+			if err := os.MkdirAll(target, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(root, tt.link)); err != nil {
+				t.Skipf("symlinks unsupported: %v", err)
+			}
+
+			files, err := DiscoverWith(root, tt.discovery)
+			if err != nil || len(files) != 0 {
+				t.Fatalf("DiscoverWith = %#v, %v; want absent optional path omitted", files, err)
+			}
+		})
 	}
 }
 

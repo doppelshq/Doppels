@@ -2,8 +2,10 @@ package workspace
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -257,6 +259,113 @@ func TestRegisterRPCDoesNotEmitEventWhenPersistenceFails(t *testing.T) {
 	}
 	if len(target.events) != 0 || len(registry.Roots()) != 0 {
 		t.Fatalf("failed persistence changed state: events=%+v roots=%v", target.events, registry.Roots())
+	}
+}
+
+func TestRegisterRPCPostCommitWarningSynchronizesCallerAndSubscriber(t *testing.T) {
+	injected := errors.New("injected post-rename failure")
+	tests := []struct {
+		name           string
+		method         string
+		workspaceEvent string
+		seed           bool
+		inject         func(*Registry)
+		committed      func(*Registry, string) bool
+	}{
+		{
+			name:           "add open directory failure",
+			method:         "v1/addWorkspace",
+			workspaceEvent: proto.NodeEventWorkspaceAdded,
+			inject: func(registry *Registry) {
+				registry.files.openDirectory = func(string) (directorySyncer, error) { return nil, injected }
+			},
+			committed: func(registry *Registry, root string) bool { return registry.Contains(root) },
+		},
+		{
+			name:           "remove directory sync failure",
+			method:         "v1/removeWorkspace",
+			workspaceEvent: proto.NodeEventWorkspaceRemoved,
+			seed:           true,
+			inject: func(registry *Registry) {
+				registry.files.openDirectory = func(string) (directorySyncer, error) {
+					return failingDirectory{syncErr: injected}, nil
+				}
+			},
+			committed: func(registry *Registry, root string) bool { return !registry.Contains(root) },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := t.TempDir()
+			root := initRoot(t, filepath.Join(base, "workspace"))
+			canonical, err := Canonicalize(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			registryPath := filepath.Join(base, "workspaces.json")
+			registry := NewRegistry(registryPath)
+			if tt.seed {
+				if _, _, err := registry.Add(root); err != nil {
+					t.Fatal(err)
+				}
+			}
+			tt.inject(registry)
+			service := NewService(registry, Deps{})
+			target := &fakeRPCServer{}
+			RegisterRPC(target, service)
+
+			result, rpcErr := target.handlers[tt.method](rpcParams(t, map[string]any{"root": root}))
+			if result != nil || rpcErr == nil || rpcErr.Code != proto.CodeInternal || !strings.Contains(rpcErr.Message, injected.Error()) {
+				t.Fatalf("RPC result = %#v, error = %+v; want committed internal warning", result, rpcErr)
+			}
+			data, ok := rpcErr.Data.(map[string]any)
+			if !ok || data["committed"] != true || data["nodeState"] != "degraded" || data["result"] == nil {
+				t.Fatalf("error data = %#v; caller cannot reconcile committed degraded state", rpcErr.Data)
+			}
+			if len(target.events) != 2 || target.events[0].Kind != tt.workspaceEvent || target.events[1].Kind != proto.NodeEventNodeDegraded {
+				t.Fatalf("events = %+v; want workspace event followed by nodeDegraded", target.events)
+			}
+			if tt.method == "v1/addWorkspace" {
+				summary, resultOK := data["result"].(proto.WorkspaceSummary)
+				eventSummary, eventOK := target.events[0].Payload.(proto.WorkspaceSummary)
+				if !resultOK || !eventOK || summary.Root != canonical || eventSummary.Root != canonical {
+					t.Fatalf("caller result = %#v, event payload = %#v; want committed root %s", data["result"], target.events[0].Payload, canonical)
+				}
+			} else {
+				empty, resultOK := data["result"].(map[string]any)
+				removed, eventOK := target.events[0].Payload.(map[string]string)
+				if !resultOK || len(empty) != 0 || !eventOK || removed["root"] != canonical {
+					t.Fatalf("caller result = %#v, event payload = %#v; want committed removal of %s", data["result"], target.events[0].Payload, canonical)
+				}
+			}
+			degraded, ok := target.events[1].Payload.(map[string]any)
+			message, messageOK := degraded["message"].(string)
+			if !ok || degraded["state"] != "degraded" || degraded["reason"] != "workspaceRegistryDurability" || !messageOK || !strings.Contains(message, injected.Error()) {
+				t.Fatalf("nodeDegraded payload = %#v", target.events[1].Payload)
+			}
+			if status := service.NodeStatus(proto.NodeStatus{State: "online"}); status.State != "degraded" {
+				t.Fatalf("NodeStatus.State = %q, want degraded", status.State)
+			}
+			if !tt.committed(registry, canonical) {
+				t.Fatalf("registry memory does not reflect committed %s", tt.method)
+			}
+			restarted := NewRegistry(registryPath)
+			if err := restarted.Load(); err != nil || !tt.committed(restarted, canonical) {
+				t.Fatalf("restart does not reflect committed %s: %v", tt.method, err)
+			}
+			if status := NewService(restarted, Deps{}).NodeStatus(proto.NodeStatus{State: "online"}); status.State != "online" {
+				t.Fatalf("NodeStatus after restart = %q, want recovered online state", status.State)
+			}
+
+			blockedMethod := "v1/addWorkspace"
+			if tt.method == blockedMethod {
+				blockedMethod = "v1/removeWorkspace"
+			}
+			_, blockedErr := target.handlers[blockedMethod](rpcParams(t, map[string]any{"root": root}))
+			if blockedErr == nil || blockedErr.Code != proto.CodeInternal || len(target.events) != 2 {
+				t.Fatalf("later mutation = %+v, events = %+v; want fail-stop without events", blockedErr, target.events)
+			}
+		})
 	}
 }
 

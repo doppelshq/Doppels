@@ -287,6 +287,14 @@ reescribe historial (decisiones `run-event-terminal-invariants`,
 | `v1/decideApproval` | `{ runId, stepId, decision: "approve" \| "reject" }` → `{}` | |
 | `v1/shutdown` | `{ reason? }` → `{}` | graceful shutdown; el supervisor decide relanzar (ver §3). conexión cerrada tras ack |
 
+Si `addWorkspace` o `removeWorkspace` alcanza su commit lógico mediante
+`rename`, pero falla el `fsync` del directorio que garantiza su durabilidad,
+el cambio instalado sigue siendo autoritativo para el proceso. El Runner emite
+primero `workspaceAdded`/`workspaceRemoved` y después `nodeDegraded`, bloquea
+nuevas mutaciones del registro hasta reiniciar y responde `-32603` con
+`data: { committed: true, nodeState: "degraded", result: <resultado normal> }`.
+Así el caller puede reconciliar el cambio sin confundirlo con éxito durable.
+
 `v1/startRun`:
 
 ```json

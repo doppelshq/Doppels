@@ -376,13 +376,22 @@ func TestRegistryPersistenceCommitPoint(t *testing.T) {
 			path := filepath.Join(base, "workspaces.json")
 			registry := NewRegistry(path)
 			tt.inject(registry)
-
-			if _, _, err := registry.Add(root); !errors.Is(err, injected) {
-				t.Fatalf("Add error = %v, want injected error", err)
-			}
 			canonical, err := Canonicalize(root)
 			if err != nil {
 				t.Fatal(err)
+			}
+
+			got, added, err := registry.Add(root)
+			if !errors.Is(err, injected) {
+				t.Fatalf("Add error = %v, want injected error", err)
+			}
+			var warning *PostCommitWarning
+			if tt.installed {
+				if got != canonical || !added || !errors.As(err, &warning) {
+					t.Fatalf("Add = %q, %v, %v; want committed result and typed warning", got, added, err)
+				}
+			} else if got != "" || added || errors.As(err, &warning) {
+				t.Fatalf("Add = %q, %v, %v; pre-commit failure must not report a commit", got, added, err)
 			}
 			if registry.Contains(canonical) != tt.installed {
 				t.Fatalf("in-memory installed = %v, want %v", registry.Contains(canonical), tt.installed)
@@ -401,6 +410,40 @@ func TestRegistryPersistenceCommitPoint(t *testing.T) {
 				t.Fatalf("restart = contains %v, error %v; want old state", restarted.Contains(canonical), loadErr)
 			}
 		})
+	}
+}
+
+func TestRegistryRemoveReturnsCommittedResultAfterPostRenameFailure(t *testing.T) {
+	injected := errors.New("injected directory sync failure")
+	base := t.TempDir()
+	root := initRoot(t, filepath.Join(base, "space-a"))
+	path := filepath.Join(base, "workspaces.json")
+	registry := NewRegistry(path)
+	canonical, added, err := registry.Add(root)
+	if err != nil || !added {
+		t.Fatalf("seed Add = %q, %v, %v", canonical, added, err)
+	}
+	registry.files.openDirectory = func(string) (directorySyncer, error) {
+		return failingDirectory{syncErr: injected}, nil
+	}
+
+	got, err := registry.Remove(root)
+	var warning *PostCommitWarning
+	if got != canonical || !errors.Is(err, injected) || !errors.As(err, &warning) {
+		t.Fatalf("Remove = %q, %v; want committed result and typed warning", got, err)
+	}
+	if registry.Contains(canonical) {
+		t.Fatal("committed removal remained in memory")
+	}
+	restarted := NewRegistry(path)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.Contains(canonical) {
+		t.Fatal("committed removal remained on disk after restart")
+	}
+	if _, _, err := registry.Add(root); !errors.Is(err, injected) {
+		t.Fatalf("mutation after uncertain durability = %v, want fail-stop error", err)
 	}
 }
 
