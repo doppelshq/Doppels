@@ -23,6 +23,7 @@ import (
 
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runner/runs"
 	"doppels.so/cli/internal/runner/server"
 	"doppels.so/cli/internal/runner/transport"
 	"doppels.so/cli/internal/runner/workspace"
@@ -76,6 +77,9 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
+	manager := runs.NewManager(ctx, workspaces, runs.Config{Log: log.Printf})
+	defer manager.Close()
+
 	startedAt := time.Now().UTC().Format(time.RFC3339)
 	config := server.Config{
 		Token:         token,
@@ -89,10 +93,16 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 				StartedAt:       startedAt,
 			})
 		},
+		OnShutdown: func() {
+			if err := manager.Close(); err != nil {
+				log.Printf("doppels-runner: close run manager: %v", err)
+			}
+		},
 		Log: log.Printf,
 	}
 	srv := server.New(config)
 	workspace.RegisterRPC(srv, workspaces)
+	runs.RegisterRPC(srv, manager)
 	return srv.Serve(ctx, listener)
 }
 

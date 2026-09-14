@@ -390,6 +390,29 @@ func TestHandleSubscribeDeliversOnlyToCallingConnection(t *testing.T) {
 	}
 }
 
+func TestHandleWithClientPassesHandshakeClientName(t *testing.T) {
+	ts := startServer(t, testConfig())
+	var captured string
+	ts.HandleWithClient("v1/whoami", func(clientName string, params []byte) (any, *proto.Error) {
+		captured = clientName
+		return map[string]any{}, nil
+	})
+
+	client := dialClient(t, ts)
+	if response := client.call("init-1", "v1/initialize", map[string]any{
+		"token":  testToken,
+		"client": map[string]any{"name": "doppels-cli", "version": "0.0.1"},
+	}); response.Err != nil {
+		t.Fatalf("initialize: %+v", response.Err)
+	}
+	if response := client.call("w1", "v1/whoami", map[string]any{}); response.Err != nil {
+		t.Fatalf("whoami: %+v", response.Err)
+	}
+	if captured != "doppels-cli" {
+		t.Fatalf("captured client name = %q, want doppels-cli", captured)
+	}
+}
+
 func TestServerClosesConnectionWithoutHandshake(t *testing.T) {
 	cfg := testConfig()
 	cfg.HandshakeTimeout = 150 * time.Millisecond

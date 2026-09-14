@@ -56,6 +56,11 @@ type RunEventSubscriber interface {
 // invoked the method.
 type SubscribeHandler func(sub RunEventSubscriber, params []byte) (any, *proto.Error)
 
+// ClientHandler is the extension seam for methods that need the calling
+// connection's handshake client name (RFC §9: a Run's source is derived from
+// client.name), without exposing any other connection internals.
+type ClientHandler func(clientName string, params []byte) (any, *proto.Error)
+
 // Server dispatches v1 methods over accepted connections.
 type Server struct {
 	config   Config
@@ -125,6 +130,16 @@ func (s *Server) HandleSubscribe(method string, run SubscribeHandler) {
 	defer s.mu.Unlock()
 	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
 		return run(conn, params)
+	}
+}
+
+// HandleWithClient registers (or replaces) a v1 method that needs the
+// calling connection's handshake client name. See ClientHandler.
+func (s *Server) HandleWithClient(method string, run ClientHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
+		return run(conn.name(), params)
 	}
 }
 
