@@ -184,6 +184,16 @@ func resolveInputs(capability *manifest.Capability, supplied map[string]any) (ma
 	return resolved, nil
 }
 
+// ValidateInputs applies the engine's Capability-owned input contract without
+// creating a Request or Run. Coordinators use it before reserving durable
+// idempotency keys; Execute repeats the same validation defensively.
+func ValidateInputs(capability *manifest.Capability, supplied map[string]any) (map[string]any, error) {
+	if capability == nil {
+		return nil, fmt.Errorf("%w: Capability is required", ErrInvalidInvocation)
+	}
+	return resolveInputs(capability, supplied)
+}
+
 // ParseInputs converts CLI --input name=value strings into Capability-owned
 // scalar types, then applies defaults and validates required and enum fields.
 func ParseInputs(capability *manifest.Capability, supplied map[string]string) (map[string]any, error) {

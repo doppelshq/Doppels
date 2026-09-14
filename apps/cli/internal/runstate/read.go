@@ -69,6 +69,20 @@ func List(root string) ([]Summary, error) {
 }
 
 func Load(root, runID string) (*Detail, error) {
+	return load(root, runID, nil)
+}
+
+type RecordGetter interface {
+	Get(id string) (runindex.Record, error)
+}
+
+// LoadWithIndex reuses a coordinator-owned long-lived index instead of
+// opening a short-lived SQLite handle while enriching the detail status.
+func LoadWithIndex(root, runID string, idx RecordGetter) (*Detail, error) {
+	return load(root, runID, idx)
+}
+
+func load(root, runID string, idx RecordGetter) (*Detail, error) {
 	if !safeID.MatchString(runID) {
 		return nil, fmt.Errorf("invalid Run id %q", runID)
 	}
@@ -96,19 +110,22 @@ func Load(root, runID string) (*Detail, error) {
 	if run.Recipe != nil {
 		summary.Recipe = reference(*run.Recipe)
 	}
-	enrichStatusFromIndex(root, &summary)
+	enrichStatusFromIndex(root, idx, &summary)
 	return &Detail{Summary: summary, Request: request, Run: run, Events: events}, nil
 }
 
-func enrichStatusFromIndex(root string, summary *Summary) {
+func enrichStatusFromIndex(root string, idx RecordGetter, summary *Summary) {
 	if summary == nil || summary.Status != "running" || summary.ID == "" {
 		return
 	}
-	idx, err := runindex.Open(root)
-	if err != nil {
-		return
+	if idx == nil {
+		opened, err := runindex.Open(root)
+		if err != nil {
+			return
+		}
+		defer opened.Close()
+		idx = opened
 	}
-	defer idx.Close()
 	record, err := idx.Get(summary.ID)
 	if err != nil || record.Status == "" {
 		return
