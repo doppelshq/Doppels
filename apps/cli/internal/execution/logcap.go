@@ -3,6 +3,7 @@ package execution
 import (
 	"bytes"
 	"fmt"
+	"io"
 )
 
 // DefaultLogStreamLimit is the max retained bytes per Step stream (stdout or
@@ -52,6 +53,62 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 func (w *cappedWriter) Bytes() []byte { return w.buf.Bytes() }
 
 func (w *cappedWriter) Truncated() bool { return w.truncated }
+
+// teeWriter fans writes out to a disk writer (cappedWriter) and an optional
+// live-stream writer (post-redaction). Both writers must accept the full
+// input even when the disk stream truncates so neither blocks the subprocess
+// pipe; the live stream is bounded only by the subprocess output rate, which
+// the cappedWriter already throttles via the read end of the pipe.
+//
+// Used only when Options.LogStream is set; absent that option, the
+// subprocess writes directly to the cappedWriter.
+type teeWriter struct {
+	disk io.Writer
+	live io.Writer
+}
+
+func (t teeWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if t.disk != nil {
+		if _, err := t.disk.Write(p); err != nil {
+			return 0, err
+		}
+	}
+	if t.live != nil {
+		if _, err := t.live.Write(p); err != nil {
+			return 0, err
+		}
+	}
+	return len(p), nil
+}
+
+// LogFuncToWriter adapts a LogFunc into an io.Writer for callers that still
+// speak io.Writer (TTY, transports). Nil fn yields a no-op writer.
+func LogFuncToWriter(fn LogFunc, stream LogStream) io.Writer {
+	if fn == nil {
+		return nopWriter{}
+	}
+	return logFuncWriter{fn: fn, stream: stream}
+}
+
+type logFuncWriter struct {
+	fn     LogFunc
+	stream LogStream
+}
+
+func (w logFuncWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	w.fn(w.stream, p)
+	return len(p), nil
+}
+
+type nopWriter struct{}
+
+func (nopWriter) Write(p []byte) (int, error) { return len(p), nil }
 
 func finalizeLogBytes(data []byte, truncated bool, limit int) []byte {
 	if !truncated {

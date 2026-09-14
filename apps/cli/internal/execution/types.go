@@ -144,6 +144,26 @@ type EventFunc func(context.Context, RunEvent) error
 // before publishing the immutable terminal event.
 type BeforeSuccessFunc func(context.Context, RunRecord, map[string]any, map[string]any) error
 
+// LogStream identifies the source of a streaming log chunk emitted by a
+// running Step. The set is closed: future additions must be additive and
+// never repurpose an existing value.
+type LogStream string
+
+const (
+	LogStreamStdout LogStream = "stdout"
+	LogStreamStderr LogStream = "stderr"
+)
+
+// LogFunc receives step output chunks as the subprocess writes them. The
+// callback fires from the process goroutine and MUST return quickly: it is
+// the live wire the Runner will use to forward v1/runLog notifications to
+// Desktop subscribers. A nil LogFunc is a no-op.
+//
+// Chunks are emitted AFTER secret redaction and BEFORE the disk-buffer cap,
+// so the live stream and the redacted-on-disk file are byte-identical by
+// construction (split-secret state lives in the engine, not the Runner).
+type LogFunc func(stream LogStream, chunk []byte)
+
 // Invocation contains definitions that discovery and recipe selection already
 // resolved. Recipe is nil for a manual fulfillment without a codified Recipe.
 type Invocation struct {
@@ -185,6 +205,13 @@ type Options struct {
 	// LogStreamLimit caps retained stdout/stderr bytes per Step stream.
 	// Zero means DefaultLogStreamLimit.
 	LogStreamLimit int
+	// LogStream, when non-nil, receives every chunk a Step writes to its
+	// stdout or stderr AFTER secret redaction but BEFORE the disk-buffer cap
+	// that produces the persisted log files. The bytes match the redacted
+	// file byte-for-byte (engine keeps split-secret state). The daemon uses
+	// this to forward live output to Desktop subscribers; nil keeps the
+	// legacy path.
+	LogStream LogFunc
 }
 
 type StepResult struct {

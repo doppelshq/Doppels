@@ -14,6 +14,7 @@ import (
 	"github.com/mattn/go-isatty"
 
 	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/listener"
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/project"
 )
@@ -265,12 +266,7 @@ func (app *App) localCatalog() (string, *manifest.Catalog, int) {
 }
 
 func resolveCapabilityArgument(catalog *manifest.Catalog, resource string) (manifest.CapabilityDefinition, error) {
-	kind, reference, ok := strings.Cut(resource, "/")
-	if !ok || reference == "" || (kind != "capability" && kind != "capabilities") {
-		return manifest.CapabilityDefinition{}, errors.New("resource must use capability/<name>[@version]")
-	}
-	name, version, _ := strings.Cut(reference, "@")
-	return findCapability(catalog, name, version)
+	return listener.ResolveCapabilityArgument(catalog, resource)
 }
 
 func parseNamedValues(raw []string) (map[string]string, error) {

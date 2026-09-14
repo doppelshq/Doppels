@@ -2,6 +2,7 @@ package shareclient
 
 import (
 	"encoding/json"
+	"time"
 
 	"doppels.so/cli/internal/execution"
 )
@@ -17,7 +18,10 @@ func SanitizeRunEvent(source execution.RunEvent) execution.RunEvent {
 		Kind:       source.Kind,
 		RunID:      source.RunID,
 		Sequence:   source.Sequence,
-		OccurredAt: source.OccurredAt,
+		// The control plane stores microseconds and echoes timestamps back in
+		// acknowledgements; sub-millisecond digits never round-trip, so pin
+		// the wire format here (nanosecond clocks would fail every ack).
+		OccurredAt: source.OccurredAt.UTC().Truncate(time.Millisecond),
 		Type:       source.Type,
 		StepID:     source.StepID,
 	}
