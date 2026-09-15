@@ -46,26 +46,17 @@ WantedBy=default.target
 	return []byte(unit), nil
 }
 
+// escapeSystemdExecValue renders a string for systemd's ExecStart. systemd
+// expands `$$` → `$` and `${VAR}` → the variable's value; every other `$`
+// (including bare `$NAME`, `$1`, trailing `$`, ...) is passed through
+// literally. The only safe mapping is "double every `$": the input `$$`
+// becomes `$$$$` (which systemd folds back to `$$` literal); input
+// `${VAR}` becomes `$${VAR}` (which systemd leaves as `${VAR}` literal);
+// input `$NAME` becomes `$$NAME` (which systemd leaves as `$NAME`
+// literal). This makes escaping a single uniform rule with no special
+// cases to misalign with systemd's actual behaviour.
 func escapeSystemdExecValue(value string) string {
-	var escaped strings.Builder
-	escaped.Grow(len(value))
-	for i := 0; i < len(value); i++ {
-		if value[i] != '$' {
-			escaped.WriteByte(value[i])
-			continue
-		}
-		if i+1 < len(value) && value[i+1] == '$' {
-			escaped.WriteString("$$$$")
-			i++
-			continue
-		}
-		if i+1 < len(value) && value[i+1] == '{' {
-			escaped.WriteString("$$")
-			continue
-		}
-		escaped.WriteString("$$$")
-	}
-	return escaped.String()
+	return strings.ReplaceAll(value, "$", "$$")
 }
 
 func quoteSystemd(value string) (string, error) {

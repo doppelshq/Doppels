@@ -61,18 +61,27 @@ func TestRenderSystemdUnitEscapesVariableExpansionInExecValues(t *testing.T) {
 }
 
 func TestEscapeSystemdExecValue(t *testing.T) {
+	// Doubling every `$` is the correct mapping for systemd: `$$` in the
+	// unit file renders to `$` literal; `${VAR}` renders to `${VAR}`
+	// literal; bare `$NAME` is passed through untouched. Any other rule
+	// corrupts values containing bare `$` not followed by `{`.
 	for _, tt := range []struct {
+		name  string
 		value string
 		want  string
 	}{
-		{value: `${UNSET}`, want: `$${UNSET}`},
-		{value: `$$`, want: `$$$$`},
-		{value: `$NAME`, want: `$$$NAME`},
-		{value: `trailing$`, want: `trailing$$$`},
+		{"dollar-brace", `${UNSET}`, `$${UNSET}`},
+		{"doubled-dollar", `$$`, `$$$$`},
+		{"bare-dollar-name", `$NAME`, `$$NAME`},
+		{"trailing-dollar", `trailing$`, `trailing$$`},
+		{"mixed", `/opt/bin/$NAME/${VAR}/token$$`, `/opt/bin/$$NAME/$${VAR}/token$$$$`},
+		{"empty", ``, ``},
 	} {
-		if got := escapeSystemdExecValue(tt.value); got != tt.want {
-			t.Errorf("escapeSystemdExecValue(%q) = %q, want %q", tt.value, got, tt.want)
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			if got := escapeSystemdExecValue(tt.value); got != tt.want {
+				t.Errorf("escapeSystemdExecValue(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
 	}
 }
 
