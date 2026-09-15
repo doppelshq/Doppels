@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -997,6 +998,72 @@ func TestClosedConnectionStopsExecutingBufferedRequests(t *testing.T) {
 	if count := executed.Load(); count != 0 {
 		t.Fatalf("buffered request executed %d times after close", count)
 	}
+}
+
+// TestOversizedMethodPreservesValidIDOverRealSocket reproduces a review
+// finding end-to-end over the real transport: a request whose method
+// exceeds MaxMethodBytes is rejected (-32600), but its id — independently
+// valid and already decoded successfully — must still be echoed back for
+// correlation, not discarded to null. Contrasted with an id that is itself
+// oversized, which must fall back to null. The connection must stay usable
+// (ping) after either.
+func TestOversizedMethodPreservesValidIDOverRealSocket(t *testing.T) {
+	ts := startServer(t, testConfig())
+	client := dialClient(t, ts)
+	if response := client.initialize(); response.Err != nil {
+		t.Fatalf("initialize: %+v", response.Err)
+	}
+
+	t.Run("oversized method preserves a valid id", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", proto.MaxMethodBytes-2)
+		response := client.call("keep-me", method, nil)
+		if response.Err == nil || response.Err.Code != proto.CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", response.Err)
+		}
+		idJSON, err := json.Marshal(response.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(idJSON) != `"keep-me"` {
+			t.Fatalf("id = %s, want preserved %q", idJSON, "keep-me")
+		}
+		if ping := client.call("ping-after-oversized-method", "v1/ping", map[string]any{}); ping.Err != nil {
+			t.Fatalf("connection unusable after oversized-method error: %+v", ping.Err)
+		}
+	})
+
+	t.Run("oversized id falls back to null", func(t *testing.T) {
+		id := strings.Repeat("i", proto.MaxIDBytes-1)
+		response := client.call(id, "v1/ping", map[string]any{})
+		if response.Err == nil || response.Err.Code != proto.CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", response.Err)
+		}
+		idJSON, err := json.Marshal(response.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(idJSON) != "null" {
+			t.Fatalf("id = %s, want null (the id itself is what's invalid)", idJSON)
+		}
+		if ping := client.call("ping-after-oversized-id", "v1/ping", map[string]any{}); ping.Err != nil {
+			t.Fatalf("connection unusable after oversized-id error: %+v", ping.Err)
+		}
+	})
+
+	t.Run("method exactly at cap goes to dispatch and preserves id", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", proto.MaxMethodBytes-3)
+		response := client.call("keep-me-too", method, nil)
+		if response.Err == nil || response.Err.Code != proto.CodeMethodNotFound {
+			t.Fatalf("err = %+v, want methodNotFound", response.Err)
+		}
+		idJSON, err := json.Marshal(response.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(idJSON) != `"keep-me-too"` {
+			t.Fatalf("id = %s, want preserved %q", idJSON, "keep-me-too")
+		}
+	})
 }
 
 // TestConnectionStateIsRaceFree pins that the diagnostic client name is read

@@ -74,9 +74,17 @@ func (c *connection) serve() {
 		}
 		message, protoErr := proto.DecodeMessage(frame)
 		if protoErr != nil {
-			// Protocol errors answer with id null and keep the connection
-			// alive (§15: only framing corruption forces a close).
-			c.enqueueError(nil, protoErr, true)
+			// DecodeMessage returns a non-nil message (carrying the
+			// already-validated id) for every error where that id can
+			// still be trusted enough to correlate — only a frame whose id
+			// itself couldn't be determined or validated answers with id
+			// null (§15: only framing corruption forces a close; the
+			// connection otherwise stays alive either way).
+			var id any
+			if message != nil {
+				id = message.ID
+			}
+			c.enqueueError(id, protoErr, true)
 			continue
 		}
 		if message.IsNotification() {

@@ -219,6 +219,15 @@ func (n Notification) MarshalJSON() ([]byte, error) {
 // DecodeMessage parses one incoming frame. Batch arrays, wrong jsonrpc
 // versions, and frames without a method yield the JSON-RPC error the RFC
 // prescribes (-32600 / -32700).
+//
+// The returned *Message is nil only when the id itself could not be
+// determined or trusted (frame didn't even parse as one JSON object, or the
+// id's own type/size is invalid) — the cases where JSON-RPC's id-null
+// convention actually applies. For every other error below (bad jsonrpc
+// version, missing/oversized method), the id was already decoded and
+// already passed its own validation, so the returned *Message still carries
+// it: callers must correlate the error with the caller's real id instead of
+// discarding it just because something else in the request was wrong.
 func DecodeMessage(data []byte) (*Message, *Error) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) == 0 {
@@ -238,15 +247,6 @@ func DecodeMessage(data []byte) (*Message, *Error) {
 	} else if !errors.Is(err, io.EOF) {
 		return nil, &Error{Code: CodeParse, Message: "malformed JSON frame"}
 	}
-	if message.JSONRPC != "2.0" {
-		return nil, &Error{Code: CodeInvalidRequest, Message: `jsonrpc must be "2.0"`}
-	}
-	if message.Method == "" {
-		return nil, &Error{Code: CodeInvalidRequest, Message: "method is required"}
-	}
-	if len(message.Method) > MaxMethodBytes {
-		return nil, &Error{Code: CodeInvalidRequest, Message: "method exceeds maximum size"}
-	}
 	// Real ids are short (UUIDs, small integers, short strings). Bounding id
 	// size here — a contract/framing decision, not a per-handler one — is
 	// what actually guarantees every error envelope (id plus a small,
@@ -254,9 +254,21 @@ func DecodeMessage(data []byte) (*Message, *Error) {
 	// handler-level size check can be trusted to save an id this function
 	// let through unbounded. An oversized id is a malformed request the
 	// same way a batch array is: JSON-RPC permits answering with id null
-	// when the request's own id cannot be trusted enough to echo back.
+	// when the request's own id cannot be trusted enough to echo back. This
+	// check must run before any other validation below returns the id: an
+	// id that fails its own size check is never eligible to be preserved,
+	// no matter what else is also wrong with the request.
 	if len(message.ID.raw) > MaxIDBytes {
 		return nil, &Error{Code: CodeInvalidRequest, Message: "id exceeds maximum size"}
+	}
+	if message.JSONRPC != "2.0" {
+		return &message, &Error{Code: CodeInvalidRequest, Message: `jsonrpc must be "2.0"`}
+	}
+	if message.Method == "" {
+		return &message, &Error{Code: CodeInvalidRequest, Message: "method is required"}
+	}
+	if len(message.Method) > MaxMethodBytes {
+		return &message, &Error{Code: CodeInvalidRequest, Message: "method exceeds maximum size"}
 	}
 	return &message, nil
 }
