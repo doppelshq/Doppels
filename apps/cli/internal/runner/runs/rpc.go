@@ -14,14 +14,17 @@ type RPCServer interface {
 	Handle(method string, handler server.Handler)
 	HandleWithClient(method string, handler server.ClientHandler)
 	HandleSubscribe(method string, handler server.SubscribeHandler)
+	HandleRunLogSubscribe(method string, handler server.RunLogSubscribeHandler)
 	EmitNodeEvent(event proto.NodeEvent)
 	OnClose(fn func())
+	EnableCapability(capability string)
 }
 
 // RegisterRPC attaches the PR6 method surface to the Runner server.
 func RegisterRPC(target RPCServer, manager *Manager) {
 	manager.installNodeEventEmitter(target.EmitNodeEvent)
 	target.OnClose(func() { _ = manager.Close() })
+	target.EnableCapability(proto.CapabilityLiveLogs)
 
 	target.HandleWithClient("v1/startRun", func(clientName string, params []byte) (any, *proto.Error) {
 		return manager.Start(clientName, params)
@@ -137,6 +140,20 @@ func RegisterRPC(target RPCServer, manager *Manager) {
 			return nil, err
 		}
 		return map[string]any{}, nil
+	})
+
+	target.HandleRunLogSubscribe("v1/subscribeRunLogs", func(sub server.RunLogSubscriber, params []byte) (any, *proto.Error) {
+		var request struct {
+			RunID  string `json:"runId"`
+			StepID string `json:"stepId"`
+		}
+		if err := decodeRPCParams(params, &request); err != nil {
+			return nil, err
+		}
+		if request.RunID == "" {
+			return nil, invalidParams("runId is required")
+		}
+		return manager.SubscribeRunLogs(request.RunID, request.StepID, sub)
 	})
 }
 

@@ -11,11 +11,13 @@ import (
 )
 
 type fakeRPCServer struct {
-	handlers    map[string]server.Handler
-	client      map[string]server.ClientHandler
-	subscribers map[string]server.SubscribeHandler
-	nodeEvents  []proto.NodeEvent
-	closeHooks  []func()
+	handlers     map[string]server.Handler
+	client       map[string]server.ClientHandler
+	subscribers  map[string]server.SubscribeHandler
+	logSubs      map[string]server.RunLogSubscribeHandler
+	nodeEvents   []proto.NodeEvent
+	closeHooks   []func()
+	capabilities []string
 }
 
 func newFakeRPCServer() *fakeRPCServer {
@@ -23,6 +25,7 @@ func newFakeRPCServer() *fakeRPCServer {
 		handlers:    map[string]server.Handler{},
 		client:      map[string]server.ClientHandler{},
 		subscribers: map[string]server.SubscribeHandler{},
+		logSubs:     map[string]server.RunLogSubscribeHandler{},
 	}
 }
 
@@ -33,10 +36,16 @@ func (f *fakeRPCServer) HandleWithClient(method string, handler server.ClientHan
 func (f *fakeRPCServer) HandleSubscribe(method string, handler server.SubscribeHandler) {
 	f.subscribers[method] = handler
 }
+func (f *fakeRPCServer) HandleRunLogSubscribe(method string, handler server.RunLogSubscribeHandler) {
+	f.logSubs[method] = handler
+}
 func (f *fakeRPCServer) EmitNodeEvent(event proto.NodeEvent) {
 	f.nodeEvents = append(f.nodeEvents, event)
 }
 func (f *fakeRPCServer) OnClose(fn func()) { f.closeHooks = append(f.closeHooks, fn) }
+func (f *fakeRPCServer) EnableCapability(capability string) {
+	f.capabilities = append(f.capabilities, capability)
+}
 
 func rpcParams(t *testing.T, value any) []byte {
 	t.Helper()
@@ -56,6 +65,12 @@ func TestRegisterRPCStartCancelGetListLogsAndSubscribe(t *testing.T) {
 	RegisterRPC(target, manager)
 	if target.handlers["v1/listPendingApprovals"] == nil || target.handlers["v1/decideApproval"] == nil {
 		t.Fatal("approval RPC handlers were not registered")
+	}
+	if target.logSubs["v1/subscribeRunLogs"] == nil {
+		t.Fatal("live-log RPC handler was not registered")
+	}
+	if len(target.capabilities) != 1 || target.capabilities[0] != proto.CapabilityLiveLogs {
+		t.Fatalf("capabilities = %#v, want liveLogs", target.capabilities)
 	}
 	if len(target.closeHooks) != 1 {
 		t.Fatalf("close hooks = %d, want 1", len(target.closeHooks))

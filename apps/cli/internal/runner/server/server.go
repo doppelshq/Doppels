@@ -72,6 +72,15 @@ type RunEventSubscriber interface {
 	NotifyClosed(fn func()) func()
 }
 
+// RunLogSubscriber is the connection-scoped target for best-effort
+// v1/runLog notifications. Log delivery has no replay or gap protocol, but
+// activation and disconnect cleanup share subscribeRun's ordering contract.
+type RunLogSubscriber interface {
+	DeliverRunLog(chunk proto.RunLogChunk) bool
+	Defer(onActivate func(), onAbort func())
+	NotifyClosed(fn func()) func()
+}
+
 // ResponseFrameFitter lets a paginated result shrink itself using the real
 // JSON-RPC id before the response is queued. Implementations must measure the
 // complete proto.Response, not only their result payload.
@@ -84,6 +93,9 @@ type ResponseFrameFitter interface {
 // (v1/subscribeRun). The RunEventSubscriber is only ever the connection that
 // invoked the method.
 type SubscribeHandler func(sub RunEventSubscriber, params []byte) (any, *proto.Error)
+
+// RunLogSubscribeHandler is the extension seam for v1/subscribeRunLogs.
+type RunLogSubscribeHandler func(sub RunLogSubscriber, params []byte) (any, *proto.Error)
 
 // ClientHandler is the extension seam for methods that need the calling
 // connection's handshake client name (RFC §9: a Run's source is derived from
@@ -162,6 +174,28 @@ func (s *Server) HandleSubscribe(method string, run SubscribeHandler) {
 	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
 		return run(conn, params)
 	}
+}
+
+// HandleRunLogSubscribe registers a connection-scoped live-log method.
+func (s *Server) HandleRunLogSubscribe(method string, run RunLogSubscribeHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
+		return run(conn, params)
+	}
+}
+
+// EnableCapability advertises an optional protocol feature once its domain
+// handlers have been attached. Duplicate registration is harmless.
+func (s *Server) EnableCapability(capability string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, existing := range s.config.Capabilities {
+		if existing == capability {
+			return
+		}
+	}
+	s.config.Capabilities = append(s.config.Capabilities, capability)
 }
 
 // HandleWithClient registers (or replaces) a v1 method that needs the
@@ -325,7 +359,9 @@ func (s *Server) handleInitialize(conn *connection, params []byte) (any, *proto.
 		}
 	}
 	conn.initialize(request.Client.Name)
-	capabilities := s.config.Capabilities
+	s.mu.Lock()
+	capabilities := append([]string(nil), s.config.Capabilities...)
+	s.mu.Unlock()
 	if capabilities == nil {
 		capabilities = []string{}
 	}

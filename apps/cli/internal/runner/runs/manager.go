@@ -62,6 +62,7 @@ type activeRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	root   string
+	logs   *liveLogBroadcaster
 }
 
 type Manager struct {
@@ -279,7 +280,7 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 	}
 
 	runCtx, cancel := context.WithCancel(m.ctx)
-	active := &activeRun{cancel: cancel, done: make(chan struct{}), root: resolved.Root}
+	active := &activeRun{cancel: cancel, done: make(chan struct{}), root: resolved.Root, logs: newLiveLogBroadcaster(runID)}
 	m.active[runID] = active
 	m.wg.Add(1)
 	m.mu.Unlock()
@@ -293,6 +294,7 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 
 func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, resolved workspace.Execution, inputs map[string]any, key string, ids StartResult, source, approvalMode string, createdAt time.Time, requestRecord execution.RequestRecord, runRecord execution.RunRecord) {
 	defer m.wg.Done()
+	defer active.logs.close()
 	defer close(active.done)
 	defer active.cancel()
 	defer func() {
@@ -321,9 +323,11 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, 
 		RunIndex:              idx,
 		AfterRequestPersisted: m.testAfterRequestPersisted,
 		OnEvent: func(_ context.Context, event execution.RunEvent) error {
+			active.logs.observeEvent(event)
 			m.broadcast(ids.RunID, payloadFromEvent(event))
 			return nil
 		},
+		LogStream: active.logs.write,
 	}
 	if approvalMode == "interactive" {
 		options.Approve = func(ctx context.Context, request execution.ApprovalRequest) (bool, error) {
