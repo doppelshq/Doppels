@@ -2,9 +2,11 @@ package command
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runnerclient"
@@ -28,6 +30,7 @@ type fakeDaemon struct {
 
 	decided   []string
 	decideErr error
+	onDecide  func()
 
 	gotRuns    runnerclient.ListRunsParams
 	runsResult runnerclient.ListRunsResult
@@ -64,6 +67,9 @@ func (f *fakeDaemon) GetRun(ctx context.Context, runID string, includeEvents boo
 
 func (f *fakeDaemon) DecideApproval(ctx context.Context, runID, stepID, decision string) error {
 	f.decided = append(f.decided, runID+":"+stepID+":"+decision)
+	if f.onDecide != nil {
+		f.onDecide()
+	}
 	return f.decideErr
 }
 
@@ -161,6 +167,39 @@ func TestRunAutoYesMapsToAutoApprovalMode(t *testing.T) {
 	}
 	if daemon.started[0].ApprovalMode != "auto" {
 		t.Fatalf("approvalMode = %q, want auto (--yes)", daemon.started[0].ApprovalMode)
+	}
+}
+
+func TestRunDecidesApprovalRequestFromSubscribeReplay(t *testing.T) {
+	app, _, stderr := daemonFixtureApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	app.Context = ctx
+	app.Stdin = strings.NewReader("yes\n")
+
+	daemon := &fakeDaemon{
+		startRunID: "run-replayed-approval",
+		subscribeEvents: []proto.RunEventPayload{{
+			RunID: "run-replayed-approval", Sequence: 1, Type: "approval_requested",
+			StepID: "step1", OccurredAt: "2026-09-15T12:00:00Z",
+		}},
+	}
+	daemon.onDecide = func() {
+		daemon.notificationFunc(runnerclient.Notification{
+			Method: "v1/runEvent",
+			Params: json.RawMessage(`{"runId":"run-replayed-approval","sequence":2,"type":"run_succeeded","occurredAt":"2026-09-15T12:00:01Z"}`),
+		})
+	}
+	app.DialRunner = func(ctx context.Context, opts runnerclient.Options) (daemonClient, error) {
+		return daemon, nil
+	}
+
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada"})
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if len(daemon.decided) != 1 || daemon.decided[0] != "run-replayed-approval:step1:approve" {
+		t.Fatalf("decideApproval calls = %v, want exactly [run-replayed-approval:step1:approve]", daemon.decided)
 	}
 }
 

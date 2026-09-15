@@ -143,6 +143,29 @@ func lostDaemonMessage(runID string) string {
 	return fmt.Sprintf("run %s started but the daemon connection was lost — check status with: doppels runs show %s\n", runID, runID)
 }
 
+func (app *App) handleDaemonRunEvent(
+	ctx context.Context,
+	client daemonClient,
+	runID string,
+	approvalMode string,
+	interact *interaction,
+	event proto.RunEventPayload,
+) int {
+	if approvalMode != "interactive" || event.Type != "approval_requested" {
+		return ExitSuccess
+	}
+	approved, promptErr := interact.approve(ctx, execution.ApprovalRequest{RunID: runID, StepID: event.StepID})
+	decision := "reject"
+	if promptErr == nil && approved {
+		decision = "approve"
+	}
+	if err := client.DecideApproval(ctx, runID, event.StepID, decision); err != nil {
+		fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
+		return ExitOperational
+	}
+	return ExitSuccess
+}
+
 func (app *App) streamDaemonRun(
 	ctx context.Context,
 	client daemonClient,
@@ -199,6 +222,9 @@ func (app *App) streamDaemonRun(
 	terminalSeen := false
 	for _, event := range subscribed.Events {
 		render(event)
+		if code := app.handleDaemonRunEvent(ctx, client, runID, approvalMode, interact, event); code != ExitSuccess {
+			return code
+		}
 		if daemonTerminalRunEvents[event.Type] {
 			terminalSeen = true
 		}
@@ -232,16 +258,8 @@ func (app *App) streamDaemonRun(
 			select {
 			case event := <-events:
 				render(event)
-				if approvalMode == "interactive" && event.Type == "approval_requested" {
-					approved, promptErr := interact.approve(ctx, execution.ApprovalRequest{RunID: runID, StepID: event.StepID})
-					decision := "reject"
-					if promptErr == nil && approved {
-						decision = "approve"
-					}
-					if err := client.DecideApproval(ctx, runID, event.StepID, decision); err != nil {
-						fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
-						return ExitOperational
-					}
+				if code := app.handleDaemonRunEvent(ctx, client, runID, approvalMode, interact, event); code != ExitSuccess {
+					return code
 				}
 				if daemonTerminalRunEvents[event.Type] {
 					break loop
