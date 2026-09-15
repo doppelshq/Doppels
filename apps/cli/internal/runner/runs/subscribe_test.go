@@ -91,6 +91,12 @@ returns: {value: "{{ steps.run.value }}"}
 		t.Fatal(rpcErr)
 	}
 
+	// startRun is asynchronous: the engine durably persists run_created
+	// moments after Start returns, not synchronously with it. Wait for that
+	// event before subscribing so the replay snapshot this test asserts on
+	// is deterministic rather than racing the engine's own goroutine.
+	waitForEventType(t, root, started.RunID, "run_created")
+
 	sub := newFakeSubscriber()
 	result, rpcErr := manager.Subscribe(started.RunID, 0, sub)
 	if rpcErr != nil {
@@ -388,6 +394,8 @@ returns: {value: "{{ steps.run.value }}"}
 	// Reject every live event from sequence 0 onward: the replay snapshot
 	// (read synchronously below) already covers sequence 0, so this
 	// exercises exactly the live path.
+	waitForEventType(t, root, started.RunID, "run_created")
+
 	sub := newRejectingSubscriber(0)
 	result, rpcErr := manager.Subscribe(started.RunID, 0, sub)
 	if rpcErr != nil {
