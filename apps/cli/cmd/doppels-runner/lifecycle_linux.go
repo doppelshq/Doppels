@@ -19,7 +19,7 @@ func renderSystemdUnit(opts lifecycleOptions) ([]byte, error) {
 	}
 	quoted := make([]string, len(args))
 	for i, arg := range args {
-		value, err := quoteSystemd(arg)
+		value, err := quoteSystemd(escapeSystemdExecValue(arg))
 		if err != nil {
 			return nil, err
 		}
@@ -44,6 +44,28 @@ Environment=` + home + `
 WantedBy=default.target
 `
 	return []byte(unit), nil
+}
+
+func escapeSystemdExecValue(value string) string {
+	var escaped strings.Builder
+	escaped.Grow(len(value))
+	for i := 0; i < len(value); i++ {
+		if value[i] != '$' {
+			escaped.WriteByte(value[i])
+			continue
+		}
+		if i+1 < len(value) && value[i+1] == '$' {
+			escaped.WriteString("$$$$")
+			i++
+			continue
+		}
+		if i+1 < len(value) && value[i+1] == '{' {
+			escaped.WriteString("$$")
+			continue
+		}
+		escaped.WriteString("$$$")
+	}
+	return escaped.String()
 }
 
 func quoteSystemd(value string) (string, error) {

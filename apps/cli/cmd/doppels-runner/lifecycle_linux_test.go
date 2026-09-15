@@ -41,6 +41,41 @@ func TestRenderSystemdUnit(t *testing.T) {
 	}
 }
 
+func TestRenderSystemdUnitEscapesVariableExpansionInExecValues(t *testing.T) {
+	opts := lifecycleOptions{
+		Executable: "/opt/${UNSET}/doppels-runner",
+		HomeDir:    "/home/alice",
+		ConfigDir:  "/config/${UNSET}",
+		SocketPath: "/run/${UNSET}/runner.sock",
+		Token:      "token-${UNSET}",
+	}
+
+	unit, err := renderSystemdUnit(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ExecStart="/opt/$${UNSET}/doppels-runner" "--config=/config/$${UNSET}" "--socket=/run/$${UNSET}/runner.sock" "--token=token-$${UNSET}"`
+	if !strings.Contains(string(unit), want) {
+		t.Fatalf("unit does not contain literal variable references %q:\n%s", want, unit)
+	}
+}
+
+func TestEscapeSystemdExecValue(t *testing.T) {
+	for _, tt := range []struct {
+		value string
+		want  string
+	}{
+		{value: `${UNSET}`, want: `$${UNSET}`},
+		{value: `$$`, want: `$$$$`},
+		{value: `$NAME`, want: `$$$NAME`},
+		{value: `trailing$`, want: `trailing$$$`},
+	} {
+		if got := escapeSystemdExecValue(tt.value); got != tt.want {
+			t.Errorf("escapeSystemdExecValue(%q) = %q, want %q", tt.value, got, tt.want)
+		}
+	}
+}
+
 func TestSystemdInstallAndUninstallSequence(t *testing.T) {
 	configHome := t.TempDir()
 	runner := &recordingCommandRunner{}
