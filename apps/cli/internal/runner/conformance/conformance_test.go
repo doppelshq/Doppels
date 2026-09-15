@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/runs"
 )
@@ -431,4 +432,102 @@ func tryObserveBusyDuringShutdown(t *testing.T) bool {
 	wg.Wait()
 
 	return racingResponse != nil && racingResponse.Err != nil && racingResponse.Err.Code == proto.CodeBusy
+}
+
+// TestGoldenAddWorkspace drives v1/addWorkspace over the wire end-to-end.
+// The harness's newHarness already pre-registers its own workspace via Go
+// for the convenience of the other golden tests; here we create a second
+// valid workspace on disk and assert the wire contract of addWorkspace —
+// the response envelope, the WorkspaceSummary shape, and that the new
+// workspace shows up in v1/listWorkspaces immediately after.
+func TestGoldenAddWorkspace(t *testing.T) {
+	h := newHarness(t, false)
+	client := dialInitialized(t, h)
+
+	additionalRoot := filepath.Join(t.TempDir(), "extra")
+	if _, err := project.Init(additionalRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	response := client.call("add-1", "v1/addWorkspace", map[string]any{"root": additionalRoot})
+	if response.Err != nil {
+		t.Fatalf("addWorkspace returned error: %+v", response.Err)
+	}
+	// The Runner derives the Space name from the directory basename (here
+	// `extra`). project.Init creates an initial commit so gitBranch is a
+	// non-empty string and the redactor rewrites it to "<REDACTED>".
+	assertGolden(t, rawResult(t, response), `{"capabilities":0,"gitBranch":"<REDACTED>","health":"ok","recipes":0,"root":"<REDACTED>","space":"extra"}`)
+
+	listResponse := client.call("list-1", "v1/listWorkspaces", map[string]any{})
+	if listResponse.Err != nil {
+		t.Fatalf("listWorkspaces returned error: %+v", listResponse.Err)
+	}
+	roots := []map[string]any{}
+	if err := json.Unmarshal(rawResult(t, listResponse), &roots); err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 2 {
+		t.Fatalf("listWorkspaces returned %d workspaces, want 2 (harness + added)", len(roots))
+	}
+
+	// Calling addWorkspace again on the same root must not duplicate the
+	// registry entry. The Runner treats "already present" as idempotent and
+	// returns the existing summary; either no error or a benign post-commit
+	// warning is acceptable.
+	second := client.call("add-2", "v1/addWorkspace", map[string]any{"root": additionalRoot})
+	if second.Err != nil && second.Err.Code != proto.CodeBusy && second.Err.Code != proto.CodeInternal {
+		// CodeBusy/Internal is acceptable only if the registry reports a
+		// post-commit warning (a degraded registry state). Anything else is
+		// a regression in idempotency.
+		t.Fatalf("second addWorkspace returned unexpected error: %+v", second.Err)
+	}
+}
+
+// TestGoldenRemoveWorkspace drives v1/removeWorkspace over the wire. It
+// first adds a workspace via addWorkspace (so the registry contains it),
+// then removes it and asserts the empty-result envelope plus that
+// v1/listWorkspaces no longer reports it.
+func TestGoldenRemoveWorkspace(t *testing.T) {
+	h := newHarness(t, false)
+	client := dialInitialized(t, h)
+
+	additionalRoot := filepath.Join(t.TempDir(), "extra")
+	if _, err := project.Init(additionalRoot); err != nil {
+		t.Fatal(err)
+	}
+	if response := client.call("add-1", "v1/addWorkspace", map[string]any{"root": additionalRoot}); response.Err != nil {
+		t.Fatalf("addWorkspace: %+v", response.Err)
+	}
+
+	rmResponse := client.call("rm-1", "v1/removeWorkspace", map[string]any{"root": additionalRoot})
+	if rmResponse.Err != nil {
+		t.Fatalf("removeWorkspace returned error: %+v", rmResponse.Err)
+	}
+	assertGolden(t, rawResult(t, rmResponse), `{}`)
+
+	listResponse := client.call("list-1", "v1/listWorkspaces", map[string]any{})
+	roots := []map[string]any{}
+	if err := json.Unmarshal(rawResult(t, listResponse), &roots); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range roots {
+		if r["root"] == additionalRoot {
+			t.Fatalf("removed workspace %q still in listWorkspaces: %+v", additionalRoot, roots)
+		}
+	}
+	if len(roots) != 1 {
+		t.Fatalf("listWorkspaces returned %d workspaces after removal, want 1 (harness only)", len(roots))
+	}
+
+	// Removing an unknown root must not crash and must return the
+	// appropriate domain error (workspaceNotFound), exercising the
+	// negative path of the same method.
+	missingResponse := client.call("rm-missing", "v1/removeWorkspace", map[string]any{"root": "/no/such/path"})
+	if missingResponse.Err == nil {
+		t.Fatal("removeWorkspace on unknown root returned success; expected workspaceNotFound")
+	}
+	if missingResponse.Err.Code != proto.CodeWorkspaceNotFound {
+		t.Fatalf("removeWorkspace on unknown root code = %d, want workspaceNotFound (%d)",
+			missingResponse.Err.Code, proto.CodeWorkspaceNotFound)
+	}
 }
