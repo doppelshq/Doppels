@@ -70,6 +70,9 @@ func installLifecycle(opts lifecycleOptions, commands commandRunner) error {
 	if err := os.WriteFile(path, unit, 0o644); err != nil {
 		return fmt.Errorf("write systemd user unit %s: %w", path, err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		return fmt.Errorf("set systemd user unit permissions %s: %w", path, err)
+	}
 	if err := runSystemctl(commands, "daemon-reload"); err != nil {
 		return err
 	}

@@ -92,6 +92,9 @@ func installLifecycle(opts lifecycleOptions, commands commandRunner) error {
 	if err := os.WriteFile(path, plist, 0o644); err != nil {
 		return fmt.Errorf("write launchd plist %s: %w", path, err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		return fmt.Errorf("set launchd plist permissions %s: %w", path, err)
+	}
 	domain := launchdDomain(opts)
 	if err := commands.Run("launchctl", "bootstrap", domain, path); err != nil {
 		// `bootstrap` arrived in macOS 10.10. Keep the documented load -w

@@ -13,6 +13,7 @@ type lifecycleDependencies struct {
 	executable string
 	homeDir    string
 	configHome string
+	configDir  string
 	uid        int
 }
 
@@ -33,11 +34,16 @@ func defaultLifecycleDependencies() (lifecycleDependencies, error) {
 	if err != nil {
 		return lifecycleDependencies{}, fmt.Errorf("resolve user config directory: %w", err)
 	}
+	configDir, err := runnerConfigDir()
+	if err != nil {
+		return lifecycleDependencies{}, fmt.Errorf("resolve runner config directory: %w", err)
+	}
 	return lifecycleDependencies{
 		commands:   execCommandRunner{},
 		executable: executable,
 		homeDir:    homeDir,
 		configHome: configHome,
+		configDir:  configDir,
 		uid:        os.Getuid(),
 	}, nil
 }
@@ -68,7 +74,10 @@ func executeLifecycleSubcommand(args []string, deps lifecycleDependencies) (hand
 
 	resolvedConfig := *configDir
 	if resolvedConfig == "" {
-		resolvedConfig = filepath.Join(deps.configHome, "doppels")
+		resolvedConfig = deps.configDir
+		if resolvedConfig == "" {
+			resolvedConfig = filepath.Join(deps.configHome, "doppels")
+		}
 	}
 	resolvedConfig, err = filepath.Abs(resolvedConfig)
 	if err != nil {

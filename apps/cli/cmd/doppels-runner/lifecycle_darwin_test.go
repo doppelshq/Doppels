@@ -69,11 +69,17 @@ func TestLaunchdInstallAndUninstallSequence(t *testing.T) {
 		Enable:     true,
 		StartNow:   true,
 	}
+	plistPath := filepath.Join(home, "Library", "LaunchAgents", launchdPlistName)
+	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(plistPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := installLifecycle(opts, runner); err != nil {
 		t.Fatal(err)
 	}
-	plistPath := filepath.Join(home, "Library", "LaunchAgents", launchdPlistName)
 	info, err := os.Stat(plistPath)
 	if err != nil {
 		t.Fatal(err)

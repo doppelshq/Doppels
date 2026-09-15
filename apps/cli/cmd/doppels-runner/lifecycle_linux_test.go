@@ -49,11 +49,17 @@ func TestSystemdInstallAndUninstallSequence(t *testing.T) {
 		Enable:     true,
 		StartNow:   true,
 	}
+	unitPath := filepath.Join(configHome, "systemd", "user", systemdUnitName)
+	if err := os.MkdirAll(filepath.Dir(unitPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unitPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := installLifecycle(opts, runner); err != nil {
 		t.Fatal(err)
 	}
-	unitPath := filepath.Join(configHome, "systemd", "user", systemdUnitName)
 	info, err := os.Stat(unitPath)
 	if err != nil {
 		t.Fatal(err)

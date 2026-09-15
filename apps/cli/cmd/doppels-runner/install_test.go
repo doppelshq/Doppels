@@ -100,3 +100,15 @@ func TestNonLifecycleCommandIsNotHandled(t *testing.T) {
 		t.Fatalf("handled, err = %v, %v; want false, nil", handled, err)
 	}
 }
+
+func TestDefaultLifecycleDependenciesHonorRunnerConfigOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "runner-config")
+	t.Setenv("DOPPELS_RUNNER_CONFIG", want)
+	deps, err := defaultLifecycleDependencies()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deps.configDir != want {
+		t.Fatalf("default config dir = %q, want override %q", deps.configDir, want)
+	}
+}
