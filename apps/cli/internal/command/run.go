@@ -17,6 +17,7 @@ import (
 	"doppels.so/cli/internal/listener"
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/project"
+	"doppels.so/cli/internal/runnerclient"
 )
 
 type namedValues []string
@@ -163,6 +164,22 @@ func (app *App) runLocal(arguments []string) int {
 	}
 	if code := app.checkRecipeDrift(recipeDefinition); code != ExitSuccess {
 		return code
+	}
+
+	// Daemon routing (RFC 001, PR8): only shell Recipes are representable
+	// over the IPC protocol (v1 explicitly excludes interactive manual
+	// fulfillment, §1). Manual runs and Capabilities without a Recipe always
+	// take the standalone path below, daemon or not.
+	if recipeDefinition != nil && recipeDefinition.Value.Runtime == "shell" {
+		client, dialErr := app.dialRunner(app.context())
+		switch {
+		case dialErr == nil:
+			defer client.Close()
+			return app.runDaemonStart(app.context(), client, root, capabilityDefinition, recipeDefinition, typedInputs, *yes, *jsonOutput, interaction)
+		case !errors.Is(dialErr, runnerclient.ErrNotRunning):
+			fmt.Fprintf(app.Stderr, "connect to runner daemon: %v\n", dialErr)
+			return ExitOperational
+		}
 	}
 
 	identity := app.localIdentity()

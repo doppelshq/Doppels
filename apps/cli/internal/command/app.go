@@ -18,6 +18,7 @@ import (
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/projectlock"
+	"doppels.so/cli/internal/runnerclient"
 	"doppels.so/cli/internal/version"
 )
 
@@ -43,6 +44,10 @@ type App struct {
 	Executable   func() (string, error)
 	StartCommand func(*exec.Cmd) error
 	Sleep        func(time.Duration)
+	// DialRunner overrides how daemon-routed commands (run/runs/node) reach
+	// the Runner daemon. nil uses runnerclient.Dial; tests substitute a fake
+	// daemonClient to exercise daemon routing without a real socket.
+	DialRunner func(ctx context.Context, opts runnerclient.Options) (daemonClient, error)
 }
 
 func New() *App {
