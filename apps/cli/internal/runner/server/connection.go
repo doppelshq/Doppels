@@ -322,6 +322,18 @@ func (c *connection) DeliverRunEvent(event proto.RunEventPayload) bool {
 	return c.enqueue(proto.NewNotification("v1/runEvent", event), false)
 }
 
+// DeliverRunLog sends one already frame-bounded v1/runLog notification to
+// this connection. Oversized chunks are rejected defensively so a domain bug
+// cannot make the encoder close an otherwise healthy subscription.
+func (c *connection) DeliverRunLog(chunk proto.RunLogChunk) bool {
+	notification := proto.NewNotification("v1/runLog", chunk)
+	encoded, err := json.Marshal(notification)
+	if err != nil || len(encoded) > proto.MaxFrameBytes {
+		return false
+	}
+	return c.enqueue(notification, false)
+}
+
 // DeliverRunGap tells this connection's subscriber that it fell behind and
 // must resynchronize (RFC §10): the Runner stops emitting that Run to it.
 // This is the client's only signal to resync, so it is never a silent,

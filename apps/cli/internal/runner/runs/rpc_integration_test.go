@@ -95,6 +95,13 @@ func rawResult(t *testing.T, response *proto.Response) json.RawMessage {
 	return raw
 }
 
+func assertSocketPing(t *testing.T, client *integrationClient, id string) {
+	t.Helper()
+	if response := client.call(id, "v1/ping", map[string]any{}); response.Err != nil {
+		t.Fatalf("follow-up ping: %+v", response.Err)
+	}
+}
+
 func (c *integrationClient) readNotification(t *testing.T) (string, json.RawMessage) {
 	t.Helper()
 	if len(c.queuedNotifications) > 0 {

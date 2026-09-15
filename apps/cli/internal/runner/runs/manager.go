@@ -48,6 +48,9 @@ type Config struct {
 	Log         func(format string, args ...any)
 	OnStarted   func(proto.RunSummary)
 	OnFinished  func(proto.RunSummary)
+	// EmitNodeEvent publishes Runner-wide lifecycle events. It is optional so
+	// embedders that do not expose node subscriptions keep working.
+	EmitNodeEvent func(proto.NodeEvent)
 }
 
 type StartResult struct {
@@ -59,6 +62,7 @@ type activeRun struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	root   string
+	logs   *liveLogBroadcaster
 }
 
 type Manager struct {
@@ -77,6 +81,10 @@ type Manager struct {
 
 	subsMu sync.Mutex
 	subs   map[string][]*runSubscriber
+
+	pendingApprovalsMu  sync.Mutex
+	pendingApprovals    map[string]*approvalWaiter
+	pendingApprovalInfo map[string]PendingApproval
 
 	// testBeforeReserve is a test-only seam invoked synchronously right
 	// before Start would durably reserve, letting tests deterministically
@@ -117,8 +125,10 @@ func NewManager(ctx context.Context, workspaces *workspace.Service, config Confi
 	return &Manager{
 		ctx: ctx, cancel: cancel, workspaces: workspaces, config: config,
 		indexes: make(map[string]runIndex), active: make(map[string]*activeRun),
-		subs:      make(map[string][]*runSubscriber),
-		openIndex: func(root string) (runIndex, error) { return runindex.Open(root) },
+		subs:                make(map[string][]*runSubscriber),
+		pendingApprovals:    make(map[string]*approvalWaiter),
+		pendingApprovalInfo: make(map[string]PendingApproval),
+		openIndex:           func(root string) (runIndex, error) { return runindex.Open(root) },
 	}
 }
 
@@ -270,7 +280,7 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 	}
 
 	runCtx, cancel := context.WithCancel(m.ctx)
-	active := &activeRun{cancel: cancel, done: make(chan struct{}), root: resolved.Root}
+	active := &activeRun{cancel: cancel, done: make(chan struct{}), root: resolved.Root, logs: newLiveLogBroadcaster(runID)}
 	m.active[runID] = active
 	m.wg.Add(1)
 	m.mu.Unlock()
@@ -284,6 +294,7 @@ func (m *Manager) Start(clientName string, params []byte) (StartResult, *proto.E
 
 func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, resolved workspace.Execution, inputs map[string]any, key string, ids StartResult, source, approvalMode string, createdAt time.Time, requestRecord execution.RequestRecord, runRecord execution.RunRecord) {
 	defer m.wg.Done()
+	defer active.logs.close()
 	defer close(active.done)
 	defer active.cancel()
 	defer func() {
@@ -312,14 +323,15 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, 
 		RunIndex:              idx,
 		AfterRequestPersisted: m.testAfterRequestPersisted,
 		OnEvent: func(_ context.Context, event execution.RunEvent) error {
+			active.logs.observeEvent(event)
 			m.broadcast(ids.RunID, payloadFromEvent(event))
 			return nil
 		},
+		LogStream: active.logs.write,
 	}
 	if approvalMode == "interactive" {
-		options.Approve = func(ctx context.Context, _ execution.ApprovalRequest) (bool, error) {
-			<-ctx.Done()
-			return false, ctx.Err()
+		options.Approve = func(ctx context.Context, request execution.ApprovalRequest) (bool, error) {
+			return m.awaitApproval(ctx, request)
 		}
 	}
 	result, err := execution.Execute(ctx, invocation, options)
