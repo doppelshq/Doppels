@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -359,6 +360,26 @@ func idString(t *testing.T, response *proto.Response) string {
 		t.Fatal(err)
 	}
 	return string(encoded)
+}
+
+// waitForGoroutineBaseline polls runtime.NumGoroutine until it settles back
+// within tolerance of baseline, or fails the test: per-connection goroutines
+// (the reader loop and its writer) are torn down asynchronously on close, so
+// a snapshot taken immediately after the last t.Cleanup dial closes can
+// legitimately still be mid-teardown.
+func waitForGoroutineBaseline(t *testing.T, baseline int) {
+	t.Helper()
+	const tolerance = 5
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if current := runtime.NumGoroutine(); current <= baseline+tolerance {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutine count = %d, want <= baseline %d + tolerance %d", runtime.NumGoroutine(), baseline, tolerance)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func waitForStatusOverSocket(t *testing.T, client *rawClient, runID, want string) {
