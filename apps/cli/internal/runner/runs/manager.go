@@ -48,6 +48,9 @@ type Config struct {
 	Log         func(format string, args ...any)
 	OnStarted   func(proto.RunSummary)
 	OnFinished  func(proto.RunSummary)
+	// EmitNodeEvent publishes Runner-wide lifecycle events. It is optional so
+	// embedders that do not expose node subscriptions keep working.
+	EmitNodeEvent func(proto.NodeEvent)
 }
 
 type StartResult struct {
@@ -77,6 +80,10 @@ type Manager struct {
 
 	subsMu sync.Mutex
 	subs   map[string][]*runSubscriber
+
+	pendingApprovalsMu  sync.Mutex
+	pendingApprovals    map[string]chan approvalDecision
+	pendingApprovalInfo map[string]PendingApproval
 
 	// testBeforeReserve is a test-only seam invoked synchronously right
 	// before Start would durably reserve, letting tests deterministically
@@ -117,8 +124,10 @@ func NewManager(ctx context.Context, workspaces *workspace.Service, config Confi
 	return &Manager{
 		ctx: ctx, cancel: cancel, workspaces: workspaces, config: config,
 		indexes: make(map[string]runIndex), active: make(map[string]*activeRun),
-		subs:      make(map[string][]*runSubscriber),
-		openIndex: func(root string) (runIndex, error) { return runindex.Open(root) },
+		subs:                make(map[string][]*runSubscriber),
+		pendingApprovals:    make(map[string]chan approvalDecision),
+		pendingApprovalInfo: make(map[string]PendingApproval),
+		openIndex:           func(root string) (runIndex, error) { return runindex.Open(root) },
 	}
 }
 
@@ -317,9 +326,8 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, 
 		},
 	}
 	if approvalMode == "interactive" {
-		options.Approve = func(ctx context.Context, _ execution.ApprovalRequest) (bool, error) {
-			<-ctx.Done()
-			return false, ctx.Err()
+		options.Approve = func(ctx context.Context, request execution.ApprovalRequest) (bool, error) {
+			return m.awaitApproval(ctx, request)
 		}
 	}
 	result, err := execution.Execute(ctx, invocation, options)
