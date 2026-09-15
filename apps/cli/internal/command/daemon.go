@@ -253,6 +253,12 @@ func (app *App) streamDaemonRun(
 		}
 	})
 
+	// Capture the transport-drop baseline BEFORE SubscribeRun: any drop
+	// that lands during the subscribe window must be visible to the
+	// poller, otherwise the CLI can wait forever on a run the daemon has
+	// already finalized and dropped notifications for.
+	initialDropped := client.NotificationsDropped()
+
 	subscribed, err := client.SubscribeRun(ctx, runID, 0)
 	if err != nil {
 		fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
@@ -377,7 +383,7 @@ func (app *App) streamDaemonRun(
 		// GetRun polling without resubscribing (the server-side subscription
 		// is still alive; only local delivery has fallen behind).
 		transportDropSignal := make(chan struct{}, 1)
-		lastDropped := client.NotificationsDropped()
+		lastDropped := initialDropped
 		go func() {
 			ticker := time.NewTicker(200 * time.Millisecond)
 			defer ticker.Stop()

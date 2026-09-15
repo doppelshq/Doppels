@@ -558,8 +558,11 @@ func TestRunSwitchesToCanonicalPollingOnTransportDrops(t *testing.T) {
 				code, len(daemon.started), daemon.getRunCalls, daemon.subscribeCalls, daemon.started, app.Stderr)
 		}
 	case <-time.After(5 * time.Second):
+		// Use the mutex-guarded method rather than reading the field
+		// directly: the command goroutine may still be running and writing
+		// the counter, which -race will flag.
 		t.Logf("test timed out; daemon.started=%d getRunCalls=%d subscribeCalls=%v notificationsDropped=%d stderr=%s",
-			len(daemon.started), daemon.getRunCalls, daemon.subscribeCalls, daemon.notificationsDropped, app.Stderr)
+			len(daemon.started), daemon.getRunCalls, daemon.subscribeCalls, daemon.NotificationsDropped(), app.Stderr)
 		t.Fatal("TestRunSwitchesToCanonicalPollingOnTransportDrops timed out")
 	}
 	// No second SubscribeRun for this run (transport drop is not a gap).
@@ -570,5 +573,62 @@ func TestRunSwitchesToCanonicalPollingOnTransportDrops(t *testing.T) {
 	// in addition to the final one.
 	if daemon.getRunCalls < 1 {
 		t.Fatalf("expected canonical GetRun polling after transport drop; got %d", daemon.getRunCalls)
+	}
+}
+
+// TestRunSwitchesToCanonicalPollingOnSubscribeTimeDrops pins a review
+// finding: transport drops that arrive DURING SubscribeRun (before the
+// CLI captures its baseline) must still trigger the canonical-poll
+// recovery. The fix is to capture the drop counter BEFORE SubscribeRun
+// in streamDaemonRun; this test asserts the contract from the caller's
+// side: simulate the drop from the subscribe hook itself, then assert
+// the run still completes successfully.
+func TestRunSwitchesToCanonicalPollingOnSubscribeTimeDrops(t *testing.T) {
+	app, _, _ := daemonFixtureApp(t)
+	daemon := &fakeDaemon{
+		startRunID: "run-subscribe-drop",
+		subscribeEvents: []proto.RunEventPayload{
+			{RunID: "run-subscribe-drop", Sequence: 0, Type: "run_created", OccurredAt: "2026-09-15T12:00:00Z"},
+		},
+		recoveryEvents: []proto.RunEventPayload{
+			{RunID: "run-subscribe-drop", Sequence: 1, Type: "run_succeeded", OccurredAt: "2026-09-15T12:00:01Z"},
+		},
+		getRunResults: []runnerclient.GetRunResult{
+			{Summary: proto.RunSummary{RunID: "run-subscribe-drop", Status: "succeeded", Capability: "greet"}, Events: nil},
+		},
+	}
+	// Simulate a transport drop that happens DURING SubscribeRun: the
+	// hook increments the counter synchronously, before SubscribeRun
+	// returns to the CLI. This is the window the P1 fix guards: the
+	// baseline must be captured BEFORE SubscribeRun so this drop is
+	// visible to the poller.
+	daemon.subscribeHooks = []func(){
+		func() {
+			daemon.notificationsDroppedMu.Lock()
+			daemon.notificationsDropped = 1
+			daemon.notificationsDroppedMu.Unlock()
+		},
+	}
+	app.DialRunner = func(ctx context.Context, opts runnerclient.Options) (daemonClient, error) {
+		return daemon, nil
+	}
+
+	done := make(chan int, 1)
+	go func() { done <- app.Run([]string{"run", "capability/greet", "--input", "name=Ada"}) }()
+	select {
+	case code := <-done:
+		if code != ExitSuccess {
+			t.Fatalf("exit = %d, subscribeCalls=%v getRunCalls=%d",
+				code, daemon.subscribeCalls, daemon.getRunCalls)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("test timed out; subscribeCalls=%v getRunCalls=%d notificationsDropped=%d stderr=%s",
+			daemon.subscribeCalls, daemon.getRunCalls, daemon.NotificationsDropped(), app.Stderr)
+	}
+	if len(daemon.subscribeCalls) > 1 {
+		t.Fatalf("subscribe-time drop must not trigger resubscribe; subscribe calls = %v", daemon.subscribeCalls)
+	}
+	if daemon.getRunCalls < 1 {
+		t.Fatalf("expected canonical GetRun polling after subscribe-time drop; got %d", daemon.getRunCalls)
 	}
 }
