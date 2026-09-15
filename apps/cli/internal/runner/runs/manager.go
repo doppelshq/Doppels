@@ -327,7 +327,17 @@ func (m *Manager) execute(ctx context.Context, active *activeRun, idx runIndex, 
 		m.config.Log("Run %s failed: %v", ids.RunID, err)
 	}
 	if result.Status != "running" && result.Status != "pending_manual" && m.config.OnFinished != nil {
-		if record, getErr := idx.Get(ids.RunID); getErr == nil {
+		// Result.Status reflects the engine's in-memory view, set before its
+		// own terminal CommitTerminal write was even attempted (see
+		// execution/runner.go): that write can fail independently, leaving
+		// the index non-terminal with no outbox item while Result.Status
+		// already reads "succeeded"/"failed"/etc. Trust only a durable
+		// record that actually matches — status and a set FinishedAt — never
+		// Result.Status alone. If persistence didn't actually land, this
+		// Run stays reconcilable (e.g. via Cancel's idempotent repair path,
+		// which itself fires OnFinished once persistence catches up).
+		if record, getErr := idx.Get(ids.RunID); getErr == nil &&
+			record.Status == result.Status && record.FinishedAt != "" {
 			m.config.OnFinished(summaryFromRecord(resolved.Root, record))
 		}
 	}

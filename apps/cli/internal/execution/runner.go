@@ -208,7 +208,12 @@ func (r *runner) indexRun(status string, enqueueOutbox bool) error {
 		record.Source = runindex.SourceLocal
 	}
 	if enqueueOutbox {
-		record.FinishedAt = r.now().UTC().Format(time.RFC3339Nano)
+		// FinishedAt must be exactly the terminal event's own OccurredAt —
+		// already durable in events.jsonl by the time indexRun runs — never
+		// a second, independent Now() call. Two separate clock reads can
+		// observe different instants, silently drifting the indexed
+		// FinishedAt away from the event it is supposed to describe.
+		record.FinishedAt = r.result.Events[len(r.result.Events)-1].OccurredAt.UTC().Format(time.RFC3339Nano)
 	}
 	if enqueueOutbox {
 		if _, err := idx.CommitTerminal(record, map[string]any{

@@ -263,6 +263,45 @@ func TestExecuteUsesInjectedLongLivedIndex(t *testing.T) {
 	}
 }
 
+// TestIndexedFinishedAtMatchesTerminalEventOccurredAtExactly reproduces a
+// review finding: indexRun read a second, independent Now() call to compute
+// the indexed FinishedAt, instead of reusing the authoritative terminal
+// event's OccurredAt already written to events.jsonl a moment earlier. Under
+// an incrementing clock the two calls observe different instants, so the
+// indexed FinishedAt silently drifted from the terminal event it supposedly
+// describes.
+func TestIndexedFinishedAtMatchesTerminalEventOccurredAtExactly(t *testing.T) {
+	root := t.TempDir()
+	index := &recordingRunIndex{}
+	var tick int64
+	incrementingNow := func() time.Time {
+		n := atomic.AddInt64(&tick, 1)
+		return time.Unix(1700000000, 0).UTC().Add(time.Duration(n) * time.Millisecond)
+	}
+	result, err := Execute(context.Background(), invocation(root, scalarCapability(), scalarRecipe("export VALUE=ok")), Options{
+		Environment: []string{"PATH=" + os.Getenv("PATH")},
+		RunIndex:    index,
+		Now:         incrementingNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal RunEvent
+	for _, event := range result.Events {
+		if event.Type == "run_succeeded" {
+			terminal = event
+		}
+	}
+	if terminal.Type != "run_succeeded" {
+		t.Fatalf("no run_succeeded event: %#v", result.Events)
+	}
+	last := index.records[len(index.records)-1]
+	want := terminal.OccurredAt.UTC().Format(time.RFC3339Nano)
+	if last.FinishedAt != want {
+		t.Fatalf("indexed FinishedAt = %q, want exactly terminal.OccurredAt = %q", last.FinishedAt, want)
+	}
+}
+
 type recordingRunIndex struct {
 	records  []runindex.Record
 	enqueued int
