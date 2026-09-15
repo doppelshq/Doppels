@@ -16,6 +16,8 @@ type approvalDecision struct {
 	approved bool
 }
 
+var errDuplicateApprovalWaiter = errors.New("approval waiter already registered")
+
 type approvalWaiter struct {
 	ctx      context.Context
 	decision chan approvalDecision
@@ -74,6 +76,10 @@ func (m *Manager) awaitApproval(ctx context.Context, request execution.ApprovalR
 	}
 
 	m.pendingApprovalsMu.Lock()
+	if existing := m.pendingApprovals[key]; existing != nil && existing != waiter {
+		m.pendingApprovalsMu.Unlock()
+		return false, errDuplicateApprovalWaiter
+	}
 	m.pendingApprovals[key] = waiter
 	m.pendingApprovalInfo[key] = pending
 	m.pendingApprovalsMu.Unlock()

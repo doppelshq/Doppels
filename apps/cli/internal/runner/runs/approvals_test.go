@@ -121,6 +121,88 @@ func TestManagerDecideApprovalObservesCancelledWaiter(t *testing.T) {
 	}
 }
 
+func TestManagerRejectsDuplicateApprovalWaiter(t *testing.T) {
+	service, _ := runnerWorkspace(t, true)
+	emitStarted := make(chan struct{})
+	unblockFirstEmit := make(chan struct{})
+	var emitMu sync.Mutex
+	emitCount := 0
+	manager := NewManager(context.Background(), service, Config{
+		NodeID: "node-test",
+		EmitNodeEvent: func(proto.NodeEvent) {
+			emitMu.Lock()
+			emitCount++
+			call := emitCount
+			emitMu.Unlock()
+			if call == 1 {
+				close(emitStarted)
+				<-unblockFirstEmit
+			}
+		},
+	})
+	defer manager.Close()
+
+	type outcome struct {
+		approved bool
+		err      error
+	}
+	request := execution.ApprovalRequest{
+		RunID:       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		StepID:      "run",
+		Name:        "Run",
+		RequestedAt: time.Now().UTC(),
+	}
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstResult := make(chan outcome, 1)
+	go func() {
+		approved, err := manager.awaitApproval(firstCtx, request)
+		firstResult <- outcome{approved: approved, err: err}
+	}()
+	<-emitStarted
+
+	secondResult := make(chan outcome, 1)
+	go func() {
+		approved, err := manager.awaitApproval(context.Background(), request)
+		secondResult <- outcome{approved: approved, err: err}
+	}()
+	var second outcome
+	secondReturnedBeforeDecision := false
+	select {
+	case second = <-secondResult:
+		secondReturnedBeforeDecision = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	rpcErr := manager.DecideApproval(request.RunID, request.StepID, "approve")
+	if !secondReturnedBeforeDecision {
+		second = <-secondResult
+	}
+	close(unblockFirstEmit)
+
+	var first outcome
+	firstExitedAfterDecision := false
+	select {
+	case first = <-firstResult:
+		firstExitedAfterDecision = true
+	case <-time.After(100 * time.Millisecond):
+		cancelFirst()
+		first = <-firstResult
+	}
+	cancelFirst()
+
+	if !secondReturnedBeforeDecision || second.err == nil {
+		t.Errorf("duplicate waiter = %#v, returned before decision = %v; want immediate error", second, secondReturnedBeforeDecision)
+	}
+	if rpcErr != nil {
+		t.Errorf("DecideApproval: %+v", rpcErr)
+	}
+	if !firstExitedAfterDecision || !first.approved || first.err != nil {
+		t.Errorf("original waiter = %#v, exited after decision = %v; want approved without leak", first, firstExitedAfterDecision)
+	}
+	if got := manager.ListPendingApprovals(); len(got) != 0 {
+		t.Errorf("pending approvals = %#v, want empty", got)
+	}
+}
+
 func TestManagerEmitsApprovalPendingNodeEvent(t *testing.T) {
 	service, root := runnerWorkspace(t, true)
 	writeApprovalRecipe(t, root)
