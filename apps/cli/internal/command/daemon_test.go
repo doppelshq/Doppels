@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -51,8 +52,11 @@ type fakeDaemon struct {
 	// notificationsDropped is the value the fake client returns from
 	// NotificationsDropped. Tests increment it via the public field to
 	// simulate transport-level drops without local overflow or a server
-	// runEventGap.
-	notificationsDropped uint64
+	// runEventGap. The mu mutex protects concurrent access (test goroutine
+	// that mutates the counter vs. the CLI goroutine that reads it via
+	// the runnerclient.Client drop poll).
+	notificationsDroppedMu sync.Mutex
+	notificationsDropped   uint64
 
 	closed bool
 }
@@ -125,6 +129,8 @@ func (f *fakeDaemon) SetNotificationHandler(handler func(runnerclient.Notificati
 }
 
 func (f *fakeDaemon) NotificationsDropped() uint64 {
+	f.notificationsDroppedMu.Lock()
+	defer f.notificationsDroppedMu.Unlock()
 	return f.notificationsDropped
 }
 
@@ -533,7 +539,9 @@ func TestRunSwitchesToCanonicalPollingOnTransportDrops(t *testing.T) {
 			// its baseline right after SubscribeRun returns) sees the change.
 			go func() {
 				time.Sleep(300 * time.Millisecond)
+				daemon.notificationsDroppedMu.Lock()
 				daemon.notificationsDropped = 1
+				daemon.notificationsDroppedMu.Unlock()
 			}()
 		},
 	}
