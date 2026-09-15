@@ -3,6 +3,7 @@ package runnerclient_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"path/filepath"
 	"strings"
@@ -182,54 +183,117 @@ func TestStartRunAndGetRun(t *testing.T) {
 }
 
 func TestNotificationDuringInFlightCallStillCompletes(t *testing.T) {
-	ts := startTestServerWithRecipe(t)
-	client := dialTest(t, ts.socketPath)
-	ctx := context.Background()
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
 
+	notificationDelivered := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go serveControlledSubscription(listener, notificationDelivered, serverDone)
+
+	client := dialTest(t, socketPath)
 	var mu sync.Mutex
 	var notifications []runnerclient.Notification
-	client.SetNotificationHandler(func(n runnerclient.Notification) {
+	client.SetNotificationHandler(func(notification runnerclient.Notification) {
 		mu.Lock()
-		notifications = append(notifications, n)
+		notifications = append(notifications, notification)
 		mu.Unlock()
+		close(notificationDelivered)
 	})
 
-	started, err := client.StartRun(ctx, runnerclient.StartRunParams{
-		Workspace:      ts.root,
-		Capability:     "greet",
-		Inputs:         map[string]any{"count": 1},
-		ApprovalMode:   "auto",
-		IdempotencyKey: "test-notif-1",
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	result, err := client.SubscribeRun(ctx, "run-controlled", 0)
 	if err != nil {
-		t.Fatalf("StartRun: %v", err)
-	}
-	if _, err := client.SubscribeRun(ctx, started.RunID, 0); err != nil {
 		t.Fatalf("SubscribeRun: %v", err)
 	}
-
-	// Interleave Pings with the run's own live event stream to exercise the
-	// read-loop/pending-map correctness the RFC-8 spec calls out.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := client.Ping(ctx); err != nil {
-			t.Fatalf("Ping while notifications may be in flight: %v", err)
-		}
-		mu.Lock()
-		n := len(notifications)
-		mu.Unlock()
-		if n > 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
+	if len(result.Events) != 0 {
+		t.Fatalf("SubscribeRun events = %v, want empty controlled replay", result.Events)
 	}
 
 	mu.Lock()
-	n := len(notifications)
-	mu.Unlock()
-	if n == 0 {
-		t.Fatal("expected at least one notification to have been dispatched")
+	defer mu.Unlock()
+	if len(notifications) != 1 || notifications[0].Method != "v1/runEvent" {
+		t.Fatalf("notifications = %#v, want exactly one v1/runEvent", notifications)
 	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("controlled server: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("controlled server did not finish")
+	}
+}
+
+func serveControlledSubscription(listener net.Listener, notificationDelivered <-chan struct{}, done chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		done <- err
+		return
+	}
+	defer conn.Close()
+	decoder := proto.NewDecoder(conn)
+	encoder := proto.NewEncoder(conn)
+
+	readRequest := func(wantMethod string) (*proto.Message, error) {
+		frame, err := decoder.ReadFrame()
+		if err != nil {
+			return nil, err
+		}
+		message, rpcErr := proto.DecodeMessage(frame)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		if message.Method != wantMethod {
+			return nil, fmt.Errorf("method = %q, want %q", message.Method, wantMethod)
+		}
+		return message, nil
+	}
+
+	initialize, err := readRequest("v1/initialize")
+	if err != nil {
+		done <- err
+		return
+	}
+	if err := encoder.WriteFrame(proto.NewResponse(initialize.ID, proto.InitializeResult{
+		ProtocolVersion: proto.ProtocolVersion,
+		RunnerVersion:   "controlled-test",
+		Capabilities:    []string{},
+		NodeStatus:      proto.NodeStatus{State: "online"},
+	})); err != nil {
+		done <- err
+		return
+	}
+
+	subscribe, err := readRequest("v1/subscribeRun")
+	if err != nil {
+		done <- err
+		return
+	}
+	if err := encoder.WriteFrame(proto.NewNotification("v1/runEvent", proto.RunEventPayload{
+		RunID: "run-controlled", Sequence: 7, Type: "step_started", StepID: "step1",
+		OccurredAt: "2026-09-15T12:00:00Z",
+	})); err != nil {
+		done <- err
+		return
+	}
+	select {
+	case <-notificationDelivered:
+	case <-time.After(time.Second):
+		done <- errors.New("notification was not delivered while subscribeRun remained in flight")
+		return
+	}
+	if err := encoder.WriteFrame(proto.NewResponse(subscribe.ID, runnerclient.SubscribeRunResult{
+		Events: []proto.RunEventPayload{}, Status: "running",
+	})); err != nil {
+		done <- err
+		return
+	}
+	done <- nil
 }
 
 func TestNotificationHandlerCanCallPing(t *testing.T) {
