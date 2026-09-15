@@ -58,60 +58,106 @@ func TestRenderLaunchdPlistOmitsRunAtLoadWithoutEnable(t *testing.T) {
 	}
 }
 
-func TestLaunchdInstallAndUninstallSequence(t *testing.T) {
+func TestLaunchdInstallFlagMatrix(t *testing.T) {
+	tests := []struct {
+		name     string
+		enable   bool
+		startNow bool
+		want     func(string) []commandCall
+	}{
+		{name: "install", want: func(string) []commandCall { return nil }},
+		{
+			name:   "enable",
+			enable: true,
+			want: func(path string) []commandCall {
+				return []commandCall{{name: "launchctl", args: []string{"bootstrap", "gui/501", path}}}
+			},
+		},
+		{
+			name:     "start now",
+			startNow: true,
+			want: func(string) []commandCall {
+				return []commandCall{{name: "launchctl", args: []string{"kickstart", "-k", "gui/501/dev.doppels.runner"}}}
+			},
+		},
+		{
+			name:     "enable and start now",
+			enable:   true,
+			startNow: true,
+			want: func(path string) []commandCall {
+				return []commandCall{
+					{name: "launchctl", args: []string{"bootstrap", "gui/501", path}},
+					{name: "launchctl", args: []string{"kickstart", "-k", "gui/501/dev.doppels.runner"}},
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			home := t.TempDir()
+			runner := &recordingCommandRunner{}
+			opts := lifecycleOptions{
+				Executable: "/usr/local/bin/doppels-runner",
+				HomeDir:    home,
+				ConfigDir:  filepath.Join(home, ".config", "doppels"),
+				UID:        501,
+				Enable:     tt.enable,
+				StartNow:   tt.startNow,
+			}
+			plistPath := filepath.Join(home, "Library", "LaunchAgents", launchdPlistName)
+			if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(plistPath, []byte("old"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := installLifecycle(opts, runner); err != nil {
+				t.Fatal(err)
+			}
+			info, err := os.Stat(plistPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := info.Mode().Perm(); got != 0o644 {
+				t.Fatalf("plist mode = %#o, want 0644", got)
+			}
+			plist, err := os.ReadFile(plistPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(string(plist), "RunAtLoad"); got != tt.enable {
+				t.Fatalf("RunAtLoad present = %t, want %t:\n%s", got, tt.enable, plist)
+			}
+			if want := tt.want(plistPath); !reflect.DeepEqual(runner.calls, want) {
+				t.Fatalf("install calls = %#v, want %#v", runner.calls, want)
+			}
+		})
+	}
+}
+
+func TestLaunchdUninstallSequence(t *testing.T) {
 	home := t.TempDir()
 	runner := &recordingCommandRunner{}
-	opts := lifecycleOptions{
-		Executable: "/usr/local/bin/doppels-runner",
-		HomeDir:    home,
-		ConfigDir:  filepath.Join(home, ".config", "doppels"),
-		UID:        501,
-		Enable:     true,
-		StartNow:   true,
-	}
+	opts := lifecycleOptions{HomeDir: home, UID: 501}
 	plistPath := filepath.Join(home, "Library", "LaunchAgents", launchdPlistName)
 	if err := os.MkdirAll(filepath.Dir(plistPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(plistPath, []byte("old"), 0o600); err != nil {
+	if err := os.WriteFile(plistPath, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := installLifecycle(opts, runner); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(plistPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := info.Mode().Perm(); got != 0o644 {
-		t.Fatalf("plist mode = %#o, want 0644", got)
-	}
-	wantInstall := []commandCall{
-		{name: "launchctl", args: []string{"bootstrap", "gui/501", plistPath}},
-		{name: "launchctl", args: []string{"kickstart", "-k", "gui/501/dev.doppels.runner"}},
-	}
-	if !reflect.DeepEqual(runner.calls, wantInstall) {
-		t.Fatalf("install calls = %#v, want %#v", runner.calls, wantInstall)
-	}
-
-	runner.calls = nil
 	if err := uninstallLifecycle(opts, runner); err != nil {
 		t.Fatal(err)
 	}
-	wantUninstall := []commandCall{
-		{name: "launchctl", args: []string{"bootout", "gui/501/dev.doppels.runner"}},
-	}
-	if !reflect.DeepEqual(runner.calls, wantUninstall) {
-		t.Fatalf("uninstall calls = %#v, want %#v", runner.calls, wantUninstall)
+	want := []commandCall{{name: "launchctl", args: []string{"bootout", "gui/501/dev.doppels.runner"}}}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("uninstall calls = %#v, want %#v", runner.calls, want)
 	}
 	if _, err := os.Stat(plistPath); !os.IsNotExist(err) {
 		t.Fatalf("plist remains after uninstall: %v", err)
-	}
-	for _, call := range runner.calls {
-		if call.name == "systemctl" {
-			t.Fatal("macOS lifecycle called systemctl")
-		}
 	}
 }
 

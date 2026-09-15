@@ -96,11 +96,13 @@ func installLifecycle(opts lifecycleOptions, commands commandRunner) error {
 		return fmt.Errorf("set launchd plist permissions %s: %w", path, err)
 	}
 	domain := launchdDomain(opts)
-	if err := commands.Run("launchctl", "bootstrap", domain, path); err != nil {
-		// `bootstrap` arrived in macOS 10.10. Keep the documented load -w
-		// fallback so the same binary remains usable on older installations.
-		if fallbackErr := commands.Run("launchctl", "load", "-w", path); fallbackErr != nil {
-			return fmt.Errorf("launchctl not found or bootstrap failed: %v (load -w fallback: %w)", err, fallbackErr)
+	if opts.Enable {
+		if err := commands.Run("launchctl", "bootstrap", domain, path); err != nil {
+			// `bootstrap` arrived in macOS 10.10. Keep the documented load -w
+			// fallback so the same binary remains usable on older installations.
+			if fallbackErr := commands.Run("launchctl", "load", "-w", path); fallbackErr != nil {
+				return fmt.Errorf("launchctl not found or bootstrap failed: %v (load -w fallback: %w)", err, fallbackErr)
+			}
 		}
 	}
 	if opts.StartNow {
