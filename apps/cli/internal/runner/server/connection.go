@@ -75,7 +75,7 @@ func (c *connection) serve() {
 		if protoErr != nil {
 			// Protocol errors answer with id null and keep the connection
 			// alive (§15: only framing corruption forces a close).
-			c.enqueue(proto.NewErrorResponse(nil, protoErr), true)
+			c.enqueueError(nil, protoErr, true)
 			continue
 		}
 		if message.IsNotification() {
@@ -83,10 +83,10 @@ func (c *connection) serve() {
 			continue
 		}
 		if !c.isInitialized() && message.Method != "v1/initialize" {
-			c.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{
+			c.enqueueError(message.ID, &proto.Error{
 				Code:    proto.CodeNotInitialized,
 				Message: "initialize is required before any other method",
-			}), true)
+			}, true)
 			continue
 		}
 		if c.isClosed() {
@@ -154,6 +154,29 @@ func (c *connection) drainAfters() {
 // framing issues). Best-effort frames (notifications) drop with a log.
 func (c *connection) enqueue(value any, required bool) bool {
 	return c.enqueueFrame(outboundFrame{value: value}, required)
+}
+
+// enqueueError builds a JSON-RPC error response and, unlike a bare
+// conn.enqueue(proto.NewErrorResponse(...)), actually verifies it fits
+// MaxFrameBytes before queuing it — the same guarantee dispatch already
+// gives every success response. id is bounded at parse time (DecodeMessage,
+// MaxIDBytes) and err.Message is always one of this codebase's short fixed
+// strings, so the only field that can push an error envelope over the limit
+// is err.Data (arbitrary handler-supplied diagnostics). If the full error
+// doesn't fit, retry once with Data dropped — id plus a short fixed message
+// always fits after that. A response that still doesn't fit at that point
+// would mean a contract bug elsewhere (id or message unexpectedly
+// unbounded), not something to paper over here.
+func (c *connection) enqueueError(id any, err *proto.Error, required bool) bool {
+	response := proto.NewErrorResponse(id, err)
+	if encoded, marshalErr := json.Marshal(response); marshalErr == nil && len(encoded) <= proto.MaxFrameBytes {
+		return c.enqueue(response, required)
+	}
+	if err.Data == nil {
+		return c.enqueue(response, required)
+	}
+	trimmed := &proto.Error{Code: err.Code, Message: err.Message}
+	return c.enqueue(proto.NewErrorResponse(id, trimmed), required)
 }
 
 func (c *connection) enqueueFrame(frame outboundFrame, required bool) bool {
@@ -370,14 +393,14 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 	handler, found := s.handlers[message.Method]
 	s.mu.Unlock()
 	if !found {
-		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{
+		conn.enqueueError(message.ID, &proto.Error{
 			Code:    proto.CodeMethodNotFound,
 			Message: "unknown method: " + message.Method,
-		}), true)
+		}, true)
 		return
 	}
 	if message.Method != "v1/shutdown" && message.Method != "v1/initialize" && s.isShuttingDown() {
-		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}), true)
+		conn.enqueueError(message.ID, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}, true)
 		return
 	}
 	result, protoErr := handler(conn, message.Params)
@@ -386,7 +409,7 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 		// any Defer it may have registered (it shouldn't, but defensively)
 		// must not fire for a response that was never sent.
 		conn.consumePendingActivation(false)
-		conn.enqueue(proto.NewErrorResponse(message.ID, protoErr), true)
+		conn.enqueueError(message.ID, protoErr, true)
 		return
 	}
 	if message.Method == "v1/shutdown" {
@@ -400,7 +423,7 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 	if fitter, ok := result.(ResponseFrameFitter); ok {
 		if fitErr := fitter.FitResponseFrame(message.ID, proto.MaxFrameBytes); fitErr != nil {
 			conn.consumePendingActivation(false)
-			conn.enqueue(proto.NewErrorResponse(message.ID, fitErr), true)
+			conn.enqueueError(message.ID, fitErr, true)
 			return
 		}
 	}
@@ -408,7 +431,7 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 	encoded, encodeErr := json.Marshal(response)
 	if encodeErr != nil || len(encoded) > proto.MaxFrameBytes {
 		conn.consumePendingActivation(false)
-		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{Code: proto.CodeInternal, Message: "response exceeds maximum frame size"}), true)
+		conn.enqueueError(message.ID, &proto.Error{Code: proto.CodeInternal, Message: "response exceeds maximum frame size"}, true)
 		return
 	}
 	queued := conn.enqueue(response, true)

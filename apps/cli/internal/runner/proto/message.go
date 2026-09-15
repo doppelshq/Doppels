@@ -244,6 +244,20 @@ func DecodeMessage(data []byte) (*Message, *Error) {
 	if message.Method == "" {
 		return nil, &Error{Code: CodeInvalidRequest, Message: "method is required"}
 	}
+	if len(message.Method) > MaxMethodBytes {
+		return nil, &Error{Code: CodeInvalidRequest, Message: "method exceeds maximum size"}
+	}
+	// Real ids are short (UUIDs, small integers, short strings). Bounding id
+	// size here — a contract/framing decision, not a per-handler one — is
+	// what actually guarantees every error envelope (id plus a small,
+	// bounded error object) always fits well within MaxFrameBytes: no
+	// handler-level size check can be trusted to save an id this function
+	// let through unbounded. An oversized id is a malformed request the
+	// same way a batch array is: JSON-RPC permits answering with id null
+	// when the request's own id cannot be trusted enough to echo back.
+	if len(message.ID.raw) > MaxIDBytes {
+		return nil, &Error{Code: CodeInvalidRequest, Message: "id exceeds maximum size"}
+	}
 	return &message, nil
 }
 

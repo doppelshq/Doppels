@@ -208,6 +208,105 @@ func TestGetRunLogsAdversarialMetadataKeepsSocketUsable(t *testing.T) {
 	}
 }
 
+// TestGetRunLogsHugeRequestIDStillYieldsBoundedError reproduces a review
+// finding: dispatch only measures the *success* response against
+// MaxFrameBytes. FitResponseFrame's own static "log metadata exceeds
+// maximum frame size" error is enqueued unmeasured — and that error
+// re-embeds the caller's own request id. A request id large enough that the
+// request itself just barely fits produces a success envelope too large
+// (triggering FitResponseFrame's error branch) *and* an error envelope that
+// is itself larger than the success envelope would have been at the same
+// id length (the error's message text adds bytes past what the "result"
+// wrapper it replaces cost) — so the error response can itself exceed
+// MaxFrameBytes, and WriteFrame refuses to write it, closing the socket
+// instead of ever answering the request.
+//
+// The exact byte window where this reproduces is only about a dozen bytes
+// wide (id large enough to overflow the error, small enough the incoming
+// request still fits), so the id length is solved from real measurements of
+// this connection's own encoding instead of a hand-counted guess.
+func TestGetRunLogsHugeRequestIDStillYieldsBoundedError(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+	started := manualRun(t, manager, root, "huge-id")
+	runDir := filepath.Join(root, ".doppels", "runs", started.RunID)
+	// A little real metadata: enough that the success envelope's "result"
+	// wrapper costs more than the error's "error" wrapper would save, at any
+	// given id length near the frame limit.
+	for i := 0; i < 20; i++ {
+		name := fmt.Sprintf("step-%02d.stdout.log", i)
+		if err := os.WriteFile(filepath.Join(runDir, "logs", name), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	srv := server.New(server.Config{
+		Token: integrationToken, RunnerVersion: "0.0.1-test",
+		NodeStatus: func() proto.NodeStatus { return proto.NodeStatus{} },
+		Log:        func(string, ...any) {},
+	})
+	RegisterRPC(srv, manager)
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := transport.Unix{}.Listen(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	go srv.Serve(serveCtx, listener)
+	t.Cleanup(srv.Close)
+	client := dialIntegrationClient(t, socketPath)
+
+	// Measure this connection's own exact framing overhead (id="") for both
+	// the request it is about to send and the error FitResponseFrame would
+	// return, then pick the largest id for which the request still fits.
+	zeroIDRequest, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "", "method": "v1/getRunLogs",
+		"params": map[string]any{"runId": started.RunID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroIDError, err := json.Marshal(proto.NewErrorResponse("", &proto.Error{
+		Code: proto.CodeInvalidParams, Message: "log metadata exceeds maximum frame size; filter by stepId",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zeroIDError) <= len(zeroIDRequest) {
+		t.Fatalf("test setup invalid: error overhead (%d) must exceed request overhead (%d) to reproduce the bug", len(zeroIDError), len(zeroIDRequest))
+	}
+	idLen := proto.MaxFrameBytes - len(zeroIDRequest)
+	hugeID := strings.Repeat("x", idLen)
+
+	if err := client.encoder.WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": hugeID, "method": "v1/getRunLogs",
+		"params": map[string]any{"runId": started.RunID},
+	}); err != nil {
+		t.Fatalf("request with id length %d could not even be sent: %v", idLen, err)
+	}
+	frame, err := client.decoder.ReadFrame()
+	if err != nil {
+		t.Fatalf("a huge-id request closed the connection instead of returning an in-frame response: %v", err)
+	}
+	if len(frame) > proto.MaxFrameBytes {
+		t.Fatalf("response frame = %d bytes, max %d", len(frame), proto.MaxFrameBytes)
+	}
+	var response proto.Response
+	if err := json.Unmarshal(frame, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Err == nil {
+		t.Fatal("huge-id request unexpectedly returned an unbounded success response")
+	}
+
+	ping := client.call("huge-id-ping", "v1/ping", map[string]any{})
+	if ping.Err != nil {
+		t.Fatalf("connection unusable after huge-id response: %+v", ping.Err)
+	}
+}
+
 // manualRun starts a Run against a Capability with no Recipe (durable
 // pendingManual) purely as a vehicle to get a real Run directory under
 // runID that this package's log tests can drop synthetic log files into.

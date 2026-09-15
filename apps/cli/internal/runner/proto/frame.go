@@ -14,6 +14,22 @@ import (
 // emits larger frames; log payloads paginate through getRunLogs instead.
 const MaxFrameBytes = 4 << 20 // 4 MiB
 
+// MaxIDBytes bounds the wire size (as encoded JSON, quotes included for a
+// string id) of a JSON-RPC request id. Real ids are short: UUIDs, small
+// integers, short caller-chosen strings. This exists purely so that no
+// error envelope — id plus even the largest fixed error object this
+// package ever emits — can be pushed anywhere near MaxFrameBytes just by an
+// oversized id; see DecodeMessage.
+const MaxIDBytes = 1024
+
+// MaxMethodBytes bounds a request's method name. Every real v1 method name
+// is a short fixed string ("v1/subscribeRunLogs" and the like); this exists
+// so an oversized method name can't be echoed back into an error message
+// (e.g. methodNotFound's "unknown method: <name>") and push that error
+// envelope anywhere near MaxFrameBytes, the same hazard MaxIDBytes closes
+// for ids. See DecodeMessage.
+const MaxMethodBytes = 256
+
 // ErrFrameTooLarge marks a line exceeding MaxFrameBytes. Connections hit by
 // it must close: there is no framing resynchronization.
 var ErrFrameTooLarge = errors.New("frame exceeds 4 MiB")
