@@ -1,6 +1,7 @@
 package command
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"doppels.so/cli/internal/project"
 	"doppels.so/cli/internal/registryclient"
+	"doppels.so/cli/internal/runnerclient"
 	"doppels.so/cli/internal/runstate"
 )
 
@@ -482,6 +484,17 @@ func (app *App) listRuns(arguments []string) int {
 	if code != ExitSuccess {
 		return code
 	}
+
+	client, dialErr := app.dialRunner(app.context())
+	switch {
+	case dialErr == nil:
+		defer client.Close()
+		return app.listRunsViaDaemon(client, root, *jsonOutput, *all, *limit)
+	case !errors.Is(dialErr, runnerclient.ErrNotRunning):
+		fmt.Fprintf(app.Stderr, "connect to runner daemon: %v\n", dialErr)
+		return ExitOperational
+	}
+
 	items, err := runstate.List(root)
 	if err != nil {
 		fmt.Fprintf(app.Stderr, "list local Runs: %v\n", err)

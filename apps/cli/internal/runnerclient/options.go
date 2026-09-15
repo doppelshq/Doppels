@@ -85,6 +85,13 @@ func (o Options) withDefaults() (Options, error) {
 		if resolved.Token == "" {
 			tokenBytes, err := os.ReadFile(filepath.Join(configDir, "runner.token"))
 			if err != nil {
+				if os.IsNotExist(err) {
+					// No token file means the Runner has never started on
+					// this host (cmd/doppels-runner's resolveToken generates
+					// one on first boot): the same "no daemon" condition as
+					// a missing socket, not a distinct error.
+					return Options{}, ErrNotRunning
+				}
 				return Options{}, err
 			}
 			resolved.Token = trimToken(tokenBytes)

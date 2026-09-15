@@ -17,6 +17,7 @@ import (
 	"doppels.so/cli/internal/listener"
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/registryclient"
+	"doppels.so/cli/internal/runnerclient"
 	"doppels.so/cli/internal/shareclient"
 )
 
@@ -66,6 +67,15 @@ func (app *App) runNode(arguments []string) int {
 	}
 	switch arguments[0] {
 	case "up":
+		client, dialErr := app.dialRunner(app.context())
+		switch {
+		case dialErr == nil:
+			defer client.Close()
+			return app.reportNodeStatus(client)
+		case !errors.Is(dialErr, runnerclient.ErrNotRunning):
+			fmt.Fprintf(app.Stderr, "connect to runner daemon: %v\n", dialErr)
+			return ExitOperational
+		}
 		return app.runListen(arguments[1:])
 	default:
 		fmt.Fprintf(app.Stderr, "unknown node subcommand %q\n", arguments[0])
