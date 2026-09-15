@@ -30,18 +30,38 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "install" || os.Args[1] == "uninstall") {
+		deps, err := defaultLifecycleDependencies()
+		if err == nil {
+			_, err = executeLifecycleSubcommand(os.Args[1:], deps)
+		}
+		if err != nil {
+			log.Fatalf("doppels-runner: %v", err)
+		}
+		return
+	}
+
 	socket := flag.String("socket", "", "path to the IPC socket (default: <configdir>/runner.sock)")
 	tokenFlag := flag.String("token", "", "runner token clients must present at initialize (default: read from <socket-dir>/runner.token or generated)")
 	runnerVersion := flag.String("runner-version", "0.1.0-dev", "runner version reported in initialize")
 	configDir := flag.String("config", "", "runner config dir (default: XDG user config + /doppels)")
 	flag.Parse()
 
+	if err := prepareProcessGroup(); err != nil {
+		log.Fatalf("doppels-runner: %v", err)
+	}
 	if err := run(*socket, *tokenFlag, *runnerVersion, *configDir); err != nil {
 		log.Fatalf("doppels-runner: %v", err)
 	}
 }
 
 func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	return runWithContext(ctx, socketPath, tokenFlag, runnerVersion, configDir)
+}
+
+func runWithContext(ctx context.Context, socketPath, tokenFlag, runnerVersion, configDir string) error {
 	if configDir == "" {
 		defaultDir, err := runnerConfigDir()
 		if err != nil {
@@ -64,18 +84,34 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 		return err
 	}
 	workspaces := workspace.NewService(registry, workspace.Deps{Host: manifest.OSHost{}})
+	pidPath := filepath.Join(configDir, runnerPIDFile)
+	if existingRunner(token, socketPath) {
+		if pid, readErr := readPIDFile(pidPath); readErr == nil {
+			return anotherInstanceError(pid)
+		}
+		return fmt.Errorf("another instance already running at %s", socketPath)
+	}
+	pid, err := acquirePIDLock(pidPath, os.Getpid(), processMatchesRunner)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pid.Close(); err != nil {
+			log.Printf("doppels-runner: clean up PID file: %v", err)
+		}
+	}()
 
 	log.Printf("doppels-runner: listening on %s", socketPath)
 	listener, err := transport.Unix{}.Listen(socketPath)
 	if err != nil {
 		if existingRunner(token, socketPath) {
-			return nil
+			if owner, readErr := readPIDFile(pidPath); readErr == nil && owner != os.Getpid() {
+				return anotherInstanceError(owner)
+			}
+			return fmt.Errorf("another instance already running at %s", socketPath)
 		}
 		return fmt.Errorf("listen: %w", err)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	// srv is assigned below, after config is built; OnStarted/OnFinished
 	// only fire once Runs actually start, well after that assignment
@@ -115,7 +151,8 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 	srv = server.New(config)
 	workspace.RegisterRPC(srv, workspaces)
 	runs.RegisterRPC(srv, manager)
-	return srv.Serve(ctx, listener)
+	serve := func(ctx context.Context) error { return srv.Serve(ctx, listener) }
+	return serveWithGracefulShutdown(ctx, gracefulShutdownTimeout, serve, killOwnProcessGroup)
 }
 
 // probeTimeout bounds the handshake probe against a socket that accepts but
