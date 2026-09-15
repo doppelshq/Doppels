@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"doppels.so/cli/internal/execution"
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runstate"
 )
@@ -74,6 +76,48 @@ func TestManagerDecideApprovalReturnsRunNotFound(t *testing.T) {
 
 	if rpcErr := manager.DecideApproval("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "run", "approve"); rpcErr == nil || rpcErr.Code != proto.CodeRunNotFound {
 		t.Fatalf("error = %+v, want -32006", rpcErr)
+	}
+}
+
+func TestManagerDecideApprovalObservesCancelledWaiter(t *testing.T) {
+	service, _ := runnerWorkspace(t, true)
+	emitStarted := make(chan struct{})
+	unblockEmit := make(chan struct{})
+	manager := NewManager(context.Background(), service, Config{
+		NodeID: "node-test",
+		EmitNodeEvent: func(proto.NodeEvent) {
+			close(emitStarted)
+			<-unblockEmit
+		},
+	})
+	defer manager.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := manager.awaitApproval(ctx, execution.ApprovalRequest{
+			RunID:       "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+			StepID:      "run",
+			Name:        "Run",
+			RequestedAt: time.Now().UTC(),
+		})
+		result <- err
+	}()
+	<-emitStarted
+	cancel()
+	rpcErr := manager.DecideApproval("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "run", "approve")
+	pending := manager.ListPendingApprovals()
+	close(unblockEmit)
+	waitErr := <-result
+
+	if rpcErr == nil || rpcErr.Code != proto.CodeApprovalNotFound {
+		t.Errorf("DecideApproval error = %+v, want -32007", rpcErr)
+	}
+	if len(pending) != 0 {
+		t.Errorf("pending approvals after cancellation = %#v, want empty", pending)
+	}
+	if !errors.Is(waitErr, context.Canceled) {
+		t.Errorf("awaitApproval error = %v, want context.Canceled", waitErr)
 	}
 }
 

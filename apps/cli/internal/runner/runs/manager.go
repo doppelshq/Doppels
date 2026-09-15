@@ -83,7 +83,7 @@ type Manager struct {
 	subs   map[string][]*runSubscriber
 
 	pendingApprovalsMu  sync.Mutex
-	pendingApprovals    map[string]chan approvalDecision
+	pendingApprovals    map[string]*approvalWaiter
 	pendingApprovalInfo map[string]PendingApproval
 
 	// testBeforeReserve is a test-only seam invoked synchronously right
@@ -126,7 +126,7 @@ func NewManager(ctx context.Context, workspaces *workspace.Service, config Confi
 		ctx: ctx, cancel: cancel, workspaces: workspaces, config: config,
 		indexes: make(map[string]runIndex), active: make(map[string]*activeRun),
 		subs:                make(map[string][]*runSubscriber),
-		pendingApprovals:    make(map[string]chan approvalDecision),
+		pendingApprovals:    make(map[string]*approvalWaiter),
 		pendingApprovalInfo: make(map[string]PendingApproval),
 		openIndex:           func(root string) (runIndex, error) { return runindex.Open(root) },
 	}
