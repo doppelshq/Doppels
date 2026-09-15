@@ -104,6 +104,12 @@ type Index struct {
 	// testBeforeEnrichUpdate is a test-only scheduling seam used to pin the
 	// interleaving between Backfill's disk read and its conditional UPDATE.
 	testBeforeEnrichUpdate func()
+	// testAfterCommitTerminalLock is a test-only scheduling seam invoked
+	// once CommitTerminal has forced acquisition of the database's single
+	// WAL write lock, immediately before it reads current state to decide
+	// what to write. Used to pin the interleaving between CommitTerminal and
+	// a concurrent AckOutbox from a different *Index (different connection).
+	testAfterCommitTerminalLock func()
 }
 
 // busyTimeoutMS is the SQLITE_BUSY wait applied to every connection in the
@@ -532,6 +538,20 @@ VALUES (?, ?, ?, 0)
 // durable sync item. It is safe to retry after any earlier partial write:
 // existing outbox payload is repaired in place, while an already-acked Run
 // (sync_status=synced) is never re-enqueued.
+//
+// Every read this function relies on happens inside the same transaction
+// that performs the writes, after that transaction has forced acquisition of
+// the database's single WAL write lock (see the leading no-op UPDATE below).
+// Reading state outside the transaction (an earlier version of this
+// function did, for lock-hold-time reasons) is a real TOCTOU race: a
+// concurrent AckOutbox from a different *Index/connection can delete the
+// outbox row and mark sync_status "synced" in the gap between this
+// function's read and its write, and this function's write — computed from
+// the stale pre-read snapshot — would then overwrite sync_status back to
+// "pending" with no outbox row left to ever sync it. Forcing the lock before
+// reading serializes the two operations instead: whichever one the SQLite
+// engine schedules first fully completes (commits) before the other's read
+// can observe anything, so the read is always of genuinely current state.
 func (idx *Index) CommitTerminal(record Record, payload any) (bool, error) {
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -541,15 +561,25 @@ func (idx *Index) CommitTerminal(record Record, payload any) (bool, error) {
 		record.Source = SourceLocal
 	}
 
-	// The lookups below are plain reads, deliberately outside any
-	// transaction: holding the single write connection's transaction open
-	// across round trips would extend how long this Run's row is locked
-	// against unrelated readers/writers (e.g. a concurrent Backfill pass)
-	// for no correctness benefit — the writes that follow are themselves
-	// atomic and idempotent, so a stale read only affects the returned
-	// "changed" hint, never the data actually persisted.
+	tx, err := idx.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	// database/sql.Begin issues a deferred BEGIN: no lock is actually held
+	// until the first write statement. A no-op UPDATE forces that
+	// acquisition immediately, before any read below, without depending on
+	// whether record.ID already exists.
+	if _, err := tx.Exec(`UPDATE runs SET id = id WHERE id = ?`, record.ID); err != nil {
+		return false, err
+	}
+	if idx.testAfterCommitTerminalLock != nil {
+		idx.testAfterCommitTerminalLock()
+	}
+
 	var previous Record
-	err = idx.db.QueryRow(`
+	err = tx.QueryRow(`
 SELECT id, request_id, status, source, capability, recipe, node_id, created_at, finished_at, state_dir, sync_status
 FROM runs WHERE id = ?
 `, record.ID).Scan(&previous.ID, &previous.RequestID, &previous.Status, &previous.Source,
@@ -572,7 +602,7 @@ FROM runs WHERE id = ?
 	outboxPayload := string(data)
 	if syncStatus != SyncSynced {
 		var existingPayload string
-		outboxErr := idx.db.QueryRow(`SELECT payload_json FROM outbox WHERE run_id = ?`, record.ID).Scan(&existingPayload)
+		outboxErr := tx.QueryRow(`SELECT payload_json FROM outbox WHERE run_id = ?`, record.ID).Scan(&existingPayload)
 		switch {
 		case errors.Is(outboxErr, sql.ErrNoRows):
 			needsOutbox = true
@@ -590,11 +620,6 @@ FROM runs WHERE id = ?
 	}
 	record.SyncStatus = syncStatus
 
-	tx, err := idx.db.Begin()
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
 	if needsOutbox {
 		if _, err := tx.Exec(`
 INSERT INTO outbox (run_id, payload_json, created_at, attempts)
@@ -650,13 +675,24 @@ SELECT id, run_id, payload_json, created_at, attempts FROM outbox ORDER BY id AS
 	return result, rows.Err()
 }
 
+// AckOutbox atomically removes the acked outbox item and marks the Run
+// synced. Both statements are one transaction so a crash (or a concurrent
+// CommitTerminal, serialized against this by the same forced-write-lock
+// discipline — see CommitTerminal) can never observe or leave the outbox row
+// deleted while sync_status still reads "pending".
 func (idx *Index) AckOutbox(id int64, runID string) error {
-	_, err := idx.db.Exec(`DELETE FROM outbox WHERE id = ?`, id)
+	tx, err := idx.db.Begin()
 	if err != nil {
 		return err
 	}
-	_, err = idx.db.Exec(`UPDATE runs SET sync_status = ? WHERE id = ?`, SyncSynced, runID)
-	return err
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM outbox WHERE id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE runs SET sync_status = ? WHERE id = ?`, SyncSynced, runID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (idx *Index) BumpOutboxAttempt(id int64) error {

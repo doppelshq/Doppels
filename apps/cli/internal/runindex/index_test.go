@@ -252,6 +252,109 @@ func TestBackfillEnrichmentNeverClobbersConcurrentEngineUpsert(t *testing.T) {
 	}
 }
 
+// TestCommitTerminalAndAckOutboxAreSerializedAcrossConnections reproduces a
+// review finding: CommitTerminal used to read the Run's current sync state
+// (sync_status, whether an outbox row already exists) before opening its
+// write transaction. A concurrent AckOutbox from a *different* connection
+// (a separate *Index, exactly like a real sync worker) could delete the
+// outbox row and mark the Run synced in the gap between that read and
+// CommitTerminal's write — CommitTerminal's write, computed from the now
+// stale snapshot, would then overwrite sync_status back to "pending" with no
+// outbox row left to ever sync it: an orphaned "pending" Run.
+//
+// This test uses two real *Index handles (two separate connections, exactly
+// the daemon+sync-worker shape the schema's WAL/busy_timeout comment
+// describes) and a deterministic barrier (testAfterCommitTerminalLock)
+// instead of a sleep to force the interleaving that used to race.
+func TestCommitTerminalAndAckOutboxAreSerializedAcrossConnections(t *testing.T) {
+	root := t.TempDir()
+	writer, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	syncer, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer syncer.Close()
+
+	record := Record{
+		ID: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", RequestID: "request-race",
+		Status: "succeeded", Source: SourceLocal, Capability: "race@1.0.0",
+		CreatedAt: "2026-08-02T12:00:00Z", FinishedAt: "2026-08-02T12:05:00Z",
+		StateDir: filepath.Join(root, ".doppels", "runs", "race"), SyncStatus: SyncNone,
+	}
+	payload := map[string]any{"id": record.ID, "status": record.Status}
+	// First call installs the terminal row and its one outbox item
+	// (sync_status: none -> pending) exactly like the real engine's first
+	// CommitTerminal on a terminal transition.
+	if _, err := writer.CommitTerminal(record, payload); err != nil {
+		t.Fatal(err)
+	}
+	outbox, err := writer.ListOutbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outbox) != 1 {
+		t.Fatalf("outbox after first CommitTerminal = %#v, want exactly one item", outbox)
+	}
+	outboxID := outbox[0].ID
+
+	// Retry CommitTerminal for the same, unchanged terminal record — e.g. an
+	// idempotent Cancel reconciliation racing a sync worker that is about to
+	// ack the very outbox item this call is about to look at.
+	lockAcquired := make(chan struct{})
+	releaseWriter := make(chan struct{})
+	writer.testAfterCommitTerminalLock = func() {
+		close(lockAcquired)
+		<-releaseWriter
+	}
+	commitDone := make(chan error, 1)
+	go func() {
+		_, err := writer.CommitTerminal(record, payload)
+		commitDone <- err
+	}()
+	<-lockAcquired
+
+	ackDone := make(chan error, 1)
+	go func() {
+		ackDone <- syncer.AckOutbox(outboxID, record.ID)
+	}()
+
+	// AckOutbox must not be able to complete while CommitTerminal holds the
+	// write lock: if it does, the two operations are not actually
+	// serialized and the race this test exists to close is still open.
+	select {
+	case err := <-ackDone:
+		t.Fatalf("AckOutbox completed (err=%v) while a concurrent CommitTerminal still held the write lock — not serialized", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseWriter)
+	if err := <-commitDone; err != nil {
+		t.Fatalf("CommitTerminal: %v", err)
+	}
+	if err := <-ackDone; err != nil {
+		t.Fatalf("AckOutbox: %v", err)
+	}
+
+	final, err := writer.Get(record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.SyncStatus != SyncSynced {
+		t.Fatalf("sync_status = %q, want %q (AckOutbox ran after CommitTerminal released the lock and must not have been reverted)", final.SyncStatus, SyncSynced)
+	}
+	finalOutbox, err := writer.ListOutbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(finalOutbox) != 0 {
+		t.Fatalf("outbox = %#v, want empty (no orphaned/re-inserted item for a synced Run)", finalOutbox)
+	}
+}
+
 func TestReserveStartIsAtomicAcrossIndexesAndSurvivesRestart(t *testing.T) {
 	root := t.TempDir()
 	first, err := Open(root)
