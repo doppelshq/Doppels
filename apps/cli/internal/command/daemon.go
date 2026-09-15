@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"doppels.so/cli/internal/execution"
@@ -135,6 +136,12 @@ var daemonTerminalRunEvents = map[string]bool{
 	"run_succeeded": true, "run_failed": true, "run_cancelled": true, "run_interrupted": true,
 }
 
+var daemonTerminalRunStatuses = map[string]bool{
+	"succeeded": true, "failed": true, "cancelled": true, "interrupted": true,
+}
+
+const daemonOverflowPollInterval = 100 * time.Millisecond
+
 // lostDaemonMessage is printed once a Run has already been started against
 // the daemon and the connection is later lost: the CLI must never fall back
 // to standalone in that case (it would risk a duplicate/orphaned Run), only
@@ -197,13 +204,29 @@ func (app *App) streamDaemonRun(
 
 	events := make(chan proto.RunEventPayload, 256)
 	resync := make(chan struct{}, 1)
+	localOverflow := make(chan struct{}, 1)
+	var consumeLiveEvents atomic.Bool
+	consumeLiveEvents.Store(true)
 	requestResync := func() {
 		select {
 		case resync <- struct{}{}:
 		default:
 		}
 	}
+	stopLiveEvents := func() {
+		if !consumeLiveEvents.CompareAndSwap(true, false) {
+			return
+		}
+		client.SetNotificationHandler(nil)
+		select {
+		case localOverflow <- struct{}{}:
+		default:
+		}
+	}
 	client.SetNotificationHandler(func(n runnerclient.Notification) {
+		if !consumeLiveEvents.Load() {
+			return
+		}
 		switch n.Method {
 		case "v1/runEvent":
 			var payload proto.RunEventPayload
@@ -213,7 +236,7 @@ func (app *App) streamDaemonRun(
 			select {
 			case events <- payload:
 			default:
-				requestResync()
+				stopLiveEvents()
 			}
 		case "v1/nodeEvent":
 			var event struct {
@@ -279,6 +302,9 @@ func (app *App) streamDaemonRun(
 		if code != ExitSuccess || terminal {
 			return terminal, code
 		}
+		if !consumeLiveEvents.Load() {
+			return false, ExitSuccess
+		}
 
 		subscribed, err := client.SubscribeRun(ctx, runID, lastRenderedSequence+1)
 		if err != nil {
@@ -286,6 +312,37 @@ func (app *App) streamDaemonRun(
 			return false, ExitOperational
 		}
 		return processEvents(subscribed.Events)
+	}
+	pollCanonical := func() (bool, int) {
+		// Local overflow is best-effort loss, not a daemon-reported stream
+		// gap. Keep the original server subscription untouched, stop the
+		// local handler, and use the durable event list until the Run ends.
+	DrainEvents:
+		for {
+			select {
+			case <-events:
+			default:
+				break DrainEvents
+			}
+		}
+		for {
+			recovered, err := client.GetRun(ctx, runID, true)
+			if err != nil {
+				fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
+				return false, ExitOperational
+			}
+			terminal, code := processEvents(recovered.Events)
+			if code != ExitSuccess || terminal || daemonTerminalRunStatuses[recovered.Summary.Status] {
+				return terminal || daemonTerminalRunStatuses[recovered.Summary.Status], code
+			}
+
+			select {
+			case <-ctx.Done():
+				fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
+				return false, ExitOperational
+			case <-time.After(daemonOverflowPollInterval):
+			}
+		}
 	}
 
 	if !terminalSeen {
@@ -314,6 +371,15 @@ func (app *App) streamDaemonRun(
 	loop:
 		for {
 			select {
+			case <-localOverflow:
+				terminal, code := pollCanonical()
+				if code != ExitSuccess {
+					return code
+				}
+				if terminal {
+					break loop
+				}
+				continue
 			case <-resync:
 				terminal, code := recoverStream()
 				if code != ExitSuccess {
@@ -327,7 +393,18 @@ func (app *App) streamDaemonRun(
 			}
 			select {
 			case event := <-events:
+				if !consumeLiveEvents.Load() {
+					continue
+				}
 				terminal, code := processEvents([]proto.RunEventPayload{event})
+				if code != ExitSuccess {
+					return code
+				}
+				if terminal {
+					break loop
+				}
+			case <-localOverflow:
+				terminal, code := pollCanonical()
 				if code != ExitSuccess {
 					return code
 				}

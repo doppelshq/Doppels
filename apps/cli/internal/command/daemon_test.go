@@ -37,6 +37,9 @@ type fakeDaemon struct {
 
 	getRunIncludes []bool
 	recoveryEvents []proto.RunEventPayload
+	getRunResults  []runnerclient.GetRunResult
+	getRunHooks    []func()
+	getRunCalls    int
 
 	gotRuns    runnerclient.ListRunsParams
 	runsResult runnerclient.ListRunsResult
@@ -75,6 +78,14 @@ func (f *fakeDaemon) SubscribeRun(ctx context.Context, runID string, fromSequenc
 func (f *fakeDaemon) GetRun(ctx context.Context, runID string, includeEvents bool) (runnerclient.GetRunResult, error) {
 	f.getRunIncludes = append(f.getRunIncludes, includeEvents)
 	if includeEvents {
+		call := f.getRunCalls
+		f.getRunCalls++
+		if call < len(f.getRunHooks) && f.getRunHooks[call] != nil {
+			f.getRunHooks[call]()
+		}
+		if call < len(f.getRunResults) {
+			return f.getRunResults[call], nil
+		}
 		return runnerclient.GetRunResult{
 			Summary: proto.RunSummary{RunID: runID, Status: "running"},
 			Events:  f.recoveryEvents,
@@ -282,13 +293,22 @@ func TestRunRecoversFromLocalEventBufferOverflow(t *testing.T) {
 		}
 	}
 	daemon := &fakeDaemon{
-		startRunID:     "run-overflow",
-		recoveryEvents: recovered,
+		startRunID: "run-overflow",
 		subscribeResults: []runnerclient.SubscribeRunResult{
 			{Status: "running"},
-			{Status: "succeeded", Events: []proto.RunEventPayload{{
-				RunID: "run-overflow", Sequence: 257, Type: "run_succeeded", OccurredAt: "2026-09-15T12:00:01Z",
-			}}},
+			{Status: "running"},
+		},
+		getRunResults: []runnerclient.GetRunResult{
+			{
+				Summary: proto.RunSummary{RunID: "run-overflow", Status: "running"},
+				Events:  recovered,
+			},
+			{
+				Summary: proto.RunSummary{RunID: "run-overflow", Status: "succeeded"},
+				Events: []proto.RunEventPayload{{
+					RunID: "run-overflow", Sequence: 257, Type: "run_succeeded", OccurredAt: "2026-09-15T12:00:01Z",
+				}},
+			},
 		},
 	}
 	daemon.subscribeHooks = []func(){func() {
@@ -303,6 +323,26 @@ func TestRunRecoversFromLocalEventBufferOverflow(t *testing.T) {
 			daemon.notificationFunc(runnerclient.Notification{Method: "v1/runEvent", Params: payload})
 		}
 	}}
+	daemon.getRunHooks = []func(){func() {
+		// A notification arriving after local overflow must not reach the
+		// command's event processor; canonical GetRun polling replaces the
+		// live stream from this point onward.
+		if daemon.notificationFunc == nil {
+			return
+		}
+		payload, err := json.Marshal(proto.RunEventPayload{
+			RunID: "run-overflow", Sequence: 257, Type: "approval_requested", StepID: "too-late",
+			OccurredAt: "2026-09-15T12:00:01Z",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		daemon.notificationFunc(runnerclient.Notification{Method: "v1/runEvent", Params: payload})
+	}}
+	daemon.onDecide = func() {
+		payload := json.RawMessage(`{"runId":"run-overflow","sequence":258,"type":"run_succeeded","occurredAt":"2026-09-15T12:00:02Z"}`)
+		daemon.notificationFunc(runnerclient.Notification{Method: "v1/runEvent", Params: payload})
+	}
 	app.DialRunner = func(ctx context.Context, opts runnerclient.Options) (daemonClient, error) {
 		return daemon, nil
 	}
@@ -311,11 +351,17 @@ func TestRunRecoversFromLocalEventBufferOverflow(t *testing.T) {
 	if code != ExitSuccess {
 		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
 	}
-	if len(daemon.getRunIncludes) < 2 || !daemon.getRunIncludes[0] {
-		t.Fatalf("getRun includeEvents calls = %v, want overflow recovery with true", daemon.getRunIncludes)
+	if len(daemon.getRunIncludes) < 3 || !daemon.getRunIncludes[0] || !daemon.getRunIncludes[1] {
+		t.Fatalf("getRun includeEvents calls = %v, want canonical polling through terminal state", daemon.getRunIncludes)
 	}
-	if len(daemon.subscribeCalls) != 2 || daemon.subscribeCalls[1] != 257 {
-		t.Fatalf("subscribeRun fromSequence calls = %v, want [0 257]", daemon.subscribeCalls)
+	if len(daemon.subscribeCalls) != 1 {
+		t.Fatalf("subscribeRun fromSequence calls = %v, want only the initial [0]", daemon.subscribeCalls)
+	}
+	if daemon.notificationFunc != nil {
+		t.Fatal("notification handler remains installed after local overflow")
+	}
+	if len(daemon.decided) != 0 {
+		t.Fatalf("notifications processed after local overflow: decideApproval calls = %v", daemon.decided)
 	}
 }
 
