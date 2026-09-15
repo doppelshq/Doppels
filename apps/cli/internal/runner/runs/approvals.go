@@ -34,7 +34,7 @@ func (m *Manager) awaitApproval(ctx context.Context, request execution.ApprovalR
 	decision := make(chan approvalDecision, 1)
 	pending := PendingApproval{
 		RunID: request.RunID, StepID: request.StepID, Name: request.Name,
-		RequestedAt: m.config.Now().UTC().Truncate(time.Millisecond),
+		RequestedAt: request.RequestedAt,
 	}
 
 	m.pendingApprovalsMu.Lock()

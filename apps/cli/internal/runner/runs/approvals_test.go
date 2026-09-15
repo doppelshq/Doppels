@@ -1,7 +1,9 @@
 package runs
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -103,6 +105,61 @@ func TestManagerEmitsApprovalPendingNodeEvent(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for approvalPending nodeEvent")
+	}
+}
+
+func TestApprovalRequestedTimestampsMatchPersistedEvent(t *testing.T) {
+	service, root := runnerWorkspace(t, true)
+	writeApprovalRecipe(t, root)
+	base := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	var nowMu sync.Mutex
+	now := base
+	events := make(chan proto.NodeEvent, 1)
+	manager := NewManager(context.Background(), service, Config{
+		NodeID: "node-test", Environment: []string{"PATH=" + os.Getenv("PATH")},
+		Now: func() time.Time {
+			nowMu.Lock()
+			defer nowMu.Unlock()
+			now = now.Add(time.Millisecond)
+			return now
+		},
+		EmitNodeEvent: func(event proto.NodeEvent) { events <- event },
+	})
+	defer manager.Close()
+
+	started := startApprovalRun(t, manager, root, "matching-requested-at")
+	pending := waitForPendingApproval(t, manager, started.RunID)
+	var nodePending PendingApproval
+	select {
+	case event := <-events:
+		var ok bool
+		nodePending, ok = event.Payload.(PendingApproval)
+		if event.Kind != proto.NodeEventApprovalPending || !ok {
+			t.Fatalf("node event = %#v", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for approvalPending nodeEvent")
+	}
+	detail, err := runstate.Load(root, started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var requestedAt time.Time
+	for _, event := range detail.Events {
+		if event.Type == "approval_requested" {
+			requestedAt = event.OccurredAt
+			break
+		}
+	}
+	if requestedAt.IsZero() {
+		t.Fatal("approval_requested event not persisted")
+	}
+
+	durableJSON, _ := json.Marshal(requestedAt)
+	nodeJSON, _ := json.Marshal(nodePending.RequestedAt)
+	listJSON, _ := json.Marshal(pending.RequestedAt)
+	if !bytes.Equal(durableJSON, nodeJSON) || !bytes.Equal(durableJSON, listJSON) {
+		t.Fatalf("requestedAt bytes differ: durable=%s node=%s list=%s", durableJSON, nodeJSON, listJSON)
 	}
 }
 

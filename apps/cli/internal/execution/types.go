@@ -104,9 +104,10 @@ func (a ArtifactReference) PublicValue() map[string]any {
 }
 
 type ApprovalRequest struct {
-	RunID  string
-	StepID string
-	Name   string
+	RunID       string
+	StepID      string
+	Name        string
+	RequestedAt time.Time
 }
 
 type ApprovalFunc func(context.Context, ApprovalRequest) (bool, error)

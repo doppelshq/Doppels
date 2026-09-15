@@ -311,7 +311,12 @@ func (r *runner) runShell(ctx context.Context) (Result, error) {
 			}
 			approved := r.options.ApproveAll
 			if !approved && r.options.Approve != nil {
-				approved, err = r.options.Approve(ctx, ApprovalRequest{RunID: r.result.Run.ID, StepID: step.ID, Name: step.Name})
+				approved, err = r.options.Approve(ctx, ApprovalRequest{
+					RunID:       r.result.Run.ID,
+					StepID:      step.ID,
+					Name:        step.Name,
+					RequestedAt: r.result.Events[len(r.result.Events)-1].OccurredAt,
+				})
 				if err != nil {
 					if ctx.Err() != nil {
 						return r.interrupt(ctx.Err())
