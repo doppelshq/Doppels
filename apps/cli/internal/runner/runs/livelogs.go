@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"unicode/utf8"
 
 	"doppels.so/cli/internal/execution"
 	"doppels.so/cli/internal/runner/proto"
@@ -18,6 +19,7 @@ type LiveLogSubscription struct {
 type liveLogStreamState struct {
 	emitted   int
 	truncated bool
+	pending   []byte
 }
 
 type liveLogSubscriber struct {
@@ -105,16 +107,25 @@ func (b *liveLogBroadcaster) write(stream execution.LogStream, chunk []byte) {
 		b.mu.Unlock()
 		return
 	}
+	data := make([]byte, 0, len(state.pending)+len(chunk))
+	data = append(data, state.pending...)
+	data = append(data, chunk...)
 	remaining := execution.DefaultLogStreamLimit - state.emitted
-	take := len(chunk)
+	take := len(data)
 	capTruncated := false
 	if take > remaining {
 		take = remaining
 		capTruncated = true
 		state.truncated = true
 	}
+	take = completeUTF8Prefix(data[:take])
 	state.emitted += take
-	data := append([]byte(nil), chunk[:take]...)
+	emitted := append([]byte(nil), data[:take]...)
+	if capTruncated {
+		state.pending = nil
+	} else {
+		state.pending = append(state.pending[:0], data[take:]...)
+	}
 	subscribers := make([]*liveLogSubscriber, 0, len(b.subscribers))
 	for entry := range b.subscribers {
 		if entry.stepID == "" || entry.stepID == stepID {
@@ -123,7 +134,7 @@ func (b *liveLogBroadcaster) write(stream execution.LogStream, chunk []byte) {
 	}
 	b.mu.Unlock()
 
-	chunks := splitRunLogFrames(b.runID, stepID, string(stream), data, capTruncated)
+	chunks := splitRunLogFrames(b.runID, stepID, string(stream), emitted, capTruncated)
 	for _, entry := range subscribers {
 		for _, frame := range chunks {
 			if !entry.sub.DeliverRunLog(frame) {
@@ -163,16 +174,31 @@ func largestFittingLogPrefix(runID, stepID, stream string, data []byte) int {
 	best := 0
 	for low <= high {
 		middle := low + (high-low)/2
-		chunk := proto.RunLogChunk{RunID: runID, StepID: stepID, Stream: stream, Data: string(data[:middle])}
+		effective := completeUTF8Prefix(data[:middle])
+		chunk := proto.RunLogChunk{RunID: runID, StepID: stepID, Stream: stream, Data: string(data[:effective])}
 		encoded, err := json.Marshal(proto.NewNotification("v1/runLog", chunk))
 		if err == nil && len(encoded) <= proto.MaxFrameBytes {
-			best = middle
+			if effective > best {
+				best = effective
+			}
 			low = middle + 1
 		} else {
 			high = middle - 1
 		}
 	}
 	return best
+}
+
+func completeUTF8Prefix(data []byte) int {
+	end := len(data)
+	for end > 0 {
+		r, size := utf8.DecodeLastRune(data[:end])
+		if r != utf8.RuneError || size != 1 {
+			return end
+		}
+		end--
+	}
+	return 0
 }
 
 func (b *liveLogBroadcaster) addSubscriber(stepID string, sub server.RunLogSubscriber) {

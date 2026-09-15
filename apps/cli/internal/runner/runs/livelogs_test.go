@@ -162,6 +162,33 @@ func TestLiveLogStreamSplitsOversizedFrames(t *testing.T) {
 	}
 }
 
+func TestLiveLogStreamPreservesUTF8SplitAcrossWrites(t *testing.T) {
+	broadcaster := newLiveLogBroadcaster("run-id")
+	broadcaster.stepStarted("step-id")
+	sub := newFakeLogSubscriber()
+	broadcaster.addSubscriber("", sub)
+
+	want := []byte("😀")
+	broadcaster.write(execution.LogStreamStdout, want[:2])
+	broadcaster.write(execution.LogStreamStdout, want[2:])
+
+	var got bytes.Buffer
+	for _, chunk := range sub.snapshot() {
+		encoded, err := json.Marshal(chunk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wireChunk proto.RunLogChunk
+		if err := json.Unmarshal(encoded, &wireChunk); err != nil {
+			t.Fatal(err)
+		}
+		got.WriteString(wireChunk.Data)
+	}
+	if !bytes.Equal(got.Bytes(), want) {
+		t.Fatalf("wire bytes = %x, want original bytes %x", got.Bytes(), want)
+	}
+}
+
 func waitForLogSubscriberCount(t *testing.T, manager *Manager, runID string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
