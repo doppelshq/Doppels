@@ -53,6 +53,12 @@ func main() {
 }
 
 func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+	return runWithContext(ctx, socketPath, tokenFlag, runnerVersion, configDir)
+}
+
+func runWithContext(ctx context.Context, socketPath, tokenFlag, runnerVersion, configDir string) error {
 	if configDir == "" {
 		defaultDir, err := runnerConfigDir()
 		if err != nil {
@@ -75,18 +81,34 @@ func run(socketPath, tokenFlag, runnerVersion, configDir string) error {
 		return err
 	}
 	workspaces := workspace.NewService(registry, workspace.Deps{Host: manifest.OSHost{}})
+	pidPath := filepath.Join(configDir, runnerPIDFile)
+	if existingRunner(token, socketPath) {
+		if pid, readErr := readPIDFile(pidPath); readErr == nil {
+			return anotherInstanceError(pid)
+		}
+		return fmt.Errorf("another instance already running at %s", socketPath)
+	}
+	pid, err := acquirePIDLock(pidPath, os.Getpid(), processMatchesRunner)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err := pid.Close(); err != nil {
+			log.Printf("doppels-runner: clean up PID file: %v", err)
+		}
+	}()
 
 	log.Printf("doppels-runner: listening on %s", socketPath)
 	listener, err := transport.Unix{}.Listen(socketPath)
 	if err != nil {
 		if existingRunner(token, socketPath) {
-			return nil
+			if owner, readErr := readPIDFile(pidPath); readErr == nil && owner != os.Getpid() {
+				return anotherInstanceError(owner)
+			}
+			return fmt.Errorf("another instance already running at %s", socketPath)
 		}
 		return fmt.Errorf("listen: %w", err)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	// srv is assigned below, after config is built; OnStarted/OnFinished
 	// only fire once Runs actually start, well after that assignment
