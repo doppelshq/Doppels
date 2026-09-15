@@ -51,13 +51,18 @@ type RunEventSubscriber interface {
 	// DeliverRunGap) — it must never be silently ignored.
 	DeliverRunEvent(event proto.RunEventPayload) bool
 	DeliverRunGap(runID string, fromSequence int)
-	// Defer runs fn once the RPC response currently being handled has been
-	// enqueued ahead of anything fn might send — never before, and never at
-	// all if that response could not be enqueued (e.g. the connection died).
-	// A subscribeRun handler must use this to activate live delivery, or a
-	// live event can race the synchronous RPC response onto the wire and
-	// arrive first, breaking the "replay, then live" ordering guarantee.
-	Defer(fn func())
+	// Defer runs onActivate once the RPC response currently being handled
+	// has been enqueued ahead of anything onActivate might send — never
+	// before. A subscribeRun handler must use this to activate live
+	// delivery, or a live event can race the synchronous RPC response onto
+	// the wire and arrive first, breaking the "replay, then live" ordering
+	// guarantee. If that response could not be enqueued at all — including
+	// a successful handler whose result still turned out to exceed the
+	// frame limit once encoded — onAbort runs instead, exactly once. A
+	// handler that registers its own bookkeeping before calling Defer (e.g.
+	// a subscriber list entry) must release it in onAbort, or an aborted
+	// activation leaks that registration forever.
+	Defer(onActivate func(), onAbort func())
 	// NotifyClosed runs fn when the underlying connection is closed (or
 	// immediately, if it already is). Domain subscribers use it to
 	// unsubscribe on disconnect instead of leaking a subscription forever.

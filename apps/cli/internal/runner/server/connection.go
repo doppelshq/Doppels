@@ -28,6 +28,7 @@ type connection struct {
 	pendingEvents     []proto.NodeEvent
 	closed            bool
 	pendingActivation func()
+	pendingAbort      func()
 	onClose           map[int]func()
 	nextOnCloseID     int
 }
@@ -311,26 +312,45 @@ func (c *connection) DeliverRunGap(runID string, fromSequence int) {
 	}), true)
 }
 
-// Defer implements RunEventSubscriber: fn runs once the response to the
-// in-flight RPC call has been enqueued (see dispatch's consumePendingActivation),
-// never before and never if that response could not be enqueued at all. At
-// most one activation is ever pending: methods run on a connection's single
-// reading goroutine, so dispatch always consumes it before the next call.
-func (c *connection) Defer(fn func()) {
+// Defer implements RunEventSubscriber: onActivate runs once the response to
+// the in-flight RPC call has been enqueued (see dispatch's
+// consumePendingActivation), never before and never if that response could
+// not be enqueued at all. onAbort runs instead, exactly once, whenever
+// onActivate would not: a saturated outbound queue, a handler error, or —
+// notably — a successful handler whose response still turned out to exceed
+// MaxFrameBytes once encoded (dispatch discovers this only after the
+// handler, and Subscribe's own bookkeeping registration already happened
+// by then). Without onAbort a caller like runs.Manager, which registers a
+// subscriber list entry and a connection onClose callback before deferring
+// activation, would leak both for a subscription whose activation never
+// ran and therefore never has another chance to clean up. At most one
+// activation is ever pending: methods run on a connection's single reading
+// goroutine, so dispatch always consumes it before the next call.
+func (c *connection) Defer(onActivate func(), onAbort func()) {
 	c.mu.Lock()
-	c.pendingActivation = fn
+	c.pendingActivation = onActivate
+	c.pendingAbort = onAbort
 	c.mu.Unlock()
 }
 
 // consumePendingActivation clears whatever Defer registered during the
-// current dispatch and runs it only if succeeded is true.
+// current dispatch and runs onActivate if succeeded, else onAbort — exactly
+// one of the two, exactly once.
 func (c *connection) consumePendingActivation(succeeded bool) {
 	c.mu.Lock()
-	fn := c.pendingActivation
+	activate := c.pendingActivation
+	abort := c.pendingAbort
 	c.pendingActivation = nil
+	c.pendingAbort = nil
 	c.mu.Unlock()
-	if succeeded && fn != nil {
-		fn()
+	if succeeded {
+		if activate != nil {
+			activate()
+		}
+		return
+	}
+	if abort != nil {
+		abort()
 	}
 }
 

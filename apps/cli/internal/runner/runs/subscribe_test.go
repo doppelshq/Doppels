@@ -41,7 +41,7 @@ func (f *fakeSubscriber) DeliverRunGap(runID string, fromSequence int) {
 	f.notify <- struct{}{}
 }
 
-func (f *fakeSubscriber) Defer(fn func())            { fn() }
+func (f *fakeSubscriber) Defer(fn func(), _ func())  { fn() }
 func (f *fakeSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 func (f *fakeSubscriber) waitForEvents(t *testing.T, n int) []proto.RunEventPayload {
@@ -334,7 +334,7 @@ func (r *rejectingSubscriber) DeliverRunGap(_ string, fromSequence int) {
 	r.notify <- struct{}{}
 }
 
-func (r *rejectingSubscriber) Defer(fn func())            { fn() }
+func (r *rejectingSubscriber) Defer(fn func(), _ func())  { fn() }
 func (r *rejectingSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 func (r *rejectingSubscriber) waitForGap(t *testing.T) int {
@@ -421,6 +421,7 @@ returns: {value: "{{ steps.run.value }}"}
 type captureDeferSubscriber struct {
 	mu           sync.Mutex
 	deferred     func()
+	aborted      func()
 	events       []proto.RunEventPayload
 	notify       chan struct{}
 	closedBy     func()
@@ -441,10 +442,17 @@ func (c *captureDeferSubscriber) DeliverRunEvent(event proto.RunEventPayload) bo
 
 func (c *captureDeferSubscriber) DeliverRunGap(string, int) {}
 
-func (c *captureDeferSubscriber) Defer(fn func()) {
+func (c *captureDeferSubscriber) Defer(fn func(), onAbort func()) {
 	c.mu.Lock()
 	c.deferred = fn
+	c.aborted = onAbort
 	c.mu.Unlock()
+}
+
+func (c *captureDeferSubscriber) takeAborted() func() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.aborted
 }
 
 func (c *captureDeferSubscriber) NotifyClosed(fn func()) func() {
@@ -713,5 +721,47 @@ func TestSubscribeDegradesToRunningSnapshotForFreshlyReservedRun(t *testing.T) {
 	}
 	if len(result.Events) != 0 {
 		t.Fatalf("events = %#v, want empty (nothing durable yet)", result.Events)
+	}
+}
+
+// raceCloseSubscriber's NotifyClosed invokes the registered callback
+// synchronously, before returning an unregister func — reproducing review
+// finding 6's exact window: "terminal happens inside NotifyClosed, after the
+// callback is registered but before Subscribe receives the real unregister
+// func to install." At the moment the callback runs, entry.unregisterClosed
+// is still the default no-op installed at construction; without an atomic
+// "install or run immediately" check, the real unregister this call
+// eventually returns would be stored but never invoked (entry is already
+// stopped), leaking the connection's onClose callback.
+type raceCloseSubscriber struct {
+	unregisterCalls atomic.Int32
+}
+
+func (r *raceCloseSubscriber) DeliverRunEvent(proto.RunEventPayload) bool { return true }
+func (r *raceCloseSubscriber) DeliverRunGap(string, int)                  {}
+func (r *raceCloseSubscriber) Defer(fn func(), _ func())                  { fn() }
+func (r *raceCloseSubscriber) NotifyClosed(fn func()) func() {
+	fn()
+	return func() { r.unregisterCalls.Add(1) }
+}
+
+func TestSubscribeInstallsUnregisterEvenIfTerminalRacesInsideNotifyClosed(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","inputs":{"count":1},"approvalMode":"interactive","idempotencyKey":"race-close-notify"}`)
+	started, rpcErr := manager.Start("cli", params)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	waitForStatus(t, root, started.RunID, "pending_manual")
+
+	sub := &raceCloseSubscriber{}
+	if _, rpcErr := manager.Subscribe(started.RunID, 0, sub); rpcErr != nil {
+		t.Fatalf("Subscribe: %+v", rpcErr)
+	}
+	if got := sub.unregisterCalls.Load(); got != 1 {
+		t.Fatalf("unregister calls = %d, want exactly 1 (installUnregister must run it immediately since close() already consumed the default no-op)", got)
 	}
 }

@@ -1,15 +1,18 @@
 package runs
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"doppels.so/cli/internal/execution"
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/server"
 	"doppels.so/cli/internal/runner/transport"
@@ -304,5 +307,130 @@ func TestSubscribeManyTerminalRunsOnOneConnectionDoesNotLeakSubscriptions(t *tes
 	manager.subsMu.Unlock()
 	if totalTracked != 0 {
 		t.Fatalf("manager.subs still tracks %d runs after every subscription reached a terminal state, want 0", totalTracked)
+	}
+}
+
+// TestSubscribeOversizedNonTerminalReplayDoesNotLeakSubscription reproduces
+// review finding 7: when subscribeRun's own synchronous replay response
+// (not a terminal Run — the isTerminal cleanup in Subscribe never runs)
+// turns out to exceed MaxFrameBytes once encoded, dispatch discovers this
+// only after Subscribe already returned successfully, having already
+// registered the subscriber in Manager.subs and installed its onClose
+// callback on the connection. Before Defer grew an onAbort side (review
+// finding 7's fix), consumePendingActivation(false) silently dropped that
+// activation with no cleanup — a leak identical in shape to review finding
+// 5's, just triggered by an oversized reply instead of an unbounded
+// connection lifetime. Repeats the scenario several times over one
+// held-open real connection and asserts nothing accumulates.
+func TestSubscribeOversizedNonTerminalReplayDoesNotLeakSubscription(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	srv := server.New(server.Config{
+		Token: integrationToken, RunnerVersion: "0.0.1-test",
+		NodeStatus: func() proto.NodeStatus { return proto.NodeStatus{} },
+		Log:        func(string, ...any) {},
+	})
+	RegisterRPC(srv, manager)
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := transport.Unix{}.Listen(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	go srv.Serve(serveCtx, listener)
+	t.Cleanup(srv.Close)
+	client := dialIntegrationClient(t, socketPath)
+
+	const attempts = 3
+	for attempt := 0; attempt < attempts; attempt++ {
+		key := fmt.Sprintf("oversized-replay-%d", attempt)
+		startResponse := client.call(key, "v1/startRun", map[string]any{
+			"workspace": root, "capability": "greet", "inputs": map[string]any{"count": 1},
+			"approvalMode": "interactive", "idempotencyKey": key,
+		})
+		if startResponse.Err != nil {
+			t.Fatalf("startRun[%d]: %+v", attempt, startResponse.Err)
+		}
+		var started StartResult
+		if err := json.Unmarshal(rawResult(t, startResponse), &started); err != nil {
+			t.Fatal(err)
+		}
+		waitForStatus(t, root, started.RunID, "pending_manual")
+		growEventsPastFrameLimit(t, root, started.RunID)
+
+		subResponse := client.call(key+"-sub", "v1/subscribeRun", map[string]any{"runId": started.RunID})
+		if subResponse.Err == nil {
+			t.Fatalf("subscribeRun[%d]: oversized non-terminal replay unexpectedly succeeded", attempt)
+		}
+
+		manager.subsMu.Lock()
+		leaked := len(manager.subs[started.RunID])
+		manager.subsMu.Unlock()
+		if leaked != 0 {
+			t.Fatalf("attempt %d: subscriber list for %s has %d entries after an aborted (oversized) activation, want 0", attempt, started.RunID, leaked)
+		}
+
+		// Cancel this Run so the connection has no lingering non-terminal
+		// state before the next attempt's startRun.
+		if cancelResponse := client.call(key+"-cancel", "v1/cancelRun", map[string]any{"runId": started.RunID}); cancelResponse.Err != nil {
+			t.Fatalf("cancelRun[%d]: %+v", attempt, cancelResponse.Err)
+		}
+	}
+
+	manager.subsMu.Lock()
+	totalTracked := len(manager.subs)
+	manager.subsMu.Unlock()
+	if totalTracked != 0 {
+		t.Fatalf("manager.subs still tracks %d runs after every aborted activation, want 0", totalTracked)
+	}
+
+	ping := client.call("oversized-replay-ping", "v1/ping", map[string]any{})
+	if ping.Err != nil {
+		t.Fatalf("connection unusable after an aborted (oversized) subscribeRun activation: %+v", ping.Err)
+	}
+}
+
+// growEventsPastFrameLimit appends enough well-formed, non-terminal
+// RunEvents to runID's durable events.jsonl that its full replay (from
+// sequence 0) exceeds proto.MaxFrameBytes once JSON-encoded and wrapped in
+// the subscribeRun response envelope. Each appended line stays far under
+// runstate's own 1 MiB per-line scan buffer; the total across many lines is
+// what crosses the frame limit.
+func growEventsPastFrameLimit(t *testing.T, root, runID string) {
+	t.Helper()
+	path := filepath.Join(root, ".doppels", "runs", runID, "events.jsonl")
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sequence := 0
+	for _, line := range bytes.Split(bytes.TrimRight(existing, "\n"), []byte("\n")) {
+		if len(line) > 0 {
+			sequence++
+		}
+	}
+	blob := strings.Repeat("d", 64<<10) // 64 KiB, comfortably under the 1 MiB line cap
+	var buf bytes.Buffer
+	buf.Write(existing)
+	const lines = 80 // 80 * 64 KiB ~= 5 MiB, safely past the 4 MiB frame limit
+	for i := 0; i < lines; i++ {
+		event := execution.RunEvent{
+			APIVersion: execution.APIVersion, Kind: "RunEvent", RunID: runID,
+			Sequence: sequence, OccurredAt: time.Now().UTC(), Type: "step_started",
+			StepID: "bulk", Data: map[string]any{"blob": blob},
+		}
+		sequence++
+		encoded, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(encoded)
+		buf.WriteByte('\n')
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -382,7 +382,7 @@ func TestSubscribeResponseIsQueuedBeforeAnyDeferredLiveEvent(t *testing.T) {
 		// not race the RPC response onto the wire.
 		sub.Defer(func() {
 			sub.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 5, Type: "step_started"})
-		})
+		}, nil)
 		return map[string]any{"status": "running"}, nil
 	})
 

@@ -175,6 +175,29 @@ func (e *runSubscriber) close() {
 	unregister()
 }
 
+// installUnregister atomically stores unregister for close() to call later,
+// or — if this entry was already closed by a concurrent terminal broadcast
+// or connection-close callback in the window between Subscribe registering
+// this entry (addSubscriber) and this call (the NotifyClosed round trip
+// that produces unregister isn't instantaneous) — runs unregister itself
+// right now instead. That earlier close() ran against the default no-op
+// installed at construction, since the real unregister didn't exist yet;
+// without this check, storing it into entry.unregisterClosed afterward
+// would leave it installed but never called (close() only ever runs once,
+// guarded by e.stopped), leaking the connection's onClose callback exactly
+// like an unbounded connection would (review finding 5), just via a
+// narrower race instead of a missing mechanism.
+func (e *runSubscriber) installUnregister(unregister func()) {
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		unregister()
+		return
+	}
+	e.unregisterClosed = unregister
+	e.mu.Unlock()
+}
+
 func approxEventSize(event proto.RunEventPayload) int {
 	data, _ := json.Marshal(event)
 	return len(data)
@@ -271,9 +294,7 @@ func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventS
 		entry.close()
 		m.removeSubscriber(runID, entry)
 	})
-	entry.mu.Lock()
-	entry.unregisterClosed = unregister
-	entry.mu.Unlock()
+	entry.installUnregister(unregister)
 	detail, err := runstate.LoadWithIndex(root, runID, idx)
 	if err != nil {
 		if synthesized, ok := freshlyReservedDetail(err, record); ok {
@@ -299,7 +320,18 @@ func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventS
 	// this off via sub.Defer lets the transport (server.dispatch) guarantee
 	// that ordering instead of starting the forwarder eagerly here, which
 	// could race a live event onto the connection before its own response.
-	sub.Defer(entry.start)
+	// The onAbort side of Defer matters too: dispatch discovers only after
+	// this handler already returned that the encoded response (e.g. an
+	// oversized replay batch) exceeds the frame limit and must send an
+	// error instead — by which point entry is already registered in
+	// m.subs and its onClose callback is already installed on the
+	// connection. Without onAbort releasing both, an aborted activation
+	// would leak this subscription exactly like an unbounded connection
+	// would (review finding 5), just via a different trigger.
+	sub.Defer(entry.start, func() {
+		entry.close()
+		m.removeSubscriber(runID, entry)
+	})
 
 	events := make([]proto.RunEventPayload, 0, len(detail.Events))
 	for _, event := range detail.Events {
