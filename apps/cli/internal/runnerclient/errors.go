@@ -19,10 +19,10 @@ var ErrClosed = errors.New("runner: client closed")
 // signalled via an explicit error or via a mismatched protocolVersion field
 // in an otherwise-successful initialize result.
 type VersionMismatchError struct {
-	Requested int
+	Expected  int
 	Supported int
 }
 
 func (e *VersionMismatchError) Error() string {
-	return fmt.Sprintf("runner: protocol version mismatch: requested %d, runner supports %d", e.Requested, e.Supported)
+	return fmt.Sprintf("runner: protocol version mismatch: expected %d, runner supports %d", e.Expected, e.Supported)
 }

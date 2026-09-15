@@ -102,26 +102,42 @@ func Dial(ctx context.Context, opts Options) (*Client, error) {
 	if err := client.Call(dialCtx, "v1/initialize", wireParams, &result); err != nil {
 		var rpcErr *proto.Error
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.CodeVersionMismatch {
+			expected := resolved.ProtocolVersion
 			supported := resolved.ProtocolVersion
 			if data, ok := rpcErr.Data.(map[string]any); ok {
-				if v, ok := data["supported"].(float64); ok {
-					supported = int(v)
+				if value, ok := protocolVersionNumber(data["expected"]); ok {
+					expected = value
+				}
+				if value, ok := protocolVersionNumber(data["supported"]); ok {
+					supported = value
 				}
 			}
 			_ = client.Close()
-			return nil, &VersionMismatchError{Requested: resolved.ProtocolVersion, Supported: supported}
+			return nil, &VersionMismatchError{Expected: expected, Supported: supported}
 		}
 		_ = client.Close()
 		return nil, fmt.Errorf("runnerclient: initialize: %w", err)
 	}
 	if result.ProtocolVersion != 0 && result.ProtocolVersion != resolved.ProtocolVersion {
 		_ = client.Close()
-		return nil, &VersionMismatchError{Requested: resolved.ProtocolVersion, Supported: result.ProtocolVersion}
+		return nil, &VersionMismatchError{Expected: resolved.ProtocolVersion, Supported: result.ProtocolVersion}
 	}
 
 	client.capabilities = result.Capabilities
 	client.nodeStatus = result.NodeStatus
 	return client, nil
+}
+
+func protocolVersionNumber(value any) (int, bool) {
+	number, ok := value.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	parsed, err := number.Int64()
+	if err != nil {
+		return 0, false
+	}
+	return int(parsed), true
 }
 
 // isNotRunning classifies a dial failure as "no daemon listening" vs. some

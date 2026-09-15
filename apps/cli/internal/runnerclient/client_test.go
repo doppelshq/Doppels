@@ -44,6 +44,25 @@ func TestDialWrongTokenReturnsAuthFailed(t *testing.T) {
 	}
 }
 
+func TestDialVersionMismatchReportsExpectedAndSupported(t *testing.T) {
+	ts := startTestServer(t)
+	_, err := runnerclient.Dial(context.Background(), runnerclient.Options{
+		SocketPath:      ts.socketPath,
+		Token:           testToken,
+		ProtocolVersion: 99,
+	})
+	if err == nil {
+		t.Fatal("expected a protocol version mismatch")
+	}
+	var mismatch *runnerclient.VersionMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("error = %v, want VersionMismatchError", err)
+	}
+	if mismatch.Expected != 99 || mismatch.Supported != proto.ProtocolVersion {
+		t.Fatalf("version mismatch = %+v, want Expected=99 Supported=%d", mismatch, proto.ProtocolVersion)
+	}
+}
+
 func TestDialNoSocketReturnsErrNotRunning(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist.sock")
 	_, err := runnerclient.Dial(context.Background(), runnerclient.Options{
