@@ -41,6 +41,55 @@ type internalHandler func(conn *connection, params []byte) (any, *proto.Error)
 // lifecycle and subscription state stay private to the server package.
 type Handler func(params []byte) (any, *proto.Error)
 
+// RunEventSubscriber is the narrow, connection-scoped seam a domain method
+// uses to push v1/runEvent notifications (and the runEventGap escape hatch)
+// to the one connection that called it. Unlike EmitNodeEvent, delivery is
+// never broadcast: a Run subscription belongs to a single client connection.
+type RunEventSubscriber interface {
+	// DeliverRunEvent reports whether the event was actually queued for
+	// delivery. false means the caller must treat this as a gap (see
+	// DeliverRunGap) — it must never be silently ignored.
+	DeliverRunEvent(event proto.RunEventPayload) bool
+	DeliverRunGap(runID string, fromSequence int)
+	// Defer runs onActivate once the RPC response currently being handled
+	// has been enqueued ahead of anything onActivate might send — never
+	// before. A subscribeRun handler must use this to activate live
+	// delivery, or a live event can race the synchronous RPC response onto
+	// the wire and arrive first, breaking the "replay, then live" ordering
+	// guarantee. If that response could not be enqueued at all — including
+	// a successful handler whose result still turned out to exceed the
+	// frame limit once encoded — onAbort runs instead, exactly once. A
+	// handler that registers its own bookkeeping before calling Defer (e.g.
+	// a subscriber list entry) must release it in onAbort, or an aborted
+	// activation leaks that registration forever.
+	Defer(onActivate func(), onAbort func())
+	// NotifyClosed runs fn when the underlying connection is closed (or
+	// immediately, if it already is). Domain subscribers use it to
+	// unsubscribe on disconnect instead of leaking a subscription forever.
+	// The returned func unregisters fn if the subscription ends on its own
+	// (before the connection closes) so a long-lived connection does not
+	// accumulate one stale callback per past subscription.
+	NotifyClosed(fn func()) func()
+}
+
+// ResponseFrameFitter lets a paginated result shrink itself using the real
+// JSON-RPC id before the response is queued. Implementations must measure the
+// complete proto.Response, not only their result payload.
+type ResponseFrameFitter interface {
+	FitResponseFrame(id any, maxBytes int) *proto.Error
+}
+
+// SubscribeHandler is the extension seam for methods that must address their
+// own calling connection to satisfy a later, out-of-band notification
+// (v1/subscribeRun). The RunEventSubscriber is only ever the connection that
+// invoked the method.
+type SubscribeHandler func(sub RunEventSubscriber, params []byte) (any, *proto.Error)
+
+// ClientHandler is the extension seam for methods that need the calling
+// connection's handshake client name (RFC §9: a Run's source is derived from
+// client.name), without exposing any other connection internals.
+type ClientHandler func(clientName string, params []byte) (any, *proto.Error)
+
 // Server dispatches v1 methods over accepted connections.
 type Server struct {
 	config   Config
@@ -99,6 +148,27 @@ func (s *Server) Handle(method string, run Handler) {
 	defer s.mu.Unlock()
 	s.handlers[method] = func(_ *connection, params []byte) (any, *proto.Error) {
 		return run(params)
+	}
+}
+
+// HandleSubscribe registers (or replaces) a v1 method that needs to address
+// its own calling connection, e.g. to register it for later out-of-band
+// notifications. See SubscribeHandler.
+func (s *Server) HandleSubscribe(method string, run SubscribeHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
+		return run(conn, params)
+	}
+}
+
+// HandleWithClient registers (or replaces) a v1 method that needs the
+// calling connection's handshake client name. See ClientHandler.
+func (s *Server) HandleWithClient(method string, run ClientHandler) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handlers[method] = func(conn *connection, params []byte) (any, *proto.Error) {
+		return run(conn.name(), params)
 	}
 }
 

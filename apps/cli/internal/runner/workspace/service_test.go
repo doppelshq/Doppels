@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -255,6 +256,56 @@ outputs: {ok: {type: string}}
 	}
 	if result.Runs != 0 {
 		t.Fatalf("Runs = %d, want 0 (no run subsystem in this slice)", result.Runs)
+	}
+}
+
+func TestServiceResolveExecutionUsesValidatedCatalog(t *testing.T) {
+	service, base := newService(t)
+	root := initRoot(t, filepath.Join(base, "space-a"))
+	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "sync.yaml"), shellCapabilityFixture)
+	writeFile(t, filepath.Join(root, ".doppels", "recipes", "sync.yaml"), shellRecipeFixture)
+	if _, _, err := service.AddWorkspace(root); err != nil {
+		t.Fatal(err)
+	}
+
+	resolved, err := service.ResolveExecution(root, "sync-invoices@1.0.0", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.Root != root || resolved.Space == "" || resolved.Capability.Value.Metadata.Name != "sync-invoices" {
+		t.Fatalf("resolved = %#v", resolved)
+	}
+	if resolved.Recipe == nil || resolved.Recipe.Value.Metadata.Name != "sync-invoices" {
+		t.Fatalf("recipe = %#v", resolved.Recipe)
+	}
+	if resolved.StalePin {
+		t.Fatal("unpinned definitions reported stale")
+	}
+
+	if _, err := service.ResolveExecution(root, "missing@1.0.0", ""); !errors.Is(err, ErrCapabilityNotFound) {
+		t.Fatalf("missing capability error = %v", err)
+	}
+
+	writeFile(t, filepath.Join(root, ".doppels", "recipes", "second.yaml"), strings.ReplaceAll(shellRecipeFixture, "name: sync-invoices", "name: sync-invoices-second"))
+	if _, err := service.ResolveExecution(root, "sync-invoices@1.0.0", ""); !errors.Is(err, manifest.ErrRecipeAmbiguous) {
+		t.Fatalf("ambiguous recipe error = %v", err)
+	}
+	resolved, err = service.ResolveExecution(root, "sync-invoices@1.0.0", "sync-invoices-second@1.0.0")
+	if err != nil || resolved.Recipe == nil || resolved.Recipe.Value.Metadata.Name != "sync-invoices-second" {
+		t.Fatalf("explicit recipe = %#v, %v", resolved.Recipe, err)
+	}
+}
+
+func TestServiceResolveExecutionAllowsCapabilityWithoutRecipe(t *testing.T) {
+	service, base := newService(t)
+	root := initRoot(t, filepath.Join(base, "manual"))
+	writeFile(t, filepath.Join(root, ".doppels", "capabilities", "manual.yaml"), manualCapabilityFixture)
+	if _, _, err := service.AddWorkspace(root); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := service.ResolveExecution(root, "answer-question", "")
+	if err != nil || resolved.Recipe != nil {
+		t.Fatalf("manual resolution = %#v, %v", resolved, err)
 	}
 }
 

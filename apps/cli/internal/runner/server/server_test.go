@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -328,6 +329,272 @@ func TestServerUnsubscribedClientReceivesNoNodeEvents(t *testing.T) {
 	response := client.call("quiet", "v1/ping", map[string]any{})
 	if response.Err != nil {
 		t.Fatalf("ping: %+v", response.Err)
+	}
+}
+
+// TestDeliverRunEventReportsDropAndDeliverRunGapClosesOnSaturation
+// reproduces review finding 3: a saturated outbound queue silently dropped
+// both v1/runEvent and its v1/nodeEvent runEventGap escape hatch, so a
+// stuck client could miss events with no signal at all — not even the
+// "unmistakable resync" of a closed connection. DeliverRunEvent must report
+// whether the frame was actually queued so the caller (runs.Manager) can
+// react, and DeliverRunGap must be delivered or force a close: it is the
+// client's only signal to resynchronize, so it may never itself be a
+// silent, best-effort drop. A saturated *real* connection object is used
+// (no fake subscriber) since the bug is specifically in the outbound queue.
+func TestDeliverRunEventReportsDropAndDeliverRunGapClosesOnSaturation(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	defer clientEnd.Close()
+	conn := newConnection(server, clientEnd)
+
+	for i := 0; i < outboundBufferSize; i++ {
+		if !conn.enqueue(map[string]any{"filler": i}, false) {
+			t.Fatalf("failed to fill outbound queue at slot %d", i)
+		}
+	}
+
+	if conn.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 0, Type: "run_created"}) {
+		t.Fatal("DeliverRunEvent reported success while the outbound queue was saturated")
+	}
+	if conn.isClosed() {
+		t.Fatal("a dropped best-effort runEvent must not by itself close the connection")
+	}
+
+	conn.DeliverRunGap("r-1", 0)
+	if !conn.isClosed() {
+		t.Fatal("DeliverRunGap on a saturated queue must guarantee delivery or close the connection — it did neither")
+	}
+}
+
+// TestSubscribeResponseIsQueuedBeforeAnyDeferredLiveEvent reproduces review
+// finding 4's first half: a domain handler that starts forwarding live
+// events synchronously (inside the handler, before its RPC response is
+// enqueued) can lose the ordering guarantee "replay/snapshot first, live
+// events after" — a live notification can win the race for the connection's
+// outbound queue and reach the wire before the RPC response that is
+// supposed to precede it. RunEventSubscriber.Defer lets the handler hand off
+// activation of live delivery to run only once dispatch has confirmed the
+// response was queued (mirroring the existing v1/subscribeNode pattern).
+func TestSubscribeResponseIsQueuedBeforeAnyDeferredLiveEvent(t *testing.T) {
+	ts := startServer(t, testConfig())
+	ts.HandleSubscribe("v1/subscribeRun", func(sub RunEventSubscriber, params []byte) (any, *proto.Error) {
+		// A handler using Defer correctly: activation of live delivery must
+		// not race the RPC response onto the wire.
+		sub.Defer(func() {
+			sub.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 5, Type: "step_started"})
+		}, nil)
+		return map[string]any{"status": "running"}, nil
+	})
+
+	client := dialClient(t, ts)
+	if response := client.initialize(); response.Err != nil {
+		t.Fatalf("initialize: %+v", response.Err)
+	}
+	if err := client.encoder.WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "sub-1", "method": "v1/subscribeRun",
+		"params": map[string]any{"runId": "r-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := client.decoder.ReadFrame()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope struct {
+		Method string `json:"method"`
+	}
+	if err := json.Unmarshal(first, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	if envelope.Method != "" {
+		t.Fatalf("first frame after subscribeRun was a %q notification, want the RPC response first", envelope.Method)
+	}
+
+	method, _ := client.readNotification(t)
+	if method != "v1/runEvent" {
+		t.Fatalf("second frame method = %s, want the deferred v1/runEvent", method)
+	}
+}
+
+// TestConnectionCloseUnsubscribesRunEventSubscriptions reproduces review
+// finding 4's second half: NotifyClosed must let a domain subscriber (e.g.
+// runs.Manager) learn a connection died so it can unsubscribe, instead of
+// leaking a subscriber-list entry (and its forwarder goroutine) forever.
+func TestConnectionCloseUnsubscribesRunEventSubscriptions(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	conn := newConnection(server, clientEnd)
+
+	notified := make(chan struct{}, 1)
+	conn.NotifyClosed(func() { notified <- struct{}{} })
+
+	conn.close()
+
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyClosed callback never ran after the connection closed")
+	}
+}
+
+// TestNotifyClosedRunsImmediatelyOnAnAlreadyClosedConnection guards the
+// registration-after-close race: a subscriber that registers cleanup after
+// the connection already died must still get its callback, or it leaks
+// forever waiting for a close that already happened.
+func TestNotifyClosedRunsImmediatelyOnAnAlreadyClosedConnection(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	conn := newConnection(server, clientEnd)
+	conn.close()
+
+	notified := make(chan struct{}, 1)
+	conn.NotifyClosed(func() { notified <- struct{}{} })
+
+	select {
+	case <-notified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyClosed registered on an already-closed connection was never invoked")
+	}
+}
+
+// TestNotifyClosedUnregisterBoundsCallbacksOnALongLivedConnection reproduces
+// review finding 5: a connection that outlives many Run subscriptions (each
+// terminating on its own, long before the connection itself closes) must not
+// accumulate one stale onClose callback per past subscription forever. The
+// returned unregister func is how a domain subscriber (runs.Manager) releases
+// its callback as soon as its own subscription ends; unregistering must
+// actually shrink the connection's bookkeeping, not just prevent double
+// delivery.
+func TestNotifyClosedUnregisterBoundsCallbacksOnALongLivedConnection(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	conn := newConnection(server, clientEnd)
+
+	const subscriptions = 500
+	var fired atomic.Int32
+	var unregisters []func()
+	for i := 0; i < subscriptions; i++ {
+		unregister := conn.NotifyClosed(func() { fired.Add(1) })
+		unregisters = append(unregisters, unregister)
+	}
+	conn.mu.Lock()
+	registered := len(conn.onClose)
+	conn.mu.Unlock()
+	if registered != subscriptions {
+		t.Fatalf("registered onClose callbacks = %d, want %d", registered, subscriptions)
+	}
+
+	// Every subscription "finishes" on its own (Run reaches a terminal
+	// state) long before the connection closes — exactly the long-lived
+	// connection scenario from the finding.
+	for _, unregister := range unregisters {
+		unregister()
+	}
+	conn.mu.Lock()
+	remaining := len(conn.onClose)
+	conn.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("onClose callbacks after unregistering all = %d, want 0 (leak: bookkeeping grows without bound on a long-lived connection)", remaining)
+	}
+
+	// A late registration after everything else unregistered must still work
+	// normally, and closing the connection must not resurrect any
+	// unregistered callback.
+	lateNotified := make(chan struct{}, 1)
+	conn.NotifyClosed(func() { lateNotified <- struct{}{} })
+	conn.close()
+
+	select {
+	case <-lateNotified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback registered after the bulk unregister never ran on close")
+	}
+	if got := fired.Load(); got != 0 {
+		t.Fatalf("unregistered callbacks fired = %d, want 0", got)
+	}
+}
+
+func TestHandleSubscribeDeliversOnlyToCallingConnection(t *testing.T) {
+	ts := startServer(t, testConfig())
+	var captured RunEventSubscriber
+	ts.HandleSubscribe("v1/subscribeRun", func(sub RunEventSubscriber, params []byte) (any, *proto.Error) {
+		captured = sub
+		return map[string]any{"status": "running"}, nil
+	})
+
+	subscriber := dialClient(t, ts)
+	if response := subscriber.initialize(); response.Err != nil {
+		t.Fatalf("initialize subscriber: %+v", response.Err)
+	}
+	bystander := dialClient(t, ts)
+	if response := bystander.initialize(); response.Err != nil {
+		t.Fatalf("initialize bystander: %+v", response.Err)
+	}
+
+	response := subscriber.call("sub-1", "v1/subscribeRun", map[string]any{"runId": "r-1"})
+	if response.Err != nil {
+		t.Fatalf("subscribeRun: %+v", response.Err)
+	}
+	if captured == nil {
+		t.Fatal("subscribe handler did not receive a RunEventSubscriber")
+	}
+
+	captured.DeliverRunEvent(proto.RunEventPayload{RunID: "r-1", Sequence: 0, Type: "run_created"})
+	method, params := subscriber.readNotification(t)
+	if method != "v1/runEvent" {
+		t.Fatalf("method = %s", method)
+	}
+	var event proto.RunEventPayload
+	if err := json.Unmarshal(params, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.RunID != "r-1" || event.Type != "run_created" {
+		t.Fatalf("event = %+v", event)
+	}
+
+	captured.DeliverRunGap("r-1", 3)
+	method, params = subscriber.readNotification(t)
+	if method != "v1/nodeEvent" {
+		t.Fatalf("method = %s", method)
+	}
+	var gap proto.NodeEvent
+	if err := json.Unmarshal(params, &gap); err != nil {
+		t.Fatal(err)
+	}
+	if gap.Kind != proto.NodeEventRunEventGap {
+		t.Fatalf("kind = %s", gap.Kind)
+	}
+
+	// The bystander must observe neither notification: assert the next
+	// frame it reads is its own ping response.
+	pingResponse := bystander.call("quiet", "v1/ping", map[string]any{})
+	if pingResponse.Err != nil {
+		t.Fatalf("ping: %+v", pingResponse.Err)
+	}
+}
+
+func TestHandleWithClientPassesHandshakeClientName(t *testing.T) {
+	ts := startServer(t, testConfig())
+	var captured string
+	ts.HandleWithClient("v1/whoami", func(clientName string, params []byte) (any, *proto.Error) {
+		captured = clientName
+		return map[string]any{}, nil
+	})
+
+	client := dialClient(t, ts)
+	if response := client.call("init-1", "v1/initialize", map[string]any{
+		"token":  testToken,
+		"client": map[string]any{"name": "doppels-cli", "version": "0.0.1"},
+	}); response.Err != nil {
+		t.Fatalf("initialize: %+v", response.Err)
+	}
+	if response := client.call("w1", "v1/whoami", map[string]any{}); response.Err != nil {
+		t.Fatalf("whoami: %+v", response.Err)
+	}
+	if captured != "doppels-cli" {
+		t.Fatalf("captured client name = %q, want doppels-cli", captured)
 	}
 }
 
@@ -730,6 +997,125 @@ func TestClosedConnectionStopsExecutingBufferedRequests(t *testing.T) {
 	}
 	if count := executed.Load(); count != 0 {
 		t.Fatalf("buffered request executed %d times after close", count)
+	}
+}
+
+// TestOversizedMethodPreservesValidIDOverRealSocket reproduces a review
+// finding end-to-end over the real transport: a request whose method
+// exceeds MaxMethodBytes is rejected (-32600), but its id — independently
+// valid and already decoded successfully — must still be echoed back for
+// correlation, not discarded to null. Contrasted with an id that is itself
+// oversized, which must fall back to null. The connection must stay usable
+// (ping) after either.
+func TestOversizedMethodPreservesValidIDOverRealSocket(t *testing.T) {
+	ts := startServer(t, testConfig())
+	client := dialClient(t, ts)
+	if response := client.initialize(); response.Err != nil {
+		t.Fatalf("initialize: %+v", response.Err)
+	}
+
+	t.Run("oversized method preserves a valid id", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", proto.MaxMethodBytes-2)
+		response := client.call("keep-me", method, nil)
+		if response.Err == nil || response.Err.Code != proto.CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", response.Err)
+		}
+		idJSON, err := json.Marshal(response.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(idJSON) != `"keep-me"` {
+			t.Fatalf("id = %s, want preserved %q", idJSON, "keep-me")
+		}
+		if ping := client.call("ping-after-oversized-method", "v1/ping", map[string]any{}); ping.Err != nil {
+			t.Fatalf("connection unusable after oversized-method error: %+v", ping.Err)
+		}
+	})
+
+	t.Run("oversized id falls back to null", func(t *testing.T) {
+		id := strings.Repeat("i", proto.MaxIDBytes-1)
+		response := client.call(id, "v1/ping", map[string]any{})
+		if response.Err == nil || response.Err.Code != proto.CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", response.Err)
+		}
+		idJSON, err := json.Marshal(response.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(idJSON) != "null" {
+			t.Fatalf("id = %s, want null (the id itself is what's invalid)", idJSON)
+		}
+		if ping := client.call("ping-after-oversized-id", "v1/ping", map[string]any{}); ping.Err != nil {
+			t.Fatalf("connection unusable after oversized-id error: %+v", ping.Err)
+		}
+	})
+
+	t.Run("method exactly at cap goes to dispatch and preserves id", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", proto.MaxMethodBytes-3)
+		response := client.call("keep-me-too", method, nil)
+		if response.Err == nil || response.Err.Code != proto.CodeMethodNotFound {
+			t.Fatalf("err = %+v, want methodNotFound", response.Err)
+		}
+		idJSON, err := json.Marshal(response.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(idJSON) != `"keep-me-too"` {
+			t.Fatalf("id = %s, want preserved %q", idJSON, "keep-me-too")
+		}
+	})
+}
+
+func TestTypedFieldFailuresPreserveValidIDOverRealSocket(t *testing.T) {
+	tests := []struct {
+		name   string
+		frame  string
+		wantID string
+	}{
+		{
+			name:   "jsonrpc has wrong type",
+			frame:  `{"jsonrpc":2,"id":"keep-me","method":"v1/ping"}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with string id",
+			frame:  `{"jsonrpc":"2.0","id":"keep-me","method":42}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with integer id",
+			frame:  `{"jsonrpc":"2.0","id":12345,"method":42}`,
+			wantID: `12345`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := startServer(t, testConfig())
+			client := dialClient(t, ts)
+			if response := client.initialize(); response.Err != nil {
+				t.Fatalf("initialize: %+v", response.Err)
+			}
+
+			if _, err := client.conn.Write([]byte(tt.frame + "\n")); err != nil {
+				t.Fatal(err)
+			}
+			response := client.readResponse()
+			if response.Err == nil || response.Err.Code != proto.CodeInvalidRequest {
+				t.Fatalf("err = %+v, want invalidRequest", response.Err)
+			}
+			idJSON, err := json.Marshal(response.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(idJSON) != tt.wantID {
+				t.Fatalf("id = %s, want %s", idJSON, tt.wantID)
+			}
+
+			if ping := client.call("ping-after-typed-field-failure", "v1/ping", map[string]any{}); ping.Err != nil {
+				t.Fatalf("connection unusable after typed-field error: %+v", ping.Err)
+			}
+		})
 	}
 }
 

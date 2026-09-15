@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"doppels.so/cli/internal/manifest"
+	"doppels.so/cli/internal/runindex"
 )
 
 const APIVersion = manifest.APIVersion
@@ -178,6 +179,7 @@ type Invocation struct {
 	Executor         ActorReference
 	AssignedTo       *AssignmentReference
 	NodeID           string
+	Source           string
 	Space            string
 	ShareID          string
 	IdempotencyKey   string
@@ -188,6 +190,11 @@ type Invocation struct {
 	// timestamp, actor, inputs and definition reference take precedence over
 	// the convenience Request fields above.
 	ExistingRequest *RequestRecord
+	// PreparedRun is the exact immutable Run record reserved by a durable
+	// coordinator before execution begins. When present, initialize writes it
+	// verbatim (apart from cloning Inputs) so crash recovery can use the same
+	// evidence as the normal path.
+	PreparedRun *RunRecord
 }
 
 type Options struct {
@@ -202,6 +209,10 @@ type Options struct {
 	Environment   []string
 	LookupCommand func(string) (string, error)
 	Now           func() time.Time
+	// RunIndex lets a long-lived coordinator own one SQLite handle for the
+	// workspace. Nil preserves standalone CLI behavior by opening an index for
+	// each update.
+	RunIndex RunIndex
 	// LogStreamLimit caps retained stdout/stderr bytes per Step stream.
 	// Zero means DefaultLogStreamLimit.
 	LogStreamLimit int
@@ -212,6 +223,15 @@ type Options struct {
 	// this to forward live output to Desktop subscribers; nil keeps the
 	// legacy path.
 	LogStream LogFunc
+	// AfterRequestPersisted is a fault-injection seam used by callers that
+	// must test a crash after request.json but before run.json. Nil is a no-op.
+	AfterRequestPersisted func() error
+}
+
+type RunIndex interface {
+	Upsert(runindex.Record) error
+	EnqueueOutbox(runID string, payload any) error
+	CommitTerminal(record runindex.Record, payload any) (bool, error)
 }
 
 type StepResult struct {

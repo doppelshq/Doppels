@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 )
 
@@ -50,6 +51,40 @@ func Open(projectRoot, runID string) (*Store, error) {
 		return nil, fmt.Errorf("create artifact state: %w", err)
 	}
 	return &Store{dir: dir}, nil
+}
+
+// Resume opens an existing Run directory without creating or replacing it.
+// It is used for daemon-owned transitions such as cancelling a durable manual
+// Run after its execution goroutine has exited.
+func Resume(projectRoot, runID string) (*Store, error) {
+	if !safeID.MatchString(runID) {
+		return nil, fmt.Errorf("invalid run id %q", runID)
+	}
+	root, err := filepath.Abs(projectRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve project root: %w", err)
+	}
+	dir := filepath.Join(root, ".doppels", "runs", runID)
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve run state: %w", err)
+	}
+	relative, err := filepath.Rel(root, resolved)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return nil, errors.New("run state escapes project root")
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, errors.New("run state is not a directory")
+	}
+	return &Store{dir: resolved}, nil
 }
 
 func (s *Store) Dir() string { return s.dir }

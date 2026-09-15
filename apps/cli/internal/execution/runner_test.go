@@ -236,6 +236,93 @@ func TestExecuteIndexesSucceededEvenIfTerminalPublishFails(t *testing.T) {
 	assertIndexedStatus(t, root, result.Run.ID, "succeeded")
 }
 
+func TestExecuteUsesInjectedLongLivedIndex(t *testing.T) {
+	root := t.TempDir()
+	index := &recordingRunIndex{}
+	inv := invocation(root, scalarCapability(), scalarRecipe("export VALUE=ok"))
+	inv.Source = "desktop"
+	result, err := Execute(context.Background(), inv, Options{
+		Environment: []string{"PATH=" + os.Getenv("PATH")},
+		RunIndex:    index,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".doppels", "runs.db")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Execute opened a second short-lived runs.db: %v", err)
+	}
+	if len(index.records) < 2 {
+		t.Fatalf("indexed records = %#v", index.records)
+	}
+	last := index.records[len(index.records)-1]
+	if last.ID != result.Run.ID || last.Status != "succeeded" || last.Source != "desktop" || last.NodeID != "local" || last.FinishedAt == "" {
+		t.Fatalf("terminal indexed record = %#v", last)
+	}
+	if index.enqueued != 1 {
+		t.Fatalf("outbox enqueue calls = %d, want 1", index.enqueued)
+	}
+}
+
+// TestIndexedFinishedAtMatchesTerminalEventOccurredAtExactly reproduces a
+// review finding: indexRun read a second, independent Now() call to compute
+// the indexed FinishedAt, instead of reusing the authoritative terminal
+// event's OccurredAt already written to events.jsonl a moment earlier. Under
+// an incrementing clock the two calls observe different instants, so the
+// indexed FinishedAt silently drifted from the terminal event it supposedly
+// describes.
+func TestIndexedFinishedAtMatchesTerminalEventOccurredAtExactly(t *testing.T) {
+	root := t.TempDir()
+	index := &recordingRunIndex{}
+	var tick int64
+	incrementingNow := func() time.Time {
+		n := atomic.AddInt64(&tick, 1)
+		return time.Unix(1700000000, 0).UTC().Add(time.Duration(n) * time.Millisecond)
+	}
+	result, err := Execute(context.Background(), invocation(root, scalarCapability(), scalarRecipe("export VALUE=ok")), Options{
+		Environment: []string{"PATH=" + os.Getenv("PATH")},
+		RunIndex:    index,
+		Now:         incrementingNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var terminal RunEvent
+	for _, event := range result.Events {
+		if event.Type == "run_succeeded" {
+			terminal = event
+		}
+	}
+	if terminal.Type != "run_succeeded" {
+		t.Fatalf("no run_succeeded event: %#v", result.Events)
+	}
+	last := index.records[len(index.records)-1]
+	want := terminal.OccurredAt.UTC().Format(time.RFC3339Nano)
+	if last.FinishedAt != want {
+		t.Fatalf("indexed FinishedAt = %q, want exactly terminal.OccurredAt = %q", last.FinishedAt, want)
+	}
+}
+
+type recordingRunIndex struct {
+	records  []runindex.Record
+	enqueued int
+}
+
+func (i *recordingRunIndex) Upsert(record runindex.Record) error {
+	i.records = append(i.records, record)
+	return nil
+}
+
+func (i *recordingRunIndex) EnqueueOutbox(string, any) error {
+	i.enqueued++
+	return nil
+}
+
+func (i *recordingRunIndex) CommitTerminal(record runindex.Record, _ any) (bool, error) {
+	i.records = append(i.records, record)
+	i.enqueued++
+	return true, nil
+}
+
 func assertIndexedStatus(t *testing.T, root, runID, want string) {
 	t.Helper()
 	idx, err := runindex.Open(root)

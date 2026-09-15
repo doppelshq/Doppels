@@ -220,9 +220,137 @@ func TestDecodeMessageRejectsTrailingJSON(t *testing.T) {
 
 func TestDecodeMessageRejectsFractionalID(t *testing.T) {
 	_, protoErr := DecodeMessage([]byte(`{"jsonrpc":"2.0","id":1.5,"method":"v1/ping"}`))
-	if protoErr == nil || protoErr.Code != CodeParse {
-		t.Fatalf("err = %+v, want parse error", protoErr)
+	if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+		t.Fatalf("err = %+v, want invalidRequest", protoErr)
 	}
+}
+
+func TestDecodeMessagePreservesValidIDAcrossTypedFieldFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		frame  string
+		wantID string
+	}{
+		{
+			name:   "jsonrpc has wrong type",
+			frame:  `{"jsonrpc":2,"id":"keep-me","method":"v1/ping"}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with string id",
+			frame:  `{"jsonrpc":"2.0","id":"keep-me","method":42}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with integer id",
+			frame:  `{"jsonrpc":"2.0","id":12345,"method":42}`,
+			wantID: `12345`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			message, protoErr := DecodeMessage([]byte(tt.frame))
+			if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+				t.Fatalf("err = %+v, want invalidRequest", protoErr)
+			}
+			if message == nil {
+				t.Fatal("message = nil, want valid id preserved")
+			}
+			if message.ID.String() != tt.wantID {
+				t.Fatalf("id = %s, want %s", message.ID.String(), tt.wantID)
+			}
+		})
+	}
+
+	t.Run("fractional id is not preserved", func(t *testing.T) {
+		message, protoErr := DecodeMessage([]byte(`{"jsonrpc":2,"id":1.5,"method":"v1/ping"}`))
+		if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", protoErr)
+		}
+		if message != nil {
+			t.Fatalf("message = %#v, want nil because id itself is invalid", message)
+		}
+	})
+}
+
+// TestDecodeMessagePreservesValidIDAcrossSizeBoundaries reproduces a review
+// finding: an id that already decoded successfully and already passed its
+// own size validation must be correlatable in the error response for any
+// later, unrelated defect (an oversized method) — id null is reserved for
+// when the id itself couldn't be determined or trusted, not for "something
+// else in the request was also wrong." Covers the exact byte boundaries: id
+// at MaxIDBytes succeeds and id at MaxIDBytes+1 is rejected (with id
+// necessarily absent — the id itself is what's invalid); method at
+// MaxMethodBytes succeeds structurally (a real not-found method name is
+// dispatch's job, not the parser's) and method at MaxMethodBytes+1 is
+// rejected while still returning the caller's — independently valid — id.
+func TestDecodeMessagePreservesValidIDAcrossSizeBoundaries(t *testing.T) {
+	frame := func(id, method string) []byte {
+		data, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+
+	t.Run("id at MaxIDBytes succeeds", func(t *testing.T) {
+		id := strings.Repeat("i", MaxIDBytes-2) // -2 for the id's own quotes
+		message, protoErr := DecodeMessage(frame(id, "v1/ping"))
+		if protoErr != nil {
+			t.Fatalf("err = %+v, want success", protoErr)
+		}
+		if message.ID.String() != `"`+id+`"` {
+			t.Fatalf("id = %s, want preserved", message.ID.String())
+		}
+	})
+
+	t.Run("id at MaxIDBytes+1 is rejected without an id to preserve", func(t *testing.T) {
+		id := strings.Repeat("i", MaxIDBytes-1)
+		message, protoErr := DecodeMessage(frame(id, "v1/ping"))
+		if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", protoErr)
+		}
+		if message != nil {
+			t.Fatalf("message = %#v, want nil (the id itself is what's invalid, never eligible to preserve)", message)
+		}
+	})
+
+	t.Run("method at MaxMethodBytes succeeds structurally", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", MaxMethodBytes-3)
+		message, protoErr := DecodeMessage(frame("keep-me", method))
+		if protoErr != nil {
+			t.Fatalf("err = %+v, want success (an unregistered method name is dispatch's job)", protoErr)
+		}
+		if message.ID.String() != `"keep-me"` {
+			t.Fatalf("id = %s, want preserved", message.ID.String())
+		}
+	})
+
+	t.Run("method at MaxMethodBytes+1 is rejected but preserves a valid id", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", MaxMethodBytes-2)
+		message, protoErr := DecodeMessage(frame("keep-me", method))
+		if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", protoErr)
+		}
+		if message == nil {
+			t.Fatal("message = nil, want the already-valid id preserved for correlation")
+		}
+		if message.ID.String() != `"keep-me"` {
+			t.Fatalf("id = %s, want preserved %q", message.ID.String(), "keep-me")
+		}
+	})
+
+	t.Run("method over cap and id over cap: id stays null, not the method's fault", func(t *testing.T) {
+		method := "v1/" + strings.Repeat("m", MaxMethodBytes-2)
+		id := strings.Repeat("i", MaxIDBytes-1)
+		message, protoErr := DecodeMessage(frame(id, method))
+		if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", protoErr)
+		}
+		if message != nil {
+			t.Fatalf("message = %#v, want nil (id fails its own check regardless of the method also being invalid)", message)
+		}
+	})
 }
 
 // TestFingerprintCollidesForSemanticallyEqualNumbers pins the deliberate

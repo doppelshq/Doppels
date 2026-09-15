@@ -1,0 +1,377 @@
+package runs
+
+import (
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"os"
+	"sync"
+	"time"
+
+	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/runindex"
+	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runner/server"
+	"doppels.so/cli/internal/runstate"
+)
+
+// RFC §10: buffer per subscriber is bounded at 1024 events / 4 MiB. A
+// subscriber that would overflow either bound is gapped instead of stalling
+// the engine goroutine that is broadcasting the event.
+const (
+	subscriberEventBuffer = 1024
+	subscriberByteBudget  = 4 << 20
+)
+
+// runSubscriber fans a single Run's events out to one connection-scoped
+// server.RunEventSubscriber. lastReplay is the highest sequence already
+// returned by the synchronous subscribeRun snapshot; forward() drops
+// anything at or below it so replay and live delivery never overlap or gap.
+type runSubscriber struct {
+	manager *Manager
+	runID   string
+	sub     server.RunEventSubscriber
+	events  chan proto.RunEventPayload
+
+	mu               sync.Mutex
+	lastReplay       int
+	bytes            int
+	pending          int
+	firstPending     int
+	stopped          bool
+	discardBacklog   bool
+	unregisterClosed func()
+}
+
+// addSubscriber registers entry so broadcast() starts queuing events for it
+// immediately, but deliberately does not start its forwarder goroutine yet:
+// until setReplayBoundary+start runs, the boundary distinguishing "already in
+// the replay batch" from "live" is unknown, and delivering early would risk
+// a duplicate against the caller's synchronous replay read.
+func (m *Manager) addSubscriber(runID string, sub server.RunEventSubscriber) *runSubscriber {
+	entry := &runSubscriber{
+		manager: m, runID: runID, sub: sub,
+		events:           make(chan proto.RunEventPayload, subscriberEventBuffer),
+		lastReplay:       -1,
+		firstPending:     -1,
+		unregisterClosed: func() {},
+	}
+	m.subsMu.Lock()
+	m.subs[runID] = append(m.subs[runID], entry)
+	m.subsMu.Unlock()
+	return entry
+}
+
+func (e *runSubscriber) setReplayBoundary(lastSequence int) {
+	e.mu.Lock()
+	e.lastReplay = lastSequence
+	e.mu.Unlock()
+}
+
+// start begins forwarding buffered and future events. Must be called only
+// after setReplayBoundary so no event is ever evaluated before the replay
+// cutoff is known.
+func (e *runSubscriber) start() {
+	go e.forward()
+}
+
+func (e *runSubscriber) forward() {
+	if e.manager.testBeforeForward != nil {
+		e.manager.testBeforeForward()
+	}
+	if e.manager.testAfterForward != nil {
+		defer e.manager.testAfterForward()
+	}
+	for event := range e.events {
+		e.mu.Lock()
+		e.pending--
+		if e.pending == 0 {
+			e.firstPending = -1
+		} else {
+			e.firstPending = event.Sequence + 1
+		}
+		skip := event.Sequence <= e.lastReplay
+		// The byte budget tracks pending backlog, not lifetime traffic: an
+		// event leaving the queue here frees its share of the budget for
+		// whatever deliver() admits next.
+		e.bytes -= approxEventSize(event)
+		if skip || e.discardBacklog {
+			e.mu.Unlock()
+			continue
+		}
+		// A connection can drop a frame on its own outbound queue
+		// independently of this subscriber's byte/count budget (e.g. a
+		// stuck client). That is still a gap: report it as one instead of
+		// silently treating the drop as a successful delivery, and stop
+		// forwarding further events to a subscriber whose connection has
+		// already proven it cannot keep up.
+		if !e.sub.DeliverRunEvent(event) {
+			e.gapLocked(event.Sequence)
+			return
+		}
+		e.mu.Unlock()
+	}
+}
+
+// deliver enqueues event without ever blocking the broadcasting goroutine: a
+// full or over-budget subscriber is gapped and dropped instead.
+func (e *runSubscriber) deliver(event proto.RunEventPayload) {
+	size := approxEventSize(event)
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return
+	}
+	if e.bytes+size > subscriberByteBudget {
+		e.gapLocked(event.Sequence)
+		return
+	}
+	select {
+	case e.events <- event:
+		if e.pending == 0 {
+			e.firstPending = event.Sequence
+		}
+		e.pending++
+		e.bytes += size
+		e.mu.Unlock()
+	default:
+		e.gapLocked(event.Sequence)
+	}
+}
+
+// gapLocked must be called with e.mu held. It stops delivery permanently and
+// asynchronously notifies the subscriber and unregisters it, since both can
+// block or re-enter the manager.
+func (e *runSubscriber) gapLocked(fromSequence int) {
+	if e.firstPending >= 0 && e.firstPending < fromSequence {
+		fromSequence = e.firstPending
+	}
+	e.stopped = true
+	e.discardBacklog = true
+	unregister := e.unregisterClosed
+	close(e.events)
+	e.mu.Unlock()
+	go func() {
+		e.manager.removeSubscriber(e.runID, e)
+		unregister()
+		e.sub.DeliverRunGap(e.runID, fromSequence)
+	}()
+}
+
+// close ends the subscription and, since it is no longer needed, unregisters
+// the onClose callback registered with the underlying connection (see
+// NotifyClosed) — otherwise a connection that outlives many finished
+// subscriptions would accumulate one stale callback per past Run forever.
+func (e *runSubscriber) close() {
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		return
+	}
+	e.stopped = true
+	unregister := e.unregisterClosed
+	e.mu.Unlock()
+	close(e.events)
+	unregister()
+}
+
+// installUnregister atomically stores unregister for close() to call later,
+// or — if this entry was already closed by a concurrent terminal broadcast
+// or connection-close callback in the window between Subscribe registering
+// this entry (addSubscriber) and this call (the NotifyClosed round trip
+// that produces unregister isn't instantaneous) — runs unregister itself
+// right now instead. That earlier close() ran against the default no-op
+// installed at construction, since the real unregister didn't exist yet;
+// without this check, storing it into entry.unregisterClosed afterward
+// would leave it installed but never called (close() only ever runs once,
+// guarded by e.stopped), leaking the connection's onClose callback exactly
+// like an unbounded connection would (review finding 5), just via a
+// narrower race instead of a missing mechanism.
+func (e *runSubscriber) installUnregister(unregister func()) {
+	e.mu.Lock()
+	if e.stopped {
+		e.mu.Unlock()
+		unregister()
+		return
+	}
+	e.unregisterClosed = unregister
+	e.mu.Unlock()
+}
+
+func approxEventSize(event proto.RunEventPayload) int {
+	data, _ := json.Marshal(event)
+	return len(data)
+}
+
+func (m *Manager) removeSubscriber(runID string, target *runSubscriber) {
+	m.subsMu.Lock()
+	defer m.subsMu.Unlock()
+	list := m.subs[runID]
+	for index, candidate := range list {
+		if candidate == target {
+			m.subs[runID] = append(list[:index:index], list[index+1:]...)
+			break
+		}
+	}
+	if len(m.subs[runID]) == 0 {
+		delete(m.subs, runID)
+	}
+}
+
+// broadcast fans a persisted event out to every current subscriber of runID.
+// Callers must persist the event first (RFC §10: persistence before
+// notification); broadcast itself never touches disk.
+func (m *Manager) broadcast(runID string, event proto.RunEventPayload) {
+	m.subsMu.Lock()
+	list := append([]*runSubscriber(nil), m.subs[runID]...)
+	m.subsMu.Unlock()
+	for _, entry := range list {
+		entry.deliver(event)
+	}
+	if isTerminalEventType(event.Type) {
+		m.closeSubscribers(runID)
+	}
+}
+
+func (m *Manager) closeSubscribers(runID string) {
+	m.subsMu.Lock()
+	list := m.subs[runID]
+	delete(m.subs, runID)
+	m.subsMu.Unlock()
+	for _, entry := range list {
+		entry.close()
+	}
+}
+
+func isTerminalEventType(eventType string) bool {
+	switch eventType {
+	case "run_succeeded", "run_failed", "run_cancelled", "run_interrupted":
+		return true
+	default:
+		return false
+	}
+}
+
+func payloadFromEvent(event execution.RunEvent) proto.RunEventPayload {
+	return proto.RunEventPayload{
+		RunID: event.RunID, Sequence: event.Sequence, Type: event.Type,
+		StepID: event.StepID, Data: event.Data,
+		OccurredAt: event.OccurredAt.UTC().Format(time.RFC3339Nano),
+	}
+}
+
+// SubscribeResult is the synchronous v1/subscribeRun response: the replay
+// batch from fromSequence plus the Run's current status. Live events follow
+// as v1/runEvent notifications on the same connection.
+type SubscribeResult struct {
+	Events []proto.RunEventPayload `json:"events"`
+	Status string                  `json:"status"`
+}
+
+// Subscribe registers sub for runID's future events, then returns the replay
+// batch from fromSequence. Registration happens before the replay read so no
+// event can be missed; forward() deduplicates against lastReplay so no event
+// already in the replay batch is delivered twice.
+func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventSubscriber) (SubscribeResult, *proto.Error) {
+	if !safeRunID(runID) {
+		return SubscribeResult{}, &proto.Error{Code: proto.CodeRunNotFound, Message: "Run not found"}
+	}
+	if fromSequence < 0 {
+		return SubscribeResult{}, invalidParams("fromSequence must be >= 0")
+	}
+	root, idx, record, err := m.findRecord(runID)
+	if err != nil {
+		return SubscribeResult{}, subscribeFindError(err)
+	}
+	entry := m.addSubscriber(runID, sub)
+	// If the underlying connection disconnects, its RunEventSubscriber must
+	// tell us so this subscription doesn't leak forever (review finding 4).
+	// The unregister func stored on entry lets entry.close() release this
+	// callback on the connection as soon as the subscription ends on its own
+	// (terminal event, gap, or an error below) instead of only when the
+	// connection itself eventually closes (review finding 5).
+	unregister := sub.NotifyClosed(func() {
+		entry.close()
+		m.removeSubscriber(runID, entry)
+	})
+	entry.installUnregister(unregister)
+	detail, err := runstate.LoadWithIndex(root, runID, idx)
+	if err != nil {
+		if synthesized, ok := freshlyReservedDetail(err, record); ok {
+			// startRun reserves the Run durably in the index (and returns
+			// its id to the caller) before the engine goroutine that writes
+			// request.json/run.json even starts: a caller that subscribes
+			// immediately after startRun returns can legitimately race that
+			// goroutine. The reservation guarantees this Run exists and has
+			// no events yet, so degrade to an empty-replay "running"
+			// snapshot instead of surfacing a spurious internal error for a
+			// Run the caller was just handed a valid id for.
+			detail = synthesized
+		} else {
+			entry.close()
+			m.removeSubscriber(runID, entry)
+			return SubscribeResult{}, internalError(err)
+		}
+	}
+	lastSequence := len(detail.Events) - 1
+	entry.setReplayBoundary(lastSequence)
+	// Activation must wait until the synchronous RPC response carrying this
+	// replay snapshot is ahead of it on the wire (review finding 4): handing
+	// this off via sub.Defer lets the transport (server.dispatch) guarantee
+	// that ordering instead of starting the forwarder eagerly here, which
+	// could race a live event onto the connection before its own response.
+	// The onAbort side of Defer matters too: dispatch discovers only after
+	// this handler already returned that the encoded response (e.g. an
+	// oversized replay batch) exceeds the frame limit and must send an
+	// error instead — by which point entry is already registered in
+	// m.subs and its onClose callback is already installed on the
+	// connection. Without onAbort releasing both, an aborted activation
+	// would leak this subscription exactly like an unbounded connection
+	// would (review finding 5), just via a different trigger.
+	sub.Defer(entry.start, func() {
+		entry.close()
+		m.removeSubscriber(runID, entry)
+	})
+
+	events := make([]proto.RunEventPayload, 0, len(detail.Events))
+	for _, event := range detail.Events {
+		if event.Sequence < fromSequence {
+			continue
+		}
+		events = append(events, payloadFromEvent(event))
+	}
+	status := wireStatus(detail.Summary.Status)
+	if isTerminal(detail.Summary.Status) {
+		entry.close()
+		m.removeSubscriber(runID, entry)
+	}
+	return SubscribeResult{Events: events, Status: status}, nil
+}
+
+// freshlyReservedDetail recognizes the narrow window between startRun's
+// synchronous, durable reservation and the engine goroutine's asynchronous
+// first write of request.json/run.json. err must be exactly a missing-file
+// error, and record (already loaded from the index, so its existence is not
+// in question) must still show the untouched initial reservation: "running"
+// with no terminal timestamp yet. Anything else — a genuinely corrupt or
+// unexpectedly absent Run directory — still surfaces as an error.
+func freshlyReservedDetail(err error, record runindex.Record) (*runstate.Detail, bool) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	if record.Status != "running" || record.FinishedAt != "" {
+		return nil, false
+	}
+	return &runstate.Detail{Summary: runstate.Summary{
+		ID: record.ID, Status: "running", Source: record.Source,
+		CreatedAt: record.CreatedAt, RequestID: record.RequestID,
+		Capability: record.Capability, Recipe: record.Recipe, StateDir: record.StateDir,
+	}}, true
+}
+
+func subscribeFindError(err error) *proto.Error {
+	if errors.Is(err, sql.ErrNoRows) {
+		return &proto.Error{Code: proto.CodeRunNotFound, Message: "Run not found"}
+	}
+	return internalError(err)
+}

@@ -141,9 +141,18 @@ func (r *runner) initialize(requestID, runID string) error {
 	if r.invocation.Recipe != nil && r.invocation.Recipe.Runtime == "shell" {
 		run.NodeID = r.invocation.NodeID
 	}
+	if r.invocation.PreparedRun != nil {
+		run = *r.invocation.PreparedRun
+		run.Inputs = cloneMap(r.invocation.PreparedRun.Inputs)
+	}
 	r.result = Result{Status: "running", StateDir: r.store.Dir(), Request: request, Run: run, Artifacts: map[string]ArtifactReference{}}
 	if err := r.store.WriteRequest(request); err != nil {
 		return err
+	}
+	if r.options.AfterRequestPersisted != nil {
+		if err := r.options.AfterRequestPersisted(); err != nil {
+			return err
+		}
 	}
 	if err := r.store.WriteRun(run); err != nil {
 		return err
@@ -176,31 +185,48 @@ func (r *runner) emit(eventType, stepID string, data map[string]any) error {
 }
 
 func (r *runner) indexRun(status string, enqueueOutbox bool) error {
-	idx, err := runindex.Open(r.invocation.ProjectRoot)
-	if err != nil {
-		return fmt.Errorf("open run index: %w", err)
+	idx := r.options.RunIndex
+	if idx == nil {
+		opened, err := runindex.Open(r.invocation.ProjectRoot)
+		if err != nil {
+			return fmt.Errorf("open run index: %w", err)
+		}
+		defer opened.Close()
+		idx = opened
 	}
-	defer idx.Close()
 	recipe := ""
 	if r.result.Run.Recipe != nil {
 		recipe = r.result.Run.Recipe.Name + "@" + r.result.Run.Recipe.Version
 	}
 	record := runindex.Record{
 		ID: r.result.Run.ID, RequestID: r.result.Run.RequestID, Status: status,
-		Source: runindex.SourceLocal, Capability: r.result.Run.Capability.Name + "@" + r.result.Run.Capability.Version,
+		Source: r.invocation.Source, Capability: r.result.Run.Capability.Name + "@" + r.result.Run.Capability.Version,
 		Recipe: recipe, CreatedAt: r.result.Run.CreatedAt.UTC().Format(time.RFC3339Nano),
-		StateDir: r.result.StateDir, SyncStatus: runindex.SyncNone,
+		NodeID: r.invocation.NodeID, StateDir: r.result.StateDir, SyncStatus: runindex.SyncNone,
+	}
+	if record.Source == "" {
+		record.Source = runindex.SourceLocal
+	}
+	if enqueueOutbox {
+		// FinishedAt must be exactly the terminal event's own OccurredAt —
+		// already durable in events.jsonl by the time indexRun runs — never
+		// a second, independent Now() call. Two separate clock reads can
+		// observe different instants, silently drifting the indexed
+		// FinishedAt away from the event it is supposed to describe.
+		record.FinishedAt = r.result.Events[len(r.result.Events)-1].OccurredAt.UTC().Format(time.RFC3339Nano)
+	}
+	if enqueueOutbox {
+		if _, err := idx.CommitTerminal(record, map[string]any{
+			"id": record.ID, "requestId": record.RequestID, "status": record.Status,
+			"capability": record.Capability, "recipe": record.Recipe, "createdAt": record.CreatedAt,
+			"finishedAt": record.FinishedAt,
+		}); err != nil {
+			return fmt.Errorf("commit terminal Run: %w", err)
+		}
+		return nil
 	}
 	if err := idx.Upsert(record); err != nil {
 		return fmt.Errorf("index Run: %w", err)
-	}
-	if enqueueOutbox {
-		if err := idx.EnqueueOutbox(record.ID, map[string]any{
-			"id": record.ID, "requestId": record.RequestID, "status": record.Status,
-			"capability": record.Capability, "recipe": record.Recipe, "createdAt": record.CreatedAt,
-		}); err != nil {
-			return fmt.Errorf("enqueue run sync: %w", err)
-		}
 	}
 	return nil
 }

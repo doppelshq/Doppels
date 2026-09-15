@@ -20,13 +20,17 @@ type connection struct {
 	outbound chan any
 	stop     chan struct{}
 
-	mu              sync.Mutex
-	initialized     bool
-	clientName      string
-	nodeSubscribed  bool
-	nodeSubscribing bool
-	pendingEvents   []proto.NodeEvent
-	closed          bool
+	mu                sync.Mutex
+	initialized       bool
+	clientName        string
+	nodeSubscribed    bool
+	nodeSubscribing   bool
+	pendingEvents     []proto.NodeEvent
+	closed            bool
+	pendingActivation func()
+	pendingAbort      func()
+	onClose           map[int]func()
+	nextOnCloseID     int
 }
 
 type outboundFrame struct {
@@ -70,9 +74,17 @@ func (c *connection) serve() {
 		}
 		message, protoErr := proto.DecodeMessage(frame)
 		if protoErr != nil {
-			// Protocol errors answer with id null and keep the connection
-			// alive (§15: only framing corruption forces a close).
-			c.enqueue(proto.NewErrorResponse(nil, protoErr), true)
+			// DecodeMessage returns a non-nil message (carrying the
+			// already-validated id) for every error where that id can
+			// still be trusted enough to correlate — only a frame whose id
+			// itself couldn't be determined or validated answers with id
+			// null (§15: only framing corruption forces a close; the
+			// connection otherwise stays alive either way).
+			var id any
+			if message != nil {
+				id = message.ID
+			}
+			c.enqueueError(id, protoErr, true)
 			continue
 		}
 		if message.IsNotification() {
@@ -80,10 +92,10 @@ func (c *connection) serve() {
 			continue
 		}
 		if !c.isInitialized() && message.Method != "v1/initialize" {
-			c.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{
+			c.enqueueError(message.ID, &proto.Error{
 				Code:    proto.CodeNotInitialized,
 				Message: "initialize is required before any other method",
-			}), true)
+			}, true)
 			continue
 		}
 		if c.isClosed() {
@@ -151,6 +163,45 @@ func (c *connection) drainAfters() {
 // framing issues). Best-effort frames (notifications) drop with a log.
 func (c *connection) enqueue(value any, required bool) bool {
 	return c.enqueueFrame(outboundFrame{value: value}, required)
+}
+
+// oversizedErrorMessage is the fixed fallback text enqueueError uses once
+// neither the full error nor a Data-stripped one fits: short enough that,
+// combined with id (bounded at parse time, MaxIDBytes) and any Code, the
+// resulting envelope always fits MaxFrameBytes.
+const oversizedErrorMessage = "error diagnostics exceed maximum frame size"
+
+// enqueueError builds a JSON-RPC error response and, unlike a bare
+// conn.enqueue(proto.NewErrorResponse(...)), actually verifies it fits
+// MaxFrameBytes before queuing it — the same guarantee dispatch already
+// gives every success response. id is bounded at parse time (DecodeMessage,
+// MaxIDBytes), so it alone can never be the reason an envelope doesn't fit;
+// either err.Data (arbitrary handler-supplied diagnostics) or err.Message
+// (which is not always a short fixed string — e.g. a "workspace not found"
+// error echoes the raw, unbounded request parameter) can be. If the full
+// error doesn't fit, retry with Data dropped; if that still doesn't fit,
+// replace Message with a fixed, bounded diagnostic too. id is preserved at
+// every step: it was already validated and already fits, so there is never
+// a reason to fall back to id null here (that fallback is reserved for
+// DecodeMessage's own "the id itself couldn't be trusted" case).
+func (c *connection) enqueueError(id any, err *proto.Error, required bool) bool {
+	if fits(id, err) {
+		return c.enqueue(proto.NewErrorResponse(id, err), required)
+	}
+	if err.Data != nil {
+		trimmed := &proto.Error{Code: err.Code, Message: err.Message}
+		if fits(id, trimmed) {
+			return c.enqueue(proto.NewErrorResponse(id, trimmed), required)
+		}
+		err = trimmed
+	}
+	fallback := &proto.Error{Code: err.Code, Message: oversizedErrorMessage}
+	return c.enqueue(proto.NewErrorResponse(id, fallback), required)
+}
+
+func fits(id any, err *proto.Error) bool {
+	encoded, marshalErr := json.Marshal(proto.NewErrorResponse(id, err))
+	return marshalErr == nil && len(encoded) <= proto.MaxFrameBytes
 }
 
 func (c *connection) enqueueFrame(frame outboundFrame, required bool) bool {
@@ -257,6 +308,106 @@ func (c *connection) sendNodeEvent(event proto.NodeEvent) {
 	c.enqueue(proto.NewNotification("v1/nodeEvent", event), false)
 }
 
+// DeliverRunEvent sends a v1/runEvent notification targeted at this
+// connection only. Domain callers (e.g. runs.Manager) push events straight to
+// a specific subscriber instead of the server-wide broadcast EmitNodeEvent
+// uses, since a Run subscription is per-connection, not per-server.
+//
+// It reports whether the frame was actually queued. A saturated outbound
+// queue drops the frame (best-effort, like any notification) but the caller
+// must not treat that as success: a dropped event is a gap, and the caller
+// is responsible for reacting (see DeliverRunGap) — silently losing an event
+// with no signal at all would violate the no-gap contract.
+func (c *connection) DeliverRunEvent(event proto.RunEventPayload) bool {
+	return c.enqueue(proto.NewNotification("v1/runEvent", event), false)
+}
+
+// DeliverRunGap tells this connection's subscriber that it fell behind and
+// must resynchronize (RFC §10): the Runner stops emitting that Run to it.
+// This is the client's only signal to resync, so it is never a silent,
+// best-effort drop: a saturated outbound queue closes the connection
+// instead, which is itself an unambiguous signal to reconnect and
+// re-subscribe (RFC §10: "Desconexión = unsubscribe implícito ... Reconexión
+// = nuevo initialize + re-subscripciones").
+func (c *connection) DeliverRunGap(runID string, fromSequence int) {
+	c.enqueue(proto.NewNotification("v1/nodeEvent", proto.NodeEvent{
+		Kind:    proto.NodeEventRunEventGap,
+		Payload: map[string]any{"runId": runID, "fromSequence": fromSequence},
+	}), true)
+}
+
+// Defer implements RunEventSubscriber: onActivate runs once the response to
+// the in-flight RPC call has been enqueued (see dispatch's
+// consumePendingActivation), never before and never if that response could
+// not be enqueued at all. onAbort runs instead, exactly once, whenever
+// onActivate would not: a saturated outbound queue, a handler error, or —
+// notably — a successful handler whose response still turned out to exceed
+// MaxFrameBytes once encoded (dispatch discovers this only after the
+// handler, and Subscribe's own bookkeeping registration already happened
+// by then). Without onAbort a caller like runs.Manager, which registers a
+// subscriber list entry and a connection onClose callback before deferring
+// activation, would leak both for a subscription whose activation never
+// ran and therefore never has another chance to clean up. At most one
+// activation is ever pending: methods run on a connection's single reading
+// goroutine, so dispatch always consumes it before the next call.
+func (c *connection) Defer(onActivate func(), onAbort func()) {
+	c.mu.Lock()
+	c.pendingActivation = onActivate
+	c.pendingAbort = onAbort
+	c.mu.Unlock()
+}
+
+// consumePendingActivation clears whatever Defer registered during the
+// current dispatch and runs onActivate if succeeded, else onAbort — exactly
+// one of the two, exactly once.
+func (c *connection) consumePendingActivation(succeeded bool) {
+	c.mu.Lock()
+	activate := c.pendingActivation
+	abort := c.pendingAbort
+	c.pendingActivation = nil
+	c.pendingAbort = nil
+	c.mu.Unlock()
+	if succeeded {
+		if activate != nil {
+			activate()
+		}
+		return
+	}
+	if abort != nil {
+		abort()
+	}
+}
+
+// NotifyClosed implements RunEventSubscriber: fn runs when this connection
+// closes, or immediately if it already has. Domain subscribers (e.g.
+// runs.Manager) use this to unsubscribe on disconnect instead of leaking a
+// subscription (and its forwarder goroutine) forever. The returned func
+// unregisters fn if the subscription ends on its own (Run terminal, gap,
+// error) before the connection ever closes — without it, a long-lived
+// connection subscribing to many Runs over its lifetime would accumulate one
+// stale callback per past subscription forever. Unregistering is a no-op
+// once the connection has already closed or already unregistered.
+func (c *connection) NotifyClosed(fn func()) func() {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		fn()
+		return func() {}
+	}
+	if c.onClose == nil {
+		c.onClose = make(map[int]func())
+	}
+	id := c.nextOnCloseID
+	c.nextOnCloseID++
+	c.onClose[id] = fn
+	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		delete(c.onClose, id)
+		c.mu.Unlock()
+	}
+}
+
 func (c *connection) close() {
 	c.mu.Lock()
 	if c.closed {
@@ -264,9 +415,14 @@ func (c *connection) close() {
 		return
 	}
 	c.closed = true
+	callbacks := c.onClose
+	c.onClose = nil
 	c.mu.Unlock()
 	close(c.stop)
 	_ = c.conn.Close()
+	for _, fn := range callbacks {
+		fn()
+	}
 }
 
 func (s *Server) removeConnection(conn *connection) {
@@ -281,29 +437,53 @@ func (s *Server) dispatch(conn *connection, message *proto.Message) {
 	handler, found := s.handlers[message.Method]
 	s.mu.Unlock()
 	if !found {
-		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{
+		conn.enqueueError(message.ID, &proto.Error{
 			Code:    proto.CodeMethodNotFound,
 			Message: "unknown method: " + message.Method,
-		}), true)
+		}, true)
 		return
 	}
 	if message.Method != "v1/shutdown" && message.Method != "v1/initialize" && s.isShuttingDown() {
-		conn.enqueue(proto.NewErrorResponse(message.ID, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}), true)
+		conn.enqueueError(message.ID, &proto.Error{Code: proto.CodeBusy, Message: "runner is shutting down"}, true)
 		return
 	}
 	result, protoErr := handler(conn, message.Params)
 	if protoErr != nil {
-		conn.enqueue(proto.NewErrorResponse(message.ID, protoErr), true)
+		// A handler that errored never reaches the success path below, so
+		// any Defer it may have registered (it shouldn't, but defensively)
+		// must not fire for a response that was never sent.
+		conn.consumePendingActivation(false)
+		conn.enqueueError(message.ID, protoErr, true)
 		return
 	}
 	if message.Method == "v1/shutdown" {
+		conn.consumePendingActivation(false)
 		after := s.shutdownAfterAckCallback()
 		if !conn.enqueueFrame(outboundFrame{value: proto.NewResponse(message.ID, result), after: after}, true) && after != nil {
 			after()
 		}
 		return
 	}
-	queued := conn.enqueue(proto.NewResponse(message.ID, result), true)
+	if fitter, ok := result.(ResponseFrameFitter); ok {
+		if fitErr := fitter.FitResponseFrame(message.ID, proto.MaxFrameBytes); fitErr != nil {
+			conn.consumePendingActivation(false)
+			conn.enqueueError(message.ID, fitErr, true)
+			return
+		}
+	}
+	response := proto.NewResponse(message.ID, result)
+	encoded, encodeErr := json.Marshal(response)
+	if encodeErr != nil || len(encoded) > proto.MaxFrameBytes {
+		conn.consumePendingActivation(false)
+		conn.enqueueError(message.ID, &proto.Error{Code: proto.CodeInternal, Message: "response exceeds maximum frame size"}, true)
+		return
+	}
+	queued := conn.enqueue(response, true)
+	// Runs any RunEventSubscriber.Defer callback the handler registered
+	// (e.g. v1/subscribeRun activating live delivery) only now that the
+	// response is ahead of it in the outbound FIFO — and never at all if the
+	// response could not be enqueued.
+	conn.consumePendingActivation(queued)
 	if message.Method == "v1/subscribeNode" {
 		// Activate only after the snapshot is in the connection FIFO. A
 		// concurrent event can then never be queued ahead of that response,

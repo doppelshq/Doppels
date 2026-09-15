@@ -4,6 +4,7 @@ package runstate
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -69,6 +70,20 @@ func List(root string) ([]Summary, error) {
 }
 
 func Load(root, runID string) (*Detail, error) {
+	return load(root, runID, nil)
+}
+
+type RecordGetter interface {
+	Get(id string) (runindex.Record, error)
+}
+
+// LoadWithIndex reuses a coordinator-owned long-lived index instead of
+// opening a short-lived SQLite handle while enriching the detail status.
+func LoadWithIndex(root, runID string, idx RecordGetter) (*Detail, error) {
+	return load(root, runID, idx)
+}
+
+func load(root, runID string, idx RecordGetter) (*Detail, error) {
 	if !safeID.MatchString(runID) {
 		return nil, fmt.Errorf("invalid Run id %q", runID)
 	}
@@ -96,19 +111,22 @@ func Load(root, runID string) (*Detail, error) {
 	if run.Recipe != nil {
 		summary.Recipe = reference(*run.Recipe)
 	}
-	enrichStatusFromIndex(root, &summary)
+	enrichStatusFromIndex(root, idx, &summary)
 	return &Detail{Summary: summary, Request: request, Run: run, Events: events}, nil
 }
 
-func enrichStatusFromIndex(root string, summary *Summary) {
+func enrichStatusFromIndex(root string, idx RecordGetter, summary *Summary) {
 	if summary == nil || summary.Status != "running" || summary.ID == "" {
 		return
 	}
-	idx, err := runindex.Open(root)
-	if err != nil {
-		return
+	if idx == nil {
+		opened, err := runindex.Open(root)
+		if err != nil {
+			return
+		}
+		defer opened.Close()
+		idx = opened
 	}
-	defer idx.Close()
 	record, err := idx.Get(summary.ID)
 	if err != nil || record.Status == "" {
 		return
@@ -116,7 +134,25 @@ func enrichStatusFromIndex(root string, summary *Summary) {
 	summary.Status = record.Status
 }
 
-func Logs(root, runID string) ([]Log, error) {
+// LogFileRef is a confined, symlink-resolved reference to one (step, stream)
+// log file discovered from a Run's events (or, absent those, its logs/
+// directory). RealPath has already been proven to resolve inside the Run's
+// state directory: callers may open it directly without repeating that
+// check. Discovery never reads file content, so it stays cheap even when a
+// stream is at its 16 MiB engine cap.
+type LogFileRef struct {
+	Path      string // relative, slash-separated (e.g. "logs/run.stdout.log")
+	StepID    string
+	Stream    string
+	RealPath  string
+	Size      int64
+	Truncated bool
+}
+
+// LogFiles discovers and confines a Run's log files without reading their
+// content, for callers that need to paginate a file's bytes (getRunLogs)
+// instead of loading it whole.
+func LogFiles(root, runID string) ([]LogFileRef, error) {
 	detail, err := Load(root, runID)
 	if err != nil {
 		return nil, err
@@ -134,13 +170,34 @@ func Logs(root, runID string) ([]Log, error) {
 		}
 		sort.Strings(paths)
 	}
-	logs := make([]Log, 0, len(paths))
+	realStateDir, err := filepath.EvalSymlinks(detail.Summary.StateDir)
+	if err != nil {
+		return nil, err
+	}
+	refs := make([]LogFileRef, 0, len(paths))
 	for _, relative := range paths {
 		clean := filepath.Clean(relative)
 		if filepath.IsAbs(clean) || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.Dir(clean) != "logs" {
 			return nil, fmt.Errorf("RunEvent contains unsafe log path %q", relative)
 		}
-		data, err := os.ReadFile(filepath.Join(detail.Summary.StateDir, clean))
+		// The name alone can never prove safety: a symlink at this path
+		// (planted by a Recipe step, which runs arbitrary shell) can point
+		// anywhere on disk while looking like an ordinary log file. Resolve
+		// the real path and confine it to the Run directory before reading,
+		// mirroring the pattern localstate.Store.Resume already uses.
+		resolved, err := filepath.EvalSymlinks(filepath.Join(detail.Summary.StateDir, clean))
+		if err != nil {
+			return nil, err
+		}
+		relToRoot, err := filepath.Rel(realStateDir, resolved)
+		if err != nil || relToRoot == ".." || strings.HasPrefix(relToRoot, ".."+string(filepath.Separator)) {
+			return nil, fmt.Errorf("log path %q escapes the Run directory", relative)
+		}
+		info, err := os.Stat(resolved)
+		if err != nil {
+			return nil, err
+		}
+		truncated, err := hasTruncationMarker(resolved, info.Size())
 		if err != nil {
 			return nil, err
 		}
@@ -149,7 +206,58 @@ func Logs(root, runID string) ([]Log, error) {
 		if before, after, ok := strings.Cut(stepID, "."); ok {
 			stepID, stream = before, after
 		}
-		logs = append(logs, Log{Path: filepath.ToSlash(clean), StepID: stepID, Stream: stream, Content: string(data)})
+		refs = append(refs, LogFileRef{
+			Path: filepath.ToSlash(clean), StepID: stepID, Stream: stream,
+			RealPath: resolved, Size: info.Size(), Truncated: truncated,
+		})
+	}
+	return refs, nil
+}
+
+// truncationMarkerNeedle is the fixed prefix of the marker the engine
+// appends when a stream hit its cap (execution.finalizeLogBytes); the
+// suffix varies with the configured limit ("16MiB", "512KiB", ...), so only
+// the stable prefix is checked.
+const truncationMarkerNeedle = "[doppels: truncated after "
+
+// truncationProbeBytes bounds how much of a file's tail hasTruncationMarker
+// reads: comfortably larger than the marker itself, tiny next to a 16 MiB
+// stream cap.
+const truncationProbeBytes = 256
+
+func hasTruncationMarker(path string, size int64) (bool, error) {
+	start := size - truncationProbeBytes
+	if start < 0 {
+		start = 0
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false, err
+	}
+	defer file.Close()
+	buf := make([]byte, size-start)
+	if _, err := file.ReadAt(buf, start); err != nil && !errors.Is(err, io.EOF) {
+		return false, err
+	}
+	return bytes.Contains(buf, []byte(truncationMarkerNeedle)), nil
+}
+
+// Logs reads every discovered log file's full content. Prefer LogFiles for
+// callers that only need metadata or a byte range: this loads each file
+// entirely into memory, which is fine for CLI display but wasteful (and, at
+// the engine's 16 MiB per-stream cap, wire-unsafe) for paginated RPC access.
+func Logs(root, runID string) ([]Log, error) {
+	refs, err := LogFiles(root, runID)
+	if err != nil {
+		return nil, err
+	}
+	logs := make([]Log, 0, len(refs))
+	for _, ref := range refs {
+		data, err := os.ReadFile(ref.RealPath)
+		if err != nil {
+			return nil, err
+		}
+		logs = append(logs, Log{Path: ref.Path, StepID: ref.StepID, Stream: ref.Stream, Content: string(data)})
 	}
 	return logs, nil
 }

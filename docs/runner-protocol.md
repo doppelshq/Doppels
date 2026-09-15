@@ -280,7 +280,7 @@ reescribe historial (decisiones `run-event-terminal-invariants`,
 | `v1/cancelRun` | `{ runId, reason? }` → `{ status }` | idempotente; garantiza evento terminal |
 | `v1/getRun` | `{ runId, includeEvents? }` → `{ summary, request, events? }` | |
 | `v1/listRuns` | `{ workspace?, capability?, status?, limit?, cursor? }` → `{ runs: RunSummary[], nextCursor? }` | orden `createdAt DESC` |
-| `v1/getRunLogs` | `{ runId, stepId?, offset?, limit? }` → `{ files: { stepId, stream, path, size, truncated }[], content? }` | `content` solo con `stepId`; pages ≤ 4 MiB |
+| `v1/getRunLogs` | `{ runId, stepId?, offset?, limit? }` → `{ files: { stepId, stream, path, size, truncated }[], content? }` | `content` solo con `stepId`; ver detalle abajo |
 | `v1/subscribeRun` | `{ runId, fromSequence? }` → `{ events: RunEventPayload[], status }` | replay + luego notifications |
 | `v1/subscribeRunLogs` | `{ runId, stepId? }` → `{ active: boolean }` | luego notifications `v1/runLog` (capability `liveLogs`) |
 | `v1/listPendingApprovals` | `{}` → `{ runId, stepId, name, requestedAt }[]` | approvals HITL pendientes |
@@ -311,6 +311,29 @@ Así el caller puede reconciliar el cambio sin confundirlo con éxito durable.
 - Con `doppels.lock` stale y capability pinneada → `-32009 stalePin`
   (espeja `--strict` de la CLI).
 - `source` del Run derivado del `client.name` del handshake (`cli`/`desktop`).
+
+`v1/getRunLogs`:
+
+- `files` siempre lista los ficheros confinados por-(step,stream)
+  descubiertos (filtrados por `stepId` si se indica); nunca lee su
+  contenido para construir esta lista. Se ordena canónicamente por `path` y
+  admite como máximo 1024 entradas por respuesta; si el Run supera ese
+  límite, el cliente debe acotar por `stepId` (`-32602 invalidParams`).
+- `content` solo se devuelve cuando se indica `stepId`: es la codificación
+  **base64** de la ventana de bytes `[offset, offset+limit)` de la
+  concatenación cruda de los streams que hacen match para ese step, en
+  orden `stdout` y después `stderr`. `offset`/`limit` se miden en bytes
+  **crudos** (antes de base64), no en runas ni en bytes codificados.
+- Salida de un subproceso es binario arbitrario, no UTF-8 garantizado: un
+  string JSON plano permitiría que `json.Marshal` sustituyera secuencias
+  inválidas por U+FFFD, y una página por offset de bytes puede partir una
+  runa multi-byte exactamente en el límite. base64 hace que el contrato
+  offset/limit sea exacto byte a byte sin importar lo que el subproceso
+  haya escrito.
+- El límite efectivo de `limit` (y por tanto de una página) se calcula con
+  el `id` real de la llamada para que la respuesta JSON-RPC completa —
+  `content` codificado, envelope y metadatos de `files` — no exceda
+  `MaxFrameBytes` (§4, 4 MiB).
 
 ## 10. Events (notifications)
 

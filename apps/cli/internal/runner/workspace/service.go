@@ -3,9 +3,12 @@ package workspace
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
+	"doppels.so/cli/internal/listener"
 	"doppels.so/cli/internal/manifest"
 	"doppels.so/cli/internal/runner/proto"
 )
@@ -25,6 +28,17 @@ type Capability struct {
 	Inputs   map[string]manifest.InputContract  `json:"inputs"`
 	Outputs  map[string]manifest.OutputContract `json:"outputs"`
 	Runs     int                                `json:"runs"`
+}
+
+// Execution is a fully resolved invocation source from the same validated
+// catalog used by listCapabilities/getCapability.
+type Execution struct {
+	Root            string
+	Space           string
+	Capability      manifest.CapabilityDefinition
+	Recipe          *manifest.RecipeDefinition
+	RecipeDirectory string
+	StalePin        bool
 }
 
 // Service is the concurrency-safe workspace and local catalog facade used by
@@ -192,6 +206,54 @@ func (s *Service) GetCapability(workspace, name, version string) (Capability, er
 		}
 	}
 	return Capability{}, fmt.Errorf("%w: %s@%s", ErrCapabilityNotFound, name, version)
+}
+
+// ResolveExecution resolves Capability name[@version] and the optional Recipe
+// using the established manifest Catalog rules. A missing Recipe is the valid
+// manual-without-Recipe case; ambiguity still requires an explicit selection.
+func (s *Service) ResolveExecution(workspace, capabilityReference, recipeReference string) (Execution, error) {
+	roots, err := s.rootsFor(workspace)
+	if err != nil {
+		return Execution{}, err
+	}
+	if len(roots) != 1 {
+		return Execution{}, fmt.Errorf("%w: workspace is required", ErrWorkspaceNotFound)
+	}
+	root := roots[0]
+	state := loadWorkspaceState(root, s.deps)
+	if state.Health == healthMissingRoot {
+		return Execution{}, fmt.Errorf("%w: %s is registered but missing", ErrWorkspaceNotFound, root)
+	}
+	if state.Catalog == nil {
+		return Execution{}, fmt.Errorf("%w: %s", ErrCapabilityNotFound, capabilityReference)
+	}
+	if strings.Count(capabilityReference, "@") > 1 {
+		return Execution{}, fmt.Errorf("%w: malformed reference %q", ErrCapabilityNotFound, capabilityReference)
+	}
+	name, version, _ := strings.Cut(capabilityReference, "@")
+	if name == "" || (strings.Contains(capabilityReference, "@") && version == "") {
+		return Execution{}, fmt.Errorf("%w: malformed reference %q", ErrCapabilityNotFound, capabilityReference)
+	}
+	capability, err := listener.FindCapability(state.Catalog, name, version)
+	if err != nil {
+		return Execution{}, fmt.Errorf("%w: %v", ErrCapabilityNotFound, err)
+	}
+	resolved := Execution{Root: root, Space: spaceHint(root), Capability: capability}
+	recipe, recipeErr := state.Catalog.ResolveRecipe(name, recipeReference)
+	switch {
+	case recipeErr == nil:
+		resolved.Recipe = &recipe
+		resolved.RecipeDirectory = filepath.Dir(recipe.Source.Path)
+	case errors.Is(recipeErr, manifest.ErrRecipeNotFound) && recipeReference == "":
+		// Capability without Recipe is a durable manual Run.
+	case recipeErr != nil:
+		return Execution{}, recipeErr
+	}
+	resolved.StalePin = resourceOrigin(state.Lock, "Capability", name, capability.Value.Metadata.Version, capability.Source.SHA256) == "stale"
+	if resolved.Recipe != nil && resourceOrigin(state.Lock, "Recipe", resolved.Recipe.Value.Metadata.Name, resolved.Recipe.Value.Metadata.Version, resolved.Recipe.Source.SHA256) == "stale" {
+		resolved.StalePin = true
+	}
+	return resolved, nil
 }
 
 func (s *Service) rootsFor(workspace string) ([]string, error) {
