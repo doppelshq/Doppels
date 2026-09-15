@@ -157,27 +157,43 @@ func (c *connection) enqueue(value any, required bool) bool {
 	return c.enqueueFrame(outboundFrame{value: value}, required)
 }
 
+// oversizedErrorMessage is the fixed fallback text enqueueError uses once
+// neither the full error nor a Data-stripped one fits: short enough that,
+// combined with id (bounded at parse time, MaxIDBytes) and any Code, the
+// resulting envelope always fits MaxFrameBytes.
+const oversizedErrorMessage = "error diagnostics exceed maximum frame size"
+
 // enqueueError builds a JSON-RPC error response and, unlike a bare
 // conn.enqueue(proto.NewErrorResponse(...)), actually verifies it fits
 // MaxFrameBytes before queuing it — the same guarantee dispatch already
 // gives every success response. id is bounded at parse time (DecodeMessage,
-// MaxIDBytes) and err.Message is always one of this codebase's short fixed
-// strings, so the only field that can push an error envelope over the limit
-// is err.Data (arbitrary handler-supplied diagnostics). If the full error
-// doesn't fit, retry once with Data dropped — id plus a short fixed message
-// always fits after that. A response that still doesn't fit at that point
-// would mean a contract bug elsewhere (id or message unexpectedly
-// unbounded), not something to paper over here.
+// MaxIDBytes), so it alone can never be the reason an envelope doesn't fit;
+// either err.Data (arbitrary handler-supplied diagnostics) or err.Message
+// (which is not always a short fixed string — e.g. a "workspace not found"
+// error echoes the raw, unbounded request parameter) can be. If the full
+// error doesn't fit, retry with Data dropped; if that still doesn't fit,
+// replace Message with a fixed, bounded diagnostic too. id is preserved at
+// every step: it was already validated and already fits, so there is never
+// a reason to fall back to id null here (that fallback is reserved for
+// DecodeMessage's own "the id itself couldn't be trusted" case).
 func (c *connection) enqueueError(id any, err *proto.Error, required bool) bool {
-	response := proto.NewErrorResponse(id, err)
-	if encoded, marshalErr := json.Marshal(response); marshalErr == nil && len(encoded) <= proto.MaxFrameBytes {
-		return c.enqueue(response, required)
+	if fits(id, err) {
+		return c.enqueue(proto.NewErrorResponse(id, err), required)
 	}
-	if err.Data == nil {
-		return c.enqueue(response, required)
+	if err.Data != nil {
+		trimmed := &proto.Error{Code: err.Code, Message: err.Message}
+		if fits(id, trimmed) {
+			return c.enqueue(proto.NewErrorResponse(id, trimmed), required)
+		}
+		err = trimmed
 	}
-	trimmed := &proto.Error{Code: err.Code, Message: err.Message}
-	return c.enqueue(proto.NewErrorResponse(id, trimmed), required)
+	fallback := &proto.Error{Code: err.Code, Message: oversizedErrorMessage}
+	return c.enqueue(proto.NewErrorResponse(id, fallback), required)
+}
+
+func fits(id any, err *proto.Error) bool {
+	encoded, marshalErr := json.Marshal(proto.NewErrorResponse(id, err))
+	return marshalErr == nil && len(encoded) <= proto.MaxFrameBytes
 }
 
 func (c *connection) enqueueFrame(frame outboundFrame, required bool) bool {

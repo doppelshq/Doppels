@@ -434,3 +434,93 @@ func growEventsPastFrameLimit(t *testing.T, root, runID string) {
 		t.Fatal(err)
 	}
 }
+
+// TestListRunsHugeWorkspaceStillYieldsBoundedError reproduces a review
+// finding: enqueueError's earlier fix only handled an oversized err.Data,
+// assuming err.Message was always one of this codebase's short fixed
+// strings. resolveRoot's "workspace not found: " + workspace error breaks
+// that assumption — workspace is raw, unbounded request input, so its error
+// echoes it straight back into Message with no Data at all. A request whose
+// workspace param is large enough that the request itself only just fits
+// produces an error response (workspace re-embedded, id, plus the "workspace
+// not found: " prefix) larger than the request that produced it, and the
+// enqueueError fallback that only strips Data left it unchanged — WriteFrame
+// then refused to write it, closing the connection instead of answering.
+func TestListRunsHugeWorkspaceStillYieldsBoundedError(t *testing.T) {
+	service, _ := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	srv := server.New(server.Config{
+		Token: integrationToken, RunnerVersion: "0.0.1-test",
+		NodeStatus: func() proto.NodeStatus { return proto.NodeStatus{} },
+		Log:        func(string, ...any) {},
+	})
+	RegisterRPC(srv, manager)
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := transport.Unix{}.Listen(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, cancelServe := context.WithCancel(context.Background())
+	defer cancelServe()
+	go srv.Serve(serveCtx, listener)
+	t.Cleanup(srv.Close)
+	client := dialIntegrationClient(t, socketPath)
+
+	// Measure this connection's own exact framing overhead (workspace="")
+	// for both the request about to be sent and the error resolveRoot would
+	// return, then pick the largest workspace for which the request still
+	// fits.
+	zeroWorkspaceRequest, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": "list-1", "method": "v1/listRuns",
+		"params": map[string]any{"workspace": ""},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	zeroWorkspaceError, err := json.Marshal(proto.NewErrorResponse("list-1", &proto.Error{
+		Code: proto.CodeWorkspaceNotFound, Message: "workspace not found: ",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(zeroWorkspaceError) <= len(zeroWorkspaceRequest) {
+		t.Fatalf("test setup invalid: error overhead (%d) must exceed request overhead (%d) to reproduce the bug", len(zeroWorkspaceError), len(zeroWorkspaceRequest))
+	}
+	workspaceLen := proto.MaxFrameBytes - len(zeroWorkspaceRequest)
+	hugeWorkspace := strings.Repeat("w", workspaceLen)
+
+	if err := client.encoder.WriteFrame(map[string]any{
+		"jsonrpc": "2.0", "id": "list-1", "method": "v1/listRuns",
+		"params": map[string]any{"workspace": hugeWorkspace},
+	}); err != nil {
+		t.Fatalf("request with workspace length %d could not even be sent: %v", workspaceLen, err)
+	}
+	frame, err := client.decoder.ReadFrame()
+	if err != nil {
+		t.Fatalf("a huge-workspace request closed the connection instead of returning an in-frame response: %v", err)
+	}
+	if len(frame) > proto.MaxFrameBytes {
+		t.Fatalf("response frame = %d bytes, max %d", len(frame), proto.MaxFrameBytes)
+	}
+	var response proto.Response
+	if err := json.Unmarshal(frame, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Err == nil {
+		t.Fatal("huge-workspace request unexpectedly returned an unbounded success response")
+	}
+	idJSON, err := json.Marshal(response.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(idJSON) != `"list-1"` {
+		t.Fatalf("response id = %s, want preserved %q", idJSON, "list-1")
+	}
+
+	ping := client.call("huge-workspace-ping", "v1/ping", map[string]any{})
+	if ping.Err != nil {
+		t.Fatalf("connection unusable after huge-workspace response: %+v", ping.Err)
+	}
+}
