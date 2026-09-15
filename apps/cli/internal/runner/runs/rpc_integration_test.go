@@ -21,6 +21,20 @@ type integrationClient struct {
 	conn    net.Conn
 	decoder *proto.Decoder
 	encoder *proto.Encoder
+
+	// queuedNotifications buffers notification frames encountered by call()
+	// while it was looking for an RPC response: notifications and responses
+	// share one connection, and the server's async forwarder goroutine can
+	// enqueue a live v1/runEvent ahead of the RPC response whose handler
+	// triggered it (e.g. cancelRun's own broadcast). Without buffering,
+	// call() would silently swallow that notification instead of returning
+	// it to readNotification, and a test waiting for it would hang forever.
+	queuedNotifications []queuedNotification
+}
+
+type queuedNotification struct {
+	method string
+	params json.RawMessage
 }
 
 func dialIntegrationClient(t *testing.T, path string) *integrationClient {
@@ -45,15 +59,28 @@ func (c *integrationClient) call(id, method string, params any) *proto.Response 
 	if err := c.encoder.WriteFrame(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		panic(err)
 	}
-	frame, err := c.decoder.ReadFrame()
-	if err != nil {
-		panic(fmt.Sprintf("read response: %v", err))
+	for {
+		frame, err := c.decoder.ReadFrame()
+		if err != nil {
+			panic(fmt.Sprintf("read response: %v", err))
+		}
+		var envelope struct {
+			Method string          `json:"method"`
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(frame, &envelope); err != nil {
+			panic(fmt.Sprintf("decode %s: %v", frame, err))
+		}
+		if envelope.Method != "" {
+			c.queuedNotifications = append(c.queuedNotifications, queuedNotification{method: envelope.Method, params: envelope.Params})
+			continue
+		}
+		var response proto.Response
+		if err := json.Unmarshal(frame, &response); err != nil {
+			panic(fmt.Sprintf("decode %s: %v", frame, err))
+		}
+		return &response
 	}
-	var response proto.Response
-	if err := json.Unmarshal(frame, &response); err != nil {
-		panic(fmt.Sprintf("decode %s: %v", frame, err))
-	}
-	return &response
 }
 
 func rawResult(t *testing.T, response *proto.Response) json.RawMessage {
@@ -67,6 +94,11 @@ func rawResult(t *testing.T, response *proto.Response) json.RawMessage {
 
 func (c *integrationClient) readNotification(t *testing.T) (string, json.RawMessage) {
 	t.Helper()
+	if len(c.queuedNotifications) > 0 {
+		next := c.queuedNotifications[0]
+		c.queuedNotifications = c.queuedNotifications[1:]
+		return next.method, next.params
+	}
 	for {
 		frame, err := c.decoder.ReadFrame()
 		if err != nil {
@@ -175,5 +207,102 @@ returns: {value: "{{ steps.run.value }}"}
 	}
 	if !seenTerminal {
 		t.Fatal("never observed run_interrupted over the live subscription")
+	}
+}
+
+// TestSubscribeManyTerminalRunsOnOneConnectionDoesNotLeakSubscriptions
+// reproduces review finding 5: a long-lived connection that subscribes to
+// many Runs, each reaching a terminal state well before the connection
+// itself ever closes, must not accumulate unbounded server-side state per
+// past subscription. Each iteration reuses the single client connection
+// end-to-end (startRun, subscribeRun, cancelRun, drain the terminal
+// notification) exactly like a real client would, with no sleeps: every
+// step is gated on an explicit signal (status polling already used
+// elsewhere in this package, or a notification read from the socket).
+func TestSubscribeManyTerminalRunsOnOneConnectionDoesNotLeakSubscriptions(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+
+	srv := server.New(server.Config{
+		Token: integrationToken, RunnerVersion: "0.0.1-test",
+		NodeStatus: func() proto.NodeStatus { return proto.NodeStatus{} },
+		Log:        func(string, ...any) {},
+	})
+	RegisterRPC(srv, manager)
+
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := transport.Unix{}.Listen(socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serveCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go srv.Serve(serveCtx, listener)
+	t.Cleanup(srv.Close)
+
+	client := dialIntegrationClient(t, socketPath)
+
+	const subscriptions = 50
+	for i := 0; i < subscriptions; i++ {
+		key := fmt.Sprintf("many-terminal-%d", i)
+		startResponse := client.call(key, "v1/startRun", map[string]any{
+			"workspace": root, "capability": "greet", "inputs": map[string]any{"count": 1},
+			"approvalMode": "interactive", "idempotencyKey": key,
+		})
+		if startResponse.Err != nil {
+			t.Fatalf("startRun[%d]: %+v", i, startResponse.Err)
+		}
+		var started StartResult
+		if err := json.Unmarshal(rawResult(t, startResponse), &started); err != nil {
+			t.Fatal(err)
+		}
+		waitForStatus(t, root, started.RunID, "pending_manual")
+
+		subResponse := client.call(key+"-sub", "v1/subscribeRun", map[string]any{"runId": started.RunID})
+		if subResponse.Err != nil {
+			t.Fatalf("subscribeRun[%d]: %+v", i, subResponse.Err)
+		}
+
+		cancelResponse := client.call(key+"-cancel", "v1/cancelRun", map[string]any{"runId": started.RunID})
+		if cancelResponse.Err != nil {
+			t.Fatalf("cancelRun[%d]: %+v", i, cancelResponse.Err)
+		}
+
+		seenTerminal := false
+		deadline := time.Now().Add(5 * time.Second)
+		for !seenTerminal && time.Now().Before(deadline) {
+			method, params := client.readNotification(t)
+			if method != "v1/runEvent" {
+				continue
+			}
+			var event proto.RunEventPayload
+			if err := json.Unmarshal(params, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.RunID == started.RunID && event.Type == "run_cancelled" {
+				seenTerminal = true
+			}
+		}
+		if !seenTerminal {
+			t.Fatalf("never observed run_cancelled over the live subscription for run %d", i)
+		}
+
+		// The subscription for this already-terminal Run must be gone from
+		// the domain's own bookkeeping before the next iteration starts —
+		// this is the bound that matters: it must not grow with i.
+		manager.subsMu.Lock()
+		leaked := len(manager.subs[started.RunID])
+		manager.subsMu.Unlock()
+		if leaked != 0 {
+			t.Fatalf("subscriber list for terminated run %d still has %d entries, want 0", i, leaked)
+		}
+	}
+
+	manager.subsMu.Lock()
+	totalTracked := len(manager.subs)
+	manager.subsMu.Unlock()
+	if totalTracked != 0 {
+		t.Fatalf("manager.subs still tracks %d runs after every subscription reached a terminal state, want 0", totalTracked)
 	}
 }

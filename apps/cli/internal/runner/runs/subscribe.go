@@ -4,10 +4,12 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"os"
 	"sync"
 	"time"
 
 	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/runindex"
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/server"
 	"doppels.so/cli/internal/runstate"
@@ -31,13 +33,14 @@ type runSubscriber struct {
 	sub     server.RunEventSubscriber
 	events  chan proto.RunEventPayload
 
-	mu             sync.Mutex
-	lastReplay     int
-	bytes          int
-	pending        int
-	firstPending   int
-	stopped        bool
-	discardBacklog bool
+	mu               sync.Mutex
+	lastReplay       int
+	bytes            int
+	pending          int
+	firstPending     int
+	stopped          bool
+	discardBacklog   bool
+	unregisterClosed func()
 }
 
 // addSubscriber registers entry so broadcast() starts queuing events for it
@@ -48,9 +51,10 @@ type runSubscriber struct {
 func (m *Manager) addSubscriber(runID string, sub server.RunEventSubscriber) *runSubscriber {
 	entry := &runSubscriber{
 		manager: m, runID: runID, sub: sub,
-		events:       make(chan proto.RunEventPayload, subscriberEventBuffer),
-		lastReplay:   -1,
-		firstPending: -1,
+		events:           make(chan proto.RunEventPayload, subscriberEventBuffer),
+		lastReplay:       -1,
+		firstPending:     -1,
+		unregisterClosed: func() {},
 	}
 	m.subsMu.Lock()
 	m.subs[runID] = append(m.subs[runID], entry)
@@ -144,14 +148,20 @@ func (e *runSubscriber) gapLocked(fromSequence int) {
 	}
 	e.stopped = true
 	e.discardBacklog = true
+	unregister := e.unregisterClosed
 	close(e.events)
 	e.mu.Unlock()
 	go func() {
 		e.manager.removeSubscriber(e.runID, e)
+		unregister()
 		e.sub.DeliverRunGap(e.runID, fromSequence)
 	}()
 }
 
+// close ends the subscription and, since it is no longer needed, unregisters
+// the onClose callback registered with the underlying connection (see
+// NotifyClosed) — otherwise a connection that outlives many finished
+// subscriptions would accumulate one stale callback per past Run forever.
 func (e *runSubscriber) close() {
 	e.mu.Lock()
 	if e.stopped {
@@ -159,8 +169,10 @@ func (e *runSubscriber) close() {
 		return
 	}
 	e.stopped = true
+	unregister := e.unregisterClosed
 	e.mu.Unlock()
 	close(e.events)
+	unregister()
 }
 
 func approxEventSize(event proto.RunEventPayload) int {
@@ -244,22 +256,41 @@ func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventS
 	if fromSequence < 0 {
 		return SubscribeResult{}, invalidParams("fromSequence must be >= 0")
 	}
-	root, idx, _, err := m.findRecord(runID)
+	root, idx, record, err := m.findRecord(runID)
 	if err != nil {
 		return SubscribeResult{}, subscribeFindError(err)
 	}
 	entry := m.addSubscriber(runID, sub)
 	// If the underlying connection disconnects, its RunEventSubscriber must
 	// tell us so this subscription doesn't leak forever (review finding 4).
-	sub.NotifyClosed(func() {
+	// The unregister func stored on entry lets entry.close() release this
+	// callback on the connection as soon as the subscription ends on its own
+	// (terminal event, gap, or an error below) instead of only when the
+	// connection itself eventually closes (review finding 5).
+	unregister := sub.NotifyClosed(func() {
 		entry.close()
 		m.removeSubscriber(runID, entry)
 	})
+	entry.mu.Lock()
+	entry.unregisterClosed = unregister
+	entry.mu.Unlock()
 	detail, err := runstate.LoadWithIndex(root, runID, idx)
 	if err != nil {
-		entry.close()
-		m.removeSubscriber(runID, entry)
-		return SubscribeResult{}, internalError(err)
+		if synthesized, ok := freshlyReservedDetail(err, record); ok {
+			// startRun reserves the Run durably in the index (and returns
+			// its id to the caller) before the engine goroutine that writes
+			// request.json/run.json even starts: a caller that subscribes
+			// immediately after startRun returns can legitimately race that
+			// goroutine. The reservation guarantees this Run exists and has
+			// no events yet, so degrade to an empty-replay "running"
+			// snapshot instead of surfacing a spurious internal error for a
+			// Run the caller was just handed a valid id for.
+			detail = synthesized
+		} else {
+			entry.close()
+			m.removeSubscriber(runID, entry)
+			return SubscribeResult{}, internalError(err)
+		}
 	}
 	lastSequence := len(detail.Events) - 1
 	entry.setReplayBoundary(lastSequence)
@@ -283,6 +314,27 @@ func (m *Manager) Subscribe(runID string, fromSequence int, sub server.RunEventS
 		m.removeSubscriber(runID, entry)
 	}
 	return SubscribeResult{Events: events, Status: status}, nil
+}
+
+// freshlyReservedDetail recognizes the narrow window between startRun's
+// synchronous, durable reservation and the engine goroutine's asynchronous
+// first write of request.json/run.json. err must be exactly a missing-file
+// error, and record (already loaded from the index, so its existence is not
+// in question) must still show the untouched initial reservation: "running"
+// with no terminal timestamp yet. Anything else — a genuinely corrupt or
+// unexpectedly absent Run directory — still surfaces as an error.
+func freshlyReservedDetail(err error, record runindex.Record) (*runstate.Detail, bool) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, false
+	}
+	if record.Status != "running" || record.FinishedAt != "" {
+		return nil, false
+	}
+	return &runstate.Detail{Summary: runstate.Summary{
+		ID: record.ID, Status: "running", Source: record.Source,
+		CreatedAt: record.CreatedAt, RequestID: record.RequestID,
+		Capability: record.Capability, Recipe: record.Recipe, StateDir: record.StateDir,
+	}}, true
 }
 
 func subscribeFindError(err error) *proto.Error {

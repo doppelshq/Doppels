@@ -28,7 +28,8 @@ type connection struct {
 	pendingEvents     []proto.NodeEvent
 	closed            bool
 	pendingActivation func()
-	onClose           []func()
+	onClose           map[int]func()
+	nextOnCloseID     int
 }
 
 type outboundFrame struct {
@@ -313,16 +314,31 @@ func (c *connection) consumePendingActivation(succeeded bool) {
 // NotifyClosed implements RunEventSubscriber: fn runs when this connection
 // closes, or immediately if it already has. Domain subscribers (e.g.
 // runs.Manager) use this to unsubscribe on disconnect instead of leaking a
-// subscription (and its forwarder goroutine) forever.
-func (c *connection) NotifyClosed(fn func()) {
+// subscription (and its forwarder goroutine) forever. The returned func
+// unregisters fn if the subscription ends on its own (Run terminal, gap,
+// error) before the connection ever closes — without it, a long-lived
+// connection subscribing to many Runs over its lifetime would accumulate one
+// stale callback per past subscription forever. Unregistering is a no-op
+// once the connection has already closed or already unregistered.
+func (c *connection) NotifyClosed(fn func()) func() {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		fn()
-		return
+		return func() {}
 	}
-	c.onClose = append(c.onClose, fn)
+	if c.onClose == nil {
+		c.onClose = make(map[int]func())
+	}
+	id := c.nextOnCloseID
+	c.nextOnCloseID++
+	c.onClose[id] = fn
 	c.mu.Unlock()
+	return func() {
+		c.mu.Lock()
+		delete(c.onClose, id)
+		c.mu.Unlock()
+	}
 }
 
 func (c *connection) close() {

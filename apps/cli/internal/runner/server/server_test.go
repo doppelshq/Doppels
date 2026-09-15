@@ -458,6 +458,63 @@ func TestNotifyClosedRunsImmediatelyOnAnAlreadyClosedConnection(t *testing.T) {
 	}
 }
 
+// TestNotifyClosedUnregisterBoundsCallbacksOnALongLivedConnection reproduces
+// review finding 5: a connection that outlives many Run subscriptions (each
+// terminating on its own, long before the connection itself closes) must not
+// accumulate one stale onClose callback per past subscription forever. The
+// returned unregister func is how a domain subscriber (runs.Manager) releases
+// its callback as soon as its own subscription ends; unregistering must
+// actually shrink the connection's bookkeeping, not just prevent double
+// delivery.
+func TestNotifyClosedUnregisterBoundsCallbacksOnALongLivedConnection(t *testing.T) {
+	server := New(testConfig())
+	clientEnd, _ := net.Pipe()
+	conn := newConnection(server, clientEnd)
+
+	const subscriptions = 500
+	var fired atomic.Int32
+	var unregisters []func()
+	for i := 0; i < subscriptions; i++ {
+		unregister := conn.NotifyClosed(func() { fired.Add(1) })
+		unregisters = append(unregisters, unregister)
+	}
+	conn.mu.Lock()
+	registered := len(conn.onClose)
+	conn.mu.Unlock()
+	if registered != subscriptions {
+		t.Fatalf("registered onClose callbacks = %d, want %d", registered, subscriptions)
+	}
+
+	// Every subscription "finishes" on its own (Run reaches a terminal
+	// state) long before the connection closes — exactly the long-lived
+	// connection scenario from the finding.
+	for _, unregister := range unregisters {
+		unregister()
+	}
+	conn.mu.Lock()
+	remaining := len(conn.onClose)
+	conn.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("onClose callbacks after unregistering all = %d, want 0 (leak: bookkeeping grows without bound on a long-lived connection)", remaining)
+	}
+
+	// A late registration after everything else unregistered must still work
+	// normally, and closing the connection must not resurrect any
+	// unregistered callback.
+	lateNotified := make(chan struct{}, 1)
+	conn.NotifyClosed(func() { lateNotified <- struct{}{} })
+	conn.close()
+
+	select {
+	case <-lateNotified:
+	case <-time.After(2 * time.Second):
+		t.Fatal("callback registered after the bulk unregister never ran on close")
+	}
+	if got := fired.Load(); got != 0 {
+		t.Fatalf("unregistered callbacks fired = %d, want 0", got)
+	}
+}
+
 func TestHandleSubscribeDeliversOnlyToCallingConnection(t *testing.T) {
 	ts := startServer(t, testConfig())
 	var captured RunEventSubscriber

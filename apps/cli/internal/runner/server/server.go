@@ -61,7 +61,10 @@ type RunEventSubscriber interface {
 	// NotifyClosed runs fn when the underlying connection is closed (or
 	// immediately, if it already is). Domain subscribers use it to
 	// unsubscribe on disconnect instead of leaking a subscription forever.
-	NotifyClosed(fn func())
+	// The returned func unregisters fn if the subscription ends on its own
+	// (before the connection closes) so a long-lived connection does not
+	// accumulate one stale callback per past subscription.
+	NotifyClosed(fn func()) func()
 }
 
 // ResponseFrameFitter lets a paginated result shrink itself using the real

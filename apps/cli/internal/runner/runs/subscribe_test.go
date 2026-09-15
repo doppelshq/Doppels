@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,7 +42,7 @@ func (f *fakeSubscriber) DeliverRunGap(runID string, fromSequence int) {
 }
 
 func (f *fakeSubscriber) Defer(fn func())     { fn() }
-func (f *fakeSubscriber) NotifyClosed(func()) {}
+func (f *fakeSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 func (f *fakeSubscriber) waitForEvents(t *testing.T, n int) []proto.RunEventPayload {
 	t.Helper()
@@ -334,7 +335,7 @@ func (r *rejectingSubscriber) DeliverRunGap(_ string, fromSequence int) {
 }
 
 func (r *rejectingSubscriber) Defer(fn func())     { fn() }
-func (r *rejectingSubscriber) NotifyClosed(func()) {}
+func (r *rejectingSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 func (r *rejectingSubscriber) waitForGap(t *testing.T) int {
 	t.Helper()
@@ -418,11 +419,12 @@ returns: {value: "{{ steps.run.value }}"}
 // instead of running it immediately, so a test can control exactly when
 // live delivery activates.
 type captureDeferSubscriber struct {
-	mu       sync.Mutex
-	deferred func()
-	events   []proto.RunEventPayload
-	notify   chan struct{}
-	closedBy func()
+	mu           sync.Mutex
+	deferred     func()
+	events       []proto.RunEventPayload
+	notify       chan struct{}
+	closedBy     func()
+	unregistered atomic.Int32
 }
 
 func newCaptureDeferSubscriber() *captureDeferSubscriber {
@@ -445,10 +447,11 @@ func (c *captureDeferSubscriber) Defer(fn func()) {
 	c.mu.Unlock()
 }
 
-func (c *captureDeferSubscriber) NotifyClosed(fn func()) {
+func (c *captureDeferSubscriber) NotifyClosed(fn func()) func() {
 	c.mu.Lock()
 	c.closedBy = fn
 	c.mu.Unlock()
+	return func() { c.unregistered.Add(1) }
 }
 
 func (c *captureDeferSubscriber) takeDeferred() func() {
@@ -675,5 +678,40 @@ func TestSubscribeFromSequenceSkipsEarlierReplay(t *testing.T) {
 	}
 	if result.Status != "pendingManual" {
 		t.Fatalf("status = %q, want pendingManual", result.Status)
+	}
+}
+
+// TestSubscribeDegradesToRunningSnapshotForFreshlyReservedRun reproduces a
+// race exposed while stabilizing this suite: startRun durably reserves a Run
+// in the index (and hands its id back to the caller) before the engine
+// goroutine that writes request.json/run.json has even started. A caller
+// that subscribes immediately after startRun returns — exactly what a
+// well-behaved client does — could lose that race and get a spurious
+// internal error for a Run id it was just validly handed. testStopAfterReserve
+// makes the "goroutine never got to write the files" side of that race
+// deterministic instead of timing-dependent: it returns right after the
+// reservation, before request.json/run.json are ever written.
+func TestSubscribeDegradesToRunningSnapshotForFreshlyReservedRun(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+	manager.testStopAfterReserve = true
+
+	params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","inputs":{"count":1},"approvalMode":"interactive","idempotencyKey":"subscribe-before-materialize"}`)
+	started, rpcErr := manager.Start("cli", params)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+
+	sub := newFakeSubscriber()
+	result, rpcErr := manager.Subscribe(started.RunID, 0, sub)
+	if rpcErr != nil {
+		t.Fatalf("Subscribe: %+v", rpcErr)
+	}
+	if result.Status != "running" {
+		t.Fatalf("status = %q, want running", result.Status)
+	}
+	if len(result.Events) != 0 {
+		t.Fatalf("events = %#v, want empty (nothing durable yet)", result.Events)
 	}
 }
