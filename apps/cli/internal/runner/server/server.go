@@ -105,6 +105,8 @@ type Server struct {
 	shutdownAfterAck bool
 	closed           chan struct{}
 	closeOne         sync.Once
+	closeHooksOnce   sync.Once
+	closeHooks       []func()
 	listener         transport.Listener
 }
 
@@ -235,6 +237,15 @@ func (s *Server) Close() {
 	s.closeOne.Do(func() {
 		close(s.closed)
 	})
+	s.closeHooksOnce.Do(func() {
+		s.mu.Lock()
+		hooks := append([]func(){}, s.closeHooks...)
+		s.closeHooks = nil
+		s.mu.Unlock()
+		for _, hook := range hooks {
+			hook()
+		}
+	})
 	s.mu.Lock()
 	listener := s.listener
 	s.listener = nil
@@ -246,6 +257,24 @@ func (s *Server) Close() {
 	if listener != nil {
 		listener.Close()
 	}
+}
+
+// OnClose registers lifecycle cleanup owned by an attached domain service.
+// Registration after shutdown has begun runs immediately.
+func (s *Server) OnClose(fn func()) {
+	if fn == nil {
+		return
+	}
+	s.mu.Lock()
+	select {
+	case <-s.closed:
+		s.mu.Unlock()
+		fn()
+		return
+	default:
+	}
+	s.closeHooks = append(s.closeHooks, fn)
+	s.mu.Unlock()
 }
 
 // EmitNodeEvent delivers a v1/nodeEvent notification to every subscribed

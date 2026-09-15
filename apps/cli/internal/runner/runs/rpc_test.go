@@ -14,6 +14,8 @@ type fakeRPCServer struct {
 	handlers    map[string]server.Handler
 	client      map[string]server.ClientHandler
 	subscribers map[string]server.SubscribeHandler
+	nodeEvents  []proto.NodeEvent
+	closeHooks  []func()
 }
 
 func newFakeRPCServer() *fakeRPCServer {
@@ -31,6 +33,10 @@ func (f *fakeRPCServer) HandleWithClient(method string, handler server.ClientHan
 func (f *fakeRPCServer) HandleSubscribe(method string, handler server.SubscribeHandler) {
 	f.subscribers[method] = handler
 }
+func (f *fakeRPCServer) EmitNodeEvent(event proto.NodeEvent) {
+	f.nodeEvents = append(f.nodeEvents, event)
+}
+func (f *fakeRPCServer) OnClose(fn func()) { f.closeHooks = append(f.closeHooks, fn) }
 
 func rpcParams(t *testing.T, value any) []byte {
 	t.Helper()
@@ -48,6 +54,12 @@ func TestRegisterRPCStartCancelGetListLogsAndSubscribe(t *testing.T) {
 
 	target := newFakeRPCServer()
 	RegisterRPC(target, manager)
+	if target.handlers["v1/listPendingApprovals"] == nil || target.handlers["v1/decideApproval"] == nil {
+		t.Fatal("approval RPC handlers were not registered")
+	}
+	if len(target.closeHooks) != 1 {
+		t.Fatalf("close hooks = %d, want 1", len(target.closeHooks))
+	}
 
 	startResult, protoErr := target.client["v1/startRun"]("cli", rpcParams(t, map[string]any{
 		"workspace": root, "capability": "greet", "inputs": map[string]any{"count": 1},
