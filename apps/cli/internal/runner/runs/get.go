@@ -2,9 +2,12 @@ package runs
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"os"
 
 	"doppels.so/cli/internal/execution"
+	"doppels.so/cli/internal/runindex"
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runstate"
 )
@@ -33,7 +36,23 @@ func (m *Manager) GetRun(runID string, includeEvents bool) (GetRunResult, *proto
 	}
 	detail, err := runstate.LoadWithIndex(root, runID, idx)
 	if err != nil {
-		return GetRunResult{}, internalError(err)
+		request, ok := reservedRequestRecord(err, record, idx)
+		if !ok {
+			return GetRunResult{}, internalError(err)
+		}
+		// startRun durably reserves the Run (index row + exact
+		// request.json/run.json evidence) before the engine goroutine that
+		// writes those files to disk ever runs: a caller that calls getRun
+		// immediately after startRun returns can legitimately race that
+		// goroutine. Recover the exact reserved Request instead of either
+		// failing outright or fabricating placeholder metadata.
+		summary := summaryFromRecord(root, record)
+		summary.Status = wireStatus(record.Status)
+		result := GetRunResult{Summary: summary, Request: request}
+		if includeEvents {
+			result.Events = []proto.RunEventPayload{}
+		}
+		return result, nil
 	}
 	summary := summaryFromRecord(root, record)
 	summary.Status = wireStatus(detail.Summary.Status)
@@ -46,4 +65,35 @@ func (m *Manager) GetRun(runID string, includeEvents bool) (GetRunResult, *proto
 		result.Events = events
 	}
 	return result, nil
+}
+
+// reservedRequestRecord recognizes the narrow window between startRun's
+// synchronous, durable reservation and the engine goroutine's asynchronous
+// first write of request.json/run.json (see freshlyReservedDetail in
+// subscribe.go for the same race on the subscribeRun path). err must be
+// exactly a missing-file error, and record must still show the untouched
+// initial reservation: "running" with no terminal timestamp yet. When that
+// holds, the exact Request evidence committed with the reservation is
+// decoded from the idempotency table — never inferred from the lossy index
+// projection. Anything else — a genuinely corrupt or unexpectedly absent Run
+// directory — still surfaces as an error.
+func reservedRequestRecord(err error, record runindex.Record, idx runIndex) (execution.RequestRecord, bool) {
+	if !errors.Is(err, os.ErrNotExist) {
+		return execution.RequestRecord{}, false
+	}
+	if record.Status != "running" || record.FinishedAt != "" {
+		return execution.RequestRecord{}, false
+	}
+	reservation, reservationErr := idx.GetReservation(record.ID)
+	if reservationErr != nil {
+		return execution.RequestRecord{}, false
+	}
+	var request execution.RequestRecord
+	if jsonErr := json.Unmarshal([]byte(reservation.RequestJSON), &request); jsonErr != nil {
+		return execution.RequestRecord{}, false
+	}
+	if request.ID != record.RequestID {
+		return execution.RequestRecord{}, false
+	}
+	return request, true
 }

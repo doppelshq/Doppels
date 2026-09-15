@@ -47,6 +47,52 @@ func TestGetRunReturnsSummaryRequestAndOptionalEvents(t *testing.T) {
 	}
 }
 
+// TestGetRunReturnsExactReservedRequestBeforeMaterialization reproduces a
+// review finding: startRun durably reserves a Run (index row + exact
+// request.json/run.json evidence in the idempotency table) before the engine
+// goroutine that writes request.json/run.json to disk ever starts. GetRun
+// called in that window used to fail outright (runstate.LoadWithIndex can't
+// find files that don't exist yet) even though the caller was just handed a
+// valid RunID. testStopAfterReserve makes that window deterministic instead
+// of timing-dependent: it returns right after the reservation, before
+// request.json/run.json are ever written. GetRun must recover the exact
+// reserved Request evidence rather than synthesizing placeholder metadata.
+func TestGetRunReturnsExactReservedRequestBeforeMaterialization(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	defer manager.Close()
+	manager.testStopAfterReserve = true
+
+	params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","inputs":{"count":7},"approvalMode":"interactive","idempotencyKey":"get-before-materialize"}`)
+	started, rpcErr := manager.Start("cli", params)
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+
+	result, rpcErr := manager.GetRun(started.RunID, true)
+	if rpcErr != nil {
+		t.Fatalf("GetRun: %+v", rpcErr)
+	}
+	if result.Summary.RunID != started.RunID || result.Summary.Status != "running" {
+		t.Fatalf("summary = %#v", result.Summary)
+	}
+	if result.Request.ID != started.RequestID {
+		t.Fatalf("request.ID = %q, want %q", result.Request.ID, started.RequestID)
+	}
+	if result.Request.Capability.Name != "greet" {
+		t.Fatalf("request.Capability = %#v", result.Request.Capability)
+	}
+	if got, _ := result.Request.Inputs["count"].(float64); got != 7 {
+		t.Fatalf("request.Inputs = %#v, want count=7", result.Request.Inputs)
+	}
+	if result.Request.IdempotencyKey != "get-before-materialize" {
+		t.Fatalf("request.IdempotencyKey = %q", result.Request.IdempotencyKey)
+	}
+	if len(result.Events) != 0 {
+		t.Fatalf("events = %#v, want empty (nothing durable on disk yet)", result.Events)
+	}
+}
+
 func TestGetRunUnknownReturnsRunNotFound(t *testing.T) {
 	service, _ := runnerWorkspace(t, true)
 	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
