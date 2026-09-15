@@ -30,6 +30,17 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "install" || os.Args[1] == "uninstall") {
+		deps, err := defaultLifecycleDependencies()
+		if err == nil {
+			_, err = executeLifecycleSubcommand(os.Args[1:], deps)
+		}
+		if err != nil {
+			log.Fatalf("doppels-runner: %v", err)
+		}
+		return
+	}
+
 	socket := flag.String("socket", "", "path to the IPC socket (default: <configdir>/runner.sock)")
 	tokenFlag := flag.String("token", "", "runner token clients must present at initialize (default: read from <socket-dir>/runner.token or generated)")
 	runnerVersion := flag.String("runner-version", "0.1.0-dev", "runner version reported in initialize")
