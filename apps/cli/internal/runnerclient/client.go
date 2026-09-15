@@ -41,6 +41,7 @@ type Client struct {
 	closed    bool
 
 	notifyHandler atomic.Pointer[func(Notification)]
+	notifyDropped atomic.Uint64
 
 	closeOnce     sync.Once
 	closeErr      error
@@ -190,6 +191,13 @@ func (c *Client) SetNotificationHandler(handler func(Notification)) {
 	c.notifyHandler.Store(&handler)
 }
 
+// NotificationsDropped returns the number of notifications discarded because
+// the bounded dispatcher queue was full. The count is cumulative for the life
+// of the connection and is safe to read concurrently.
+func (c *Client) NotificationsDropped() uint64 {
+	return c.notifyDropped.Load()
+}
+
 // Call issues one JSON-RPC request and blocks for its matching response (or
 // ctx cancellation, or Close). Multiple goroutines may call Call
 // concurrently on the same Client.
@@ -280,9 +288,8 @@ func (c *Client) readLoop() {
 		if envelope.Method != "" {
 			select {
 			case c.notifications <- Notification{Method: envelope.Method, Params: envelope.Params}:
-			case <-c.closing:
-				c.failAllPending()
-				return
+			default:
+				c.notifyDropped.Add(1)
 			}
 			continue
 		}

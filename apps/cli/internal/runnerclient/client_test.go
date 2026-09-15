@@ -323,6 +323,127 @@ func TestNotificationHandlerCanCallPing(t *testing.T) {
 	}
 }
 
+func TestNotificationBackpressureDoesNotBlockPingResponse(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	serverDone := make(chan error, 1)
+	go serveNotificationOverflow(listener, serverDone)
+
+	client := dialTest(t, socketPath)
+	pingDone := make(chan error, 1)
+	var pingOnce sync.Once
+	client.SetNotificationHandler(func(runnerclient.Notification) {
+		pingOnce.Do(func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err := client.Ping(ctx)
+			pingDone <- err
+		})
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Call(ctx, "test/floodNotifications", map[string]any{}, nil); err != nil {
+		t.Fatalf("start notification flood: %v", err)
+	}
+	select {
+	case err := <-pingDone:
+		if err != nil {
+			t.Fatalf("Ping from backpressured notification handler: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Ping response was blocked behind notification backpressure")
+	}
+	if got := client.NotificationsDropped(); got == 0 {
+		t.Fatal("NotificationsDropped() = 0, want at least one dropped notification")
+	}
+	select {
+	case err := <-serverDone:
+		if err != nil {
+			t.Fatalf("overflow server: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("overflow server did not finish")
+	}
+}
+
+func serveNotificationOverflow(listener net.Listener, done chan<- error) {
+	conn, err := listener.Accept()
+	if err != nil {
+		done <- err
+		return
+	}
+	defer conn.Close()
+	decoder := proto.NewDecoder(conn)
+	encoder := proto.NewEncoder(conn)
+
+	readRequest := func(wantMethod string) (*proto.Message, error) {
+		frame, err := decoder.ReadFrame()
+		if err != nil {
+			return nil, err
+		}
+		message, rpcErr := proto.DecodeMessage(frame)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		if message.Method != wantMethod {
+			return nil, fmt.Errorf("method = %q, want %q", message.Method, wantMethod)
+		}
+		return message, nil
+	}
+
+	initialize, err := readRequest("v1/initialize")
+	if err != nil {
+		done <- err
+		return
+	}
+	if err := encoder.WriteFrame(proto.NewResponse(initialize.ID, proto.InitializeResult{
+		ProtocolVersion: proto.ProtocolVersion,
+		RunnerVersion:   "overflow-test",
+		NodeStatus:      proto.NodeStatus{State: "online"},
+	})); err != nil {
+		done <- err
+		return
+	}
+
+	flood, err := readRequest("test/floodNotifications")
+	if err != nil {
+		done <- err
+		return
+	}
+	if err := encoder.WriteFrame(proto.NewNotification("v1/runEvent", map[string]any{"sequence": 0})); err != nil {
+		done <- err
+		return
+	}
+	// Reading the callback's Ping proves the dispatcher is blocked in the
+	// handler before the remaining notifications fill its bounded queue.
+	ping, err := readRequest("v1/ping")
+	if err != nil {
+		done <- err
+		return
+	}
+	for sequence := 1; sequence <= 257; sequence++ {
+		if err := encoder.WriteFrame(proto.NewNotification("v1/runEvent", map[string]any{"sequence": sequence})); err != nil {
+			done <- err
+			return
+		}
+	}
+	if err := encoder.WriteFrame(proto.NewResponse(ping.ID, map[string]string{"pong": "ok"})); err != nil {
+		done <- err
+		return
+	}
+	if err := encoder.WriteFrame(proto.NewResponse(flood.ID, map[string]any{})); err != nil {
+		done <- err
+		return
+	}
+	done <- nil
+}
+
 func TestNotificationHandlerCanCallDecideApproval(t *testing.T) {
 	ts := startTestServer(t)
 	client := dialTest(t, ts.socketPath)

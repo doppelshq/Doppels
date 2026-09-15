@@ -16,6 +16,12 @@
 //     responses to the Call goroutine that issued them and notifications to
 //     the registered handler. Any number of goroutines may call Client.Call
 //     concurrently.
+//   - Notification dispatch is best-effort (RFC §10). The read loop never
+//     waits for a slow handler: once its bounded queue is full, it drops new
+//     notifications and increments Client.NotificationsDropped. Overflow does
+//     not automatically resubscribe or fill sequence gaps; callers that see a
+//     non-zero count can reconcile their last observed sequence with the
+//     canonical event list returned by Client.GetRun.
 //
 // This package is intended to be reused, unmodified, by Doppels Desktop via
 // FFI later in the Desktop-first Runner plan; keep it dependency-light and
