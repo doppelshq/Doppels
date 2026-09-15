@@ -231,6 +231,7 @@ type Options struct {
 type RunIndex interface {
 	Upsert(runindex.Record) error
 	EnqueueOutbox(runID string, payload any) error
+	CommitTerminal(record runindex.Record, payload any) (bool, error)
 }
 
 type StepResult struct {

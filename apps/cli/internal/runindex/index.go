@@ -153,6 +153,13 @@ func (idx *Index) Close() error {
 }
 
 func (idx *Index) migrate() error {
+	var version int
+	if err := idx.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return err
+	}
+	if version >= 4 {
+		return nil
+	}
 	tx, err := idx.db.Begin()
 	if err != nil {
 		return err
@@ -177,6 +184,9 @@ CREATE TABLE IF NOT EXISTS outbox (
   created_at TEXT NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0
 );
+DELETE FROM outbox
+WHERE id NOT IN (SELECT MIN(id) FROM outbox GROUP BY run_id);
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_run_id ON outbox(run_id);
 `); err != nil {
 		return err
 	}
@@ -231,7 +241,7 @@ CREATE INDEX IF NOT EXISTS runs_status_created_at ON runs(status, created_at DES
 			}
 		}
 	}
-	if _, err := tx.Exec(`PRAGMA user_version = 3;`); err != nil {
+	if _, err := tx.Exec(`PRAGMA user_version = 4;`); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -516,6 +526,106 @@ VALUES (?, ?, ?, 0)
 	}
 	_, err = idx.db.Exec(`UPDATE runs SET sync_status = ? WHERE id = ?`, SyncPending, runID)
 	return err
+}
+
+// CommitTerminal atomically installs a terminal Run projection and its one
+// durable sync item. It is safe to retry after any earlier partial write:
+// existing outbox payload is repaired in place, while an already-acked Run
+// (sync_status=synced) is never re-enqueued.
+func (idx *Index) CommitTerminal(record Record, payload any) (bool, error) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return false, err
+	}
+	if record.Source == "" {
+		record.Source = SourceLocal
+	}
+
+	// The lookups below are plain reads, deliberately outside any
+	// transaction: holding the single write connection's transaction open
+	// across round trips would extend how long this Run's row is locked
+	// against unrelated readers/writers (e.g. a concurrent Backfill pass)
+	// for no correctness benefit — the writes that follow are themselves
+	// atomic and idempotent, so a stale read only affects the returned
+	// "changed" hint, never the data actually persisted.
+	var previous Record
+	err = idx.db.QueryRow(`
+SELECT id, request_id, status, source, capability, recipe, node_id, created_at, finished_at, state_dir, sync_status
+FROM runs WHERE id = ?
+`, record.ID).Scan(&previous.ID, &previous.RequestID, &previous.Status, &previous.Source,
+		&previous.Capability, &previous.Recipe, &previous.NodeID, &previous.CreatedAt,
+		&previous.FinishedAt, &previous.StateDir, &previous.SyncStatus)
+	missing := errors.Is(err, sql.ErrNoRows)
+	if err != nil && !missing {
+		return false, err
+	}
+
+	changed := missing || previous.RequestID != record.RequestID || previous.Status != record.Status ||
+		previous.Source != record.Source || previous.Capability != record.Capability || previous.Recipe != record.Recipe ||
+		previous.NodeID != record.NodeID || previous.FinishedAt != record.FinishedAt || previous.StateDir != record.StateDir
+	syncStatus := previous.SyncStatus
+	if missing {
+		syncStatus = record.SyncStatus
+	}
+
+	needsOutbox := false
+	outboxPayload := string(data)
+	if syncStatus != SyncSynced {
+		var existingPayload string
+		outboxErr := idx.db.QueryRow(`SELECT payload_json FROM outbox WHERE run_id = ?`, record.ID).Scan(&existingPayload)
+		switch {
+		case errors.Is(outboxErr, sql.ErrNoRows):
+			needsOutbox = true
+			changed = true
+		case outboxErr != nil:
+			return false, outboxErr
+		case existingPayload != outboxPayload:
+			needsOutbox = true
+			changed = true
+		}
+		if syncStatus != SyncPending {
+			changed = true
+		}
+		syncStatus = SyncPending
+	}
+	record.SyncStatus = syncStatus
+
+	tx, err := idx.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if needsOutbox {
+		if _, err := tx.Exec(`
+INSERT INTO outbox (run_id, payload_json, created_at, attempts)
+VALUES (?, ?, ?, 0)
+ON CONFLICT(run_id) DO UPDATE SET payload_json = excluded.payload_json
+`, record.ID, outboxPayload, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return false, err
+		}
+	}
+	_, err = tx.Exec(`
+INSERT INTO runs (id, request_id, status, source, capability, recipe, node_id, created_at, finished_at, state_dir, sync_status)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(id) DO UPDATE SET
+  request_id = excluded.request_id,
+  status = excluded.status,
+  source = excluded.source,
+  capability = excluded.capability,
+  recipe = excluded.recipe,
+  node_id = excluded.node_id,
+  finished_at = excluded.finished_at,
+  state_dir = excluded.state_dir,
+  sync_status = excluded.sync_status
+`, record.ID, record.RequestID, record.Status, record.Source, record.Capability, record.Recipe,
+		record.NodeID, record.CreatedAt, record.FinishedAt, record.StateDir, record.SyncStatus)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return changed, nil
 }
 
 func (idx *Index) ListOutbox() ([]OutboxItem, error) {

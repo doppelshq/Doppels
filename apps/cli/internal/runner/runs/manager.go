@@ -35,6 +35,7 @@ type runIndex interface {
 	ReserveStart(record runindex.Record, key, fingerprint string, evidence runindex.ReservationEvidence) (runindex.IdempotencyRecord, bool, error)
 	GetReservation(runID string) (runindex.IdempotencyRecord, error)
 	EnqueueOutbox(runID string, payload any) error
+	CommitTerminal(record runindex.Record, payload any) (bool, error)
 	List() ([]runindex.Record, error)
 	ListPage(query runindex.ListQuery) (runindex.Page, error)
 	Close() error
@@ -437,14 +438,12 @@ func materializeOrphanedReservation(root, runDir string, record runindex.Record,
 	}
 	record.Status = "interrupted"
 	record.FinishedAt = occurred.Format(time.RFC3339Nano)
-	if err := idx.Upsert(record); err != nil {
-		return err
-	}
-	return idx.EnqueueOutbox(record.ID, map[string]any{
+	_, err = idx.CommitTerminal(record, map[string]any{
 		"id": record.ID, "requestId": record.RequestID, "status": record.Status,
 		"capability": record.Capability, "recipe": record.Recipe,
 		"createdAt": record.CreatedAt, "finishedAt": record.FinishedAt,
 	})
+	return err
 }
 
 func (m *Manager) Active() int {
@@ -477,10 +476,6 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 	if err != nil {
 		return "", internalError(err)
 	}
-	if isTerminal(record.Status) {
-		return wireStatus(record.Status), nil
-	}
-
 	detail, err := runstate.LoadWithIndex(root, runID, idx)
 	if err != nil {
 		return "", internalError(err)
@@ -492,13 +487,24 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 		// without re-emitting the event, but still broadcast it — a live
 		// subscriber that was registered before this happened must not be
 		// left waiting forever for a terminal event that already occurred.
-		wasStale := record.Status != detail.Summary.Status
+		if len(detail.Events) == 0 {
+			return "", internalError(errors.New("terminal Run has no durable terminal event"))
+		}
+		terminal := detail.Events[len(detail.Events)-1]
+		if !isTerminalEventType(terminal.Type) {
+			return "", internalError(errors.New("terminal Run's last event is not terminal"))
+		}
 		record.Status = detail.Summary.Status
-		if err := idx.Upsert(record); err != nil {
+		record.FinishedAt = terminal.OccurredAt.UTC().Format(time.RFC3339Nano)
+		repaired, err := idx.CommitTerminal(record, terminalOutboxPayload(record))
+		if err != nil {
 			return "", internalError(err)
 		}
-		if wasStale && len(detail.Events) > 0 {
-			m.broadcast(runID, payloadFromEvent(detail.Events[len(detail.Events)-1]))
+		if repaired {
+			m.broadcast(runID, payloadFromEvent(terminal))
+			if m.config.OnFinished != nil {
+				m.config.OnFinished(summaryFromRecord(root, record))
+			}
 		}
 		return wireStatus(record.Status), nil
 	}
@@ -522,21 +528,25 @@ func (m *Manager) Cancel(runID, _ string) (string, *proto.Error) {
 	// The index write must complete before any notification: a subscriber
 	// reacting to the terminal event (e.g. by calling listRuns) must never
 	// observe a stale, non-terminal index row.
-	if err := idx.Upsert(record); err != nil {
+	committed, err := idx.CommitTerminal(record, terminalOutboxPayload(record))
+	if err != nil {
 		return "", internalError(err)
 	}
-	if err := idx.EnqueueOutbox(runID, map[string]any{
+	if committed {
+		m.broadcast(runID, payloadFromEvent(event))
+		if m.config.OnFinished != nil {
+			m.config.OnFinished(summaryFromRecord(root, record))
+		}
+	}
+	return wireStatus(status), nil
+}
+
+func terminalOutboxPayload(record runindex.Record) map[string]any {
+	return map[string]any{
 		"id": record.ID, "requestId": record.RequestID, "status": record.Status,
 		"capability": record.Capability, "recipe": record.Recipe,
 		"createdAt": record.CreatedAt, "finishedAt": record.FinishedAt,
-	}); err != nil {
-		return "", internalError(err)
 	}
-	m.broadcast(runID, payloadFromEvent(event))
-	if m.config.OnFinished != nil {
-		m.config.OnFinished(summaryFromRecord(root, record))
-	}
-	return wireStatus(status), nil
 }
 
 func (m *Manager) findRecord(runID string) (string, runIndex, runindex.Record, error) {

@@ -210,16 +210,18 @@ func (r *runner) indexRun(status string, enqueueOutbox bool) error {
 	if enqueueOutbox {
 		record.FinishedAt = r.now().UTC().Format(time.RFC3339Nano)
 	}
-	if err := idx.Upsert(record); err != nil {
-		return fmt.Errorf("index Run: %w", err)
-	}
 	if enqueueOutbox {
-		if err := idx.EnqueueOutbox(record.ID, map[string]any{
+		if _, err := idx.CommitTerminal(record, map[string]any{
 			"id": record.ID, "requestId": record.RequestID, "status": record.Status,
 			"capability": record.Capability, "recipe": record.Recipe, "createdAt": record.CreatedAt,
+			"finishedAt": record.FinishedAt,
 		}); err != nil {
-			return fmt.Errorf("enqueue run sync: %w", err)
+			return fmt.Errorf("commit terminal Run: %w", err)
 		}
+		return nil
+	}
+	if err := idx.Upsert(record); err != nil {
+		return fmt.Errorf("index Run: %w", err)
 	}
 	return nil
 }

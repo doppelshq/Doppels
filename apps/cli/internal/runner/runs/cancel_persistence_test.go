@@ -2,6 +2,7 @@ package runs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync/atomic"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"doppels.so/cli/internal/runindex"
 	"doppels.so/cli/internal/runner/proto"
+	"doppels.so/cli/internal/runstate"
 )
 
 // gatingUpsertIndex wraps a real runIndex. Once armed, the next Upsert call
@@ -33,6 +35,17 @@ func (g *gatingUpsertIndex) Upsert(record runindex.Record) error {
 	return g.runIndex.Upsert(record)
 }
 
+// CommitTerminal gates the same way Upsert did: Cancel's terminal-write path
+// now persists through CommitTerminal instead of Upsert directly, so the
+// gate must sit there to still prove "no notification before persistence".
+func (g *gatingUpsertIndex) CommitTerminal(record runindex.Record, payload any) (bool, error) {
+	if g.armed.Load() {
+		close(g.entered)
+		<-g.release
+	}
+	return g.runIndex.CommitTerminal(record, payload)
+}
+
 // failingUpsertIndex wraps a real runIndex and can be told to fail every
 // Upsert call, letting tests reproduce a persistence failure deterministically
 // instead of via timing.
@@ -41,11 +54,47 @@ type failingUpsertIndex struct {
 	failUpsert atomic.Bool
 }
 
+type failingEnqueueIndex struct {
+	runIndex
+	failEnqueue atomic.Bool
+}
+
+func (f *failingEnqueueIndex) EnqueueOutbox(runID string, payload any) error {
+	if f.failEnqueue.Load() {
+		return errors.New("injected EnqueueOutbox failure")
+	}
+	return f.runIndex.EnqueueOutbox(runID, payload)
+}
+
 func (f *failingUpsertIndex) Upsert(record runindex.Record) error {
 	if f.failUpsert.Load() {
 		return errors.New("injected Upsert failure")
 	}
 	return f.runIndex.Upsert(record)
+}
+
+// CommitTerminal fails the same way Upsert did: Cancel's terminal-write path
+// persists through CommitTerminal, so the injected failure must intercept it
+// directly rather than Upsert, which CommitTerminal no longer calls.
+func (f *failingUpsertIndex) CommitTerminal(record runindex.Record, payload any) (bool, error) {
+	if f.failUpsert.Load() {
+		return false, errors.New("injected Upsert failure")
+	}
+	return f.runIndex.CommitTerminal(record, payload)
+}
+
+// CommitTerminal reproduces "index write succeeded, outbox enqueue failed"
+// by decomposing into the two separate interface calls instead of delegating
+// to the wrapped index's atomic CommitTerminal, so failEnqueue can inject a
+// failure strictly after the Run row is durable.
+func (f *failingEnqueueIndex) CommitTerminal(record runindex.Record, payload any) (bool, error) {
+	if err := f.runIndex.Upsert(record); err != nil {
+		return false, err
+	}
+	if err := f.EnqueueOutbox(record.ID, payload); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // newFailingUpsertManager builds a Manager whose openIndex wraps the real
@@ -160,7 +209,7 @@ func (s *signalingSubscriber) DeliverRunEvent(event proto.RunEventPayload) bool 
 
 func (s *signalingSubscriber) DeliverRunGap(string, int) {}
 func (s *signalingSubscriber) Defer(fn func())           { fn() }
-func (s *signalingSubscriber) NotifyClosed(func())       {}
+func (s *signalingSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 // TestCancelPendingManualRetriesAfterFailedUpsertWithoutPrematureBroadcast
 // injects an Upsert failure on the first Cancel attempt: the event must
@@ -171,6 +220,8 @@ func (s *signalingSubscriber) NotifyClosed(func())       {}
 func TestCancelPendingManualRetriesAfterFailedUpsertWithoutPrematureBroadcast(t *testing.T) {
 	manager, root, wrapped := newFailingUpsertManager(t)
 	defer manager.Close()
+	var finished atomic.Int32
+	manager.config.OnFinished = func(proto.RunSummary) { finished.Add(1) }
 
 	params := []byte(`{"workspace":` + quote(root) + `,"capability":"greet","inputs":{"count":1},"approvalMode":"interactive","idempotencyKey":"cancel-fault"}`)
 	started, rpcErr := manager.Start("cli", params)
@@ -194,6 +245,14 @@ func TestCancelPendingManualRetriesAfterFailedUpsertWithoutPrematureBroadcast(t 
 		t.Fatal("broadcast fired despite the index write failing")
 	case <-time.After(200 * time.Millisecond):
 	}
+	if got := finished.Load(); got != 0 {
+		t.Fatalf("OnFinished calls after failed Upsert = %d, want 0", got)
+	}
+	detail, err := runstate.Load(root, started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := detail.Events[len(detail.Events)-1]
 	_, _, record, err := manager.findRecord(started.RunID)
 	if err != nil {
 		t.Fatal(err)
@@ -224,6 +283,115 @@ func TestCancelPendingManualRetriesAfterFailedUpsertWithoutPrematureBroadcast(t 
 	if record.Status != "cancelled" {
 		t.Fatalf("index status after retry = %q, want cancelled", record.Status)
 	}
+	assertTerminalRepair(t, root, started.RunID, terminal.OccurredAt.Format(time.RFC3339Nano))
+	if got := finished.Load(); got != 1 {
+		t.Fatalf("OnFinished calls after repaired Upsert = %d, want 1", got)
+	}
+}
+
+// TestCancelRepairsFailedOutboxAfterRestart reproduces the other partial
+// persistence boundary: the terminal event and index update succeeded, but
+// EnqueueOutbox failed. A restart+retry must not return early merely because
+// status is terminal; it must repair outbox and emit OnFinished exactly once.
+func TestCancelRepairsFailedOutboxAfterRestart(t *testing.T) {
+	service, root := runnerWorkspace(t, false)
+	var wrapped *failingEnqueueIndex
+	manager := NewManager(context.Background(), service, Config{NodeID: "node-test"})
+	manager.openIndex = func(r string) (runIndex, error) {
+		real, err := runindex.Open(r)
+		if err != nil {
+			return nil, err
+		}
+		wrapped = &failingEnqueueIndex{runIndex: real}
+		return wrapped, nil
+	}
+	started, rpcErr := manager.Start("cli", []byte(`{"workspace":`+quote(root)+`,"capability":"greet","inputs":{"count":1},"approvalMode":"interactive","idempotencyKey":"cancel-outbox-restart"}`))
+	if rpcErr != nil {
+		t.Fatal(rpcErr)
+	}
+	waitForStatus(t, root, started.RunID, "pending_manual")
+
+	wrapped.failEnqueue.Store(true)
+	if _, rpcErr := manager.Cancel(started.RunID, ""); rpcErr == nil {
+		t.Fatal("Cancel with injected EnqueueOutbox failure should have errored")
+	}
+	detail, err := runstate.Load(root, started.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal := detail.Events[len(detail.Events)-1]
+	if err := manager.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var finished atomic.Int32
+	restarted := NewManager(context.Background(), service, Config{
+		NodeID: "node-test",
+		OnFinished: func(proto.RunSummary) {
+			finished.Add(1)
+		},
+	})
+	defer restarted.Close()
+	status, rpcErr := restarted.Cancel(started.RunID, "")
+	if rpcErr != nil || status != "cancelled" {
+		t.Fatalf("Cancel after restart = %q, %+v", status, rpcErr)
+	}
+	assertTerminalRepair(t, root, started.RunID, terminal.OccurredAt.Format(time.RFC3339Nano))
+	if got := finished.Load(); got != 1 {
+		t.Fatalf("OnFinished calls after outbox repair = %d, want 1", got)
+	}
+	status, rpcErr = restarted.Cancel(started.RunID, "")
+	if rpcErr != nil || status != "cancelled" {
+		t.Fatalf("idempotent Cancel after repair = %q, %+v", status, rpcErr)
+	}
+	if got := finished.Load(); got != 1 {
+		t.Fatalf("OnFinished calls after idempotent retry = %d, want 1", got)
+	}
+}
+
+func assertTerminalRepair(t *testing.T, root, runID, finishedAt string) {
+	t.Helper()
+	detail, err := runstate.Load(root, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminalCount := 0
+	for _, event := range detail.Events {
+		if isTerminalEventType(event.Type) {
+			terminalCount++
+		}
+	}
+	if terminalCount != 1 {
+		t.Fatalf("terminal events = %d, want 1: %#v", terminalCount, detail.Events)
+	}
+	idx, err := runindex.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idx.Close()
+	record, err := idx.Get(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Status != "cancelled" || record.FinishedAt != finishedAt {
+		t.Fatalf("repaired index = %#v, want cancelled finishedAt %q", record, finishedAt)
+	}
+	outbox, err := idx.ListOutbox()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outbox) != 1 || outbox[0].RunID != runID {
+		t.Fatalf("outbox = %#v, want exactly one item for %s", outbox, runID)
+	}
+	var payload struct {
+		FinishedAt string `json:"finishedAt"`
+	}
+	if err := json.Unmarshal([]byte(outbox[0].Payload), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.FinishedAt != finishedAt {
+		t.Fatalf("outbox finishedAt = %q, want %q", payload.FinishedAt, finishedAt)
+	}
 }
 
 type countingSubscriber struct {
@@ -236,4 +404,4 @@ func (c *countingSubscriber) DeliverRunEvent(proto.RunEventPayload) bool {
 }
 func (c *countingSubscriber) DeliverRunGap(string, int) {}
 func (c *countingSubscriber) Defer(fn func())           { fn() }
-func (c *countingSubscriber) NotifyClosed(func())       {}
+func (c *countingSubscriber) NotifyClosed(func()) func() { return func() {} }

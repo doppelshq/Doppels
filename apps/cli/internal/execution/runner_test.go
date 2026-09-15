@@ -278,6 +278,12 @@ func (i *recordingRunIndex) EnqueueOutbox(string, any) error {
 	return nil
 }
 
+func (i *recordingRunIndex) CommitTerminal(record runindex.Record, _ any) (bool, error) {
+	i.records = append(i.records, record)
+	i.enqueued++
+	return true, nil
+}
+
 func assertIndexedStatus(t *testing.T, root, runID, want string) {
 	t.Helper()
 	idx, err := runindex.Open(root)
