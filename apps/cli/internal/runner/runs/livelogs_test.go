@@ -211,6 +211,45 @@ func TestLiveLogTrailingBytesFlushedOnStepEnd(t *testing.T) {
 	}
 }
 
+// TestLiveLogDrainSplitsOversizedBinaryAndMarksTruncated reproduces a review
+// finding: the previous drain emitted one oversized proto.RunLogChunk from
+// pending bytes, which connection.DeliverRunLog rejected (returning false)
+// without removing the subscriber or signalling a gap. The drain must split
+// pending bytes that exceed MaxFrameBytes into multiple bounded frames, keep
+// the bytes verbatim (no UTF-8 retreat — the disk log retains them as-is),
+// and mark the final frame truncated.
+func TestLiveLogDrainSplitsOversizedBinaryAndMarksTruncated(t *testing.T) {
+	broadcaster := newLiveLogBroadcaster("run-id")
+	broadcaster.stepStarted("step-id")
+	sub := newFakeLogSubscriber()
+	broadcaster.addSubscriber("", sub)
+
+	pending := bytes.Repeat([]byte{0xff}, int(proto.MaxFrameBytes)+512)
+	broadcaster.write(execution.LogStreamStdout, pending)
+	broadcaster.stepEnded("step-id")
+
+	chunks := sub.snapshot()
+	if len(chunks) < 2 {
+		t.Fatalf("drain produced %d frame(s), want >= 2 (pending exceeded MaxFrameBytes)", len(chunks))
+	}
+	var got bytes.Buffer
+	for i, chunk := range chunks {
+		if chunk.Stream != string(execution.LogStreamStdout) {
+			continue
+		}
+		if len(chunk.Data) > int(proto.MaxFrameBytes) {
+			t.Fatalf("frame %d: %d bytes exceeds MaxFrameBytes=%d", i, len(chunk.Data), proto.MaxFrameBytes)
+		}
+		got.WriteString(chunk.Data)
+	}
+	if !bytes.Equal(got.Bytes(), pending) {
+		t.Fatalf("drain delivered %d bytes, want %d (verbatim)", got.Len(), len(pending))
+	}
+	if !chunks[len(chunks)-1].Truncated {
+		t.Fatal("final drained frame must be marked Truncated")
+	}
+}
+
 func waitForLogSubscriberCount(t *testing.T, manager *Manager, runID string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)

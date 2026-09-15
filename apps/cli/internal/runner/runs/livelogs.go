@@ -93,7 +93,9 @@ func (b *liveLogBroadcaster) stepEnded(stepID string) {
 
 	for _, flush := range flushes {
 		for _, entry := range subscribers {
-			entry.sub.DeliverRunLog(flush)
+			if !entry.sub.DeliverRunLog(flush) {
+				b.removeSubscriber(entry)
+			}
 		}
 	}
 	for _, entry := range ended {
@@ -118,14 +120,54 @@ func (b *liveLogBroadcaster) drainPendingLocked(stepID string) []proto.RunLogChu
 		if !ok || keyStepID != stepID {
 			continue
 		}
-		flushes = append(flushes, proto.RunLogChunk{
-			RunID: b.runID, StepID: stepID, Stream: stream,
-			Data: string(state.pending), Truncated: true,
-		})
+		flushes = append(flushes, splitDrainFrames(b.runID, stepID, stream, state.pending)...)
 		state.emitted += len(state.pending)
 		state.pending = nil
 	}
 	return flushes
+}
+
+// splitDrainFrames emits a final truncated frame from bytes that the step
+// emitted but never completed. Unlike splitRunLogFrames it does NOT retreat
+// to a UTF-8 rune boundary: the disk log retains these bytes verbatim, so
+// the live wire must too even when they are an incomplete or invalid UTF-8
+// suffix. The frame is still bounded to MaxFrameBytes; larger buffers are
+// split into multiple truncated frames.
+func splitDrainFrames(runID, stepID, stream string, data []byte) []proto.RunLogChunk {
+	if len(data) == 0 {
+		return nil
+	}
+	// envelopeOverhead is the size the JSON-RPC envelope + RunLogChunk
+	// scaffolding add on top of Data. Measure with an empty Data so the
+	// largestFittingLogPrefix binary search below has a hard upper bound on
+	// how many bytes can fit; using len(encoded) directly per probe would
+	// need a json.Marshal per step, which is fine but the binary search
+	// only narrows by 1 byte at a time on miss and can stall when every
+	// candidate exceeds the limit (see test regression that motivated this
+	// comment).
+	overheadProbe := proto.RunLogChunk{RunID: runID, StepID: stepID, Stream: stream, Data: ""}
+	overhead, err := json.Marshal(proto.NewNotification("v1/runLog", overheadProbe))
+	if err != nil {
+		return nil
+	}
+	budget := proto.MaxFrameBytes - len(overhead)
+	if budget <= 0 {
+		return nil
+	}
+
+	var result []proto.RunLogChunk
+	for len(data) > 0 {
+		take := len(data)
+		if take > budget {
+			take = budget
+		}
+		result = append(result, proto.RunLogChunk{
+			RunID: runID, StepID: stepID, Stream: stream, Data: string(data[:take]),
+		})
+		data = data[take:]
+	}
+	result[len(result)-1].Truncated = true
+	return result
 }
 
 func (b *liveLogBroadcaster) write(stream execution.LogStream, chunk []byte) {
@@ -308,10 +350,7 @@ func (b *liveLogBroadcaster) drainAllPendingLocked() []proto.RunLogChunk {
 		if !ok {
 			continue
 		}
-		flushes = append(flushes, proto.RunLogChunk{
-			RunID: b.runID, StepID: stepID, Stream: stream,
-			Data: string(state.pending), Truncated: true,
-		})
+		flushes = append(flushes, splitDrainFrames(b.runID, stepID, stream, state.pending)...)
 		state.emitted += len(state.pending)
 		state.pending = nil
 	}
