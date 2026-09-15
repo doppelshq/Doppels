@@ -3,6 +3,8 @@ package conformance
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -12,6 +14,18 @@ import (
 	"doppels.so/cli/internal/runner/proto"
 	"doppels.so/cli/internal/runner/runs"
 )
+
+// mustMarshalJSON marshals v as compact JSON or fails the test. Used to
+// assemble a golden after selective redaction. (mustMarshal is taken by
+// version_skew_test.go.)
+func mustMarshalJSON(t *testing.T, v any) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
 
 // startGreetRun drives a full auto-approval startRun to completion and
 // returns its RunID, for golden tests further down the Run lifecycle
@@ -67,8 +81,30 @@ func TestGoldenSubscribeNode(t *testing.T) {
 
 func TestGoldenListWorkspaces(t *testing.T) {
 	h := newHarness(t, false)
+	// The harness's pre-registered workspace is not a git working tree by
+	// default (project.Init does not run git init). Initialize git here so
+	// the gitBranch assertion below exercises a real value, not a
+	// blanket-redacted null. Matches TestGoldenAddWorkspace's fixture.
+	initGitRepo(t, h.root)
 	client := dialInitialized(t, h)
 	response := client.call("5", "v1/listWorkspaces", map[string]any{})
+
+	// Decode the pre-redaction JSON to verify gitBranch is a real
+	// non-null string before the harness's blanket redaction hides it.
+	raw := []map[string]any{}
+	if err := json.Unmarshal(rawResult(t, response), &raw); err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) != 1 {
+		t.Fatalf("listWorkspaces returned %d entries, want 1", len(raw))
+	}
+	if raw[0]["gitBranch"] == nil {
+		t.Fatalf("listWorkspaces entry gitBranch = nil; expected a non-nil branch string for a workspace with a real git repo")
+	}
+	if _, ok := raw[0]["gitBranch"].(string); !ok {
+		t.Fatalf("listWorkspaces entry gitBranch = %T, want string", raw[0]["gitBranch"])
+	}
+
 	assertGolden(t, rawResult(t, response), `[{"capabilities":1,"gitBranch":"<REDACTED>","health":"ok","recipes":0,"root":"<REDACTED>","space":"workspace"}]`)
 }
 
@@ -434,12 +470,40 @@ func tryObserveBusyDuringShutdown(t *testing.T) bool {
 	return racingResponse != nil && racingResponse.Err != nil && racingResponse.Err.Code == proto.CodeBusy
 }
 
+// initGitRepo creates a fresh git working tree at root with a single
+// commit on branch "main" so the Runner's gitBranch computation returns a
+// non-nil value. project.Init alone is not enough — it only creates the
+// .doppels directory layout and never runs git. Used by the golden
+// conformance tests to exercise gitBranch as a real field rather than a
+// blanket-redacted one.
+func initGitRepo(t *testing.T, root string) {
+	t.Helper()
+	cmds := [][]string{
+		{"init", "-q", "-b", "main"},
+		{"config", "user.email", "ci@doppels.test"},
+		{"config", "user.name", "ci"},
+		{"commit", "--allow-empty", "-q", "-m", "initial"},
+	}
+	for _, args := range cmds {
+		cmd := exec.Command("git", append([]string{"-C", root, "--no-optional-locks"}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_PAGER=cat")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
 // TestGoldenAddWorkspace drives v1/addWorkspace over the wire end-to-end.
 // The harness's newHarness already pre-registers its own workspace via Go
 // for the convenience of the other golden tests; here we create a second
 // valid workspace on disk and assert the wire contract of addWorkspace —
 // the response envelope, the WorkspaceSummary shape, and that the new
 // workspace shows up in v1/listWorkspaces immediately after.
+//
+// The new workspace has a real git working tree so gitBranch is a genuine
+// non-null string. The harness's blanket redaction would otherwise hide a
+// regression that always returns nil; capturing the pre-redaction value
+// in the test ensures the field is actually populated.
 func TestGoldenAddWorkspace(t *testing.T) {
 	h := newHarness(t, false)
 	client := dialInitialized(t, h)
@@ -448,15 +512,29 @@ func TestGoldenAddWorkspace(t *testing.T) {
 	if _, err := project.Init(additionalRoot); err != nil {
 		t.Fatal(err)
 	}
+	initGitRepo(t, additionalRoot)
 
 	response := client.call("add-1", "v1/addWorkspace", map[string]any{"root": additionalRoot})
 	if response.Err != nil {
 		t.Fatalf("addWorkspace returned error: %+v", response.Err)
 	}
-	// The Runner derives the Space name from the directory basename (here
-	// `extra`). project.Init creates an initial commit so gitBranch is a
-	// non-empty string and the redactor rewrites it to "<REDACTED>".
-	assertGolden(t, rawResult(t, response), `{"capabilities":0,"gitBranch":"<REDACTED>","health":"ok","recipes":0,"root":"<REDACTED>","space":"extra"}`)
+
+	// Decode the response so we can verify gitBranch is a real, non-null
+	// value BEFORE the harness's blanket redaction hides it. Then assert
+	// the rest of the envelope shape against the golden.
+	summary := map[string]any{}
+	if err := json.Unmarshal(rawResult(t, response), &summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary["gitBranch"] == nil {
+		t.Fatalf("addWorkspace summary.gitBranch = nil; expected a non-nil branch string for a workspace with a real git repo. The Runner's gitBranch() in apps/cli/internal/runner/workspace/summary.go is broken (or project.Init is not enough; ensure the workspace is a git working tree).")
+	}
+	if _, ok := summary["gitBranch"].(string); !ok {
+		t.Fatalf("addWorkspace summary.gitBranch = %T, want string", summary["gitBranch"])
+	}
+	summary["gitBranch"] = "<REDACTED>" // redact only after the real-value assertion
+	summary["root"] = "<REDACTED>"
+	assertGolden(t, mustMarshalJSON(t, summary), `{"capabilities":0,"gitBranch":"<REDACTED>","health":"ok","recipes":0,"root":"<REDACTED>","space":"extra"}`)
 
 	listResponse := client.call("list-1", "v1/listWorkspaces", map[string]any{})
 	if listResponse.Err != nil {
@@ -495,6 +573,7 @@ func TestGoldenRemoveWorkspace(t *testing.T) {
 	if _, err := project.Init(additionalRoot); err != nil {
 		t.Fatal(err)
 	}
+	initGitRepo(t, additionalRoot)
 	if response := client.call("add-1", "v1/addWorkspace", map[string]any{"root": additionalRoot}); response.Err != nil {
 		t.Fatalf("addWorkspace: %+v", response.Err)
 	}
