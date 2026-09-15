@@ -48,6 +48,12 @@ type fakeDaemon struct {
 	statusResult proto.NodeStatus
 	statusErr    error
 
+	// notificationsDropped is the value the fake client returns from
+	// NotificationsDropped. Tests increment it via the public field to
+	// simulate transport-level drops without local overflow or a server
+	// runEventGap.
+	notificationsDropped uint64
+
 	closed bool
 }
 
@@ -116,6 +122,10 @@ func (f *fakeDaemon) ListRuns(ctx context.Context, params runnerclient.ListRunsP
 
 func (f *fakeDaemon) SetNotificationHandler(handler func(runnerclient.Notification)) {
 	f.notificationFunc = handler
+}
+
+func (f *fakeDaemon) NotificationsDropped() uint64 {
+	return f.notificationsDropped
 }
 
 func (f *fakeDaemon) Close() error {
@@ -479,5 +489,78 @@ func TestNodeUpReportsRunningDaemon(t *testing.T) {
 	}
 	if !daemon.closed {
 		t.Fatal("daemon client must be closed after the command finishes")
+	}
+}
+
+// TestRunSwitchesToCanonicalPollingOnTransportDrops pins a review finding:
+// when the runnerclient transport drops notifications (backpressure overflow
+// at the read-loop boundary), the CLI must not keep waiting on the live
+// notification channel forever. Instead, observing an increase in the
+// drop counter must switch the stream to canonical GetRun polling until
+// the run reaches a terminal state, without resubscribing (the server-side
+// subscription is still alive — only local delivery has fallen behind).
+func TestRunSwitchesToCanonicalPollingOnTransportDrops(t *testing.T) {
+	app, _, _ := daemonFixtureApp(t)
+	daemon := &fakeDaemon{
+		startRunID: "run-transport-drop",
+		subscribeEvents: []proto.RunEventPayload{
+			{RunID: "run-transport-drop", Sequence: 0, Type: "run_created", OccurredAt: "2026-09-15T12:00:00Z"},
+		},
+		// Pre-load the GetRun recovery events so the canonical poll sees a
+		// terminal event on its first call. The poll uses GetRun with
+		// includeEvents=true; the second GetRun (final) sees includeEvents=false
+		// and returns the terminal status.
+		recoveryEvents: []proto.RunEventPayload{
+			{RunID: "run-transport-drop", Sequence: 1, Type: "run_succeeded", OccurredAt: "2026-09-15T12:00:01Z"},
+		},
+		// Override the default "running" status returned with includeEvents=true
+		// so pollCanonical recognises the run as terminal on its first call.
+		getRunResults: []runnerclient.GetRunResult{
+			{Summary: proto.RunSummary{RunID: "run-transport-drop", Status: "succeeded", Capability: "greet"}, Events: nil},
+		},
+	}
+	// Simulate a transport-level drop occurring AFTER the CLI has captured
+	// its initial drop baseline. We capture the baseline first (the fake
+	// returns 0 at this point), then schedule the increment to land on a
+	// later poller tick so the CLI observes the increase.
+	initialDropped := daemon.NotificationsDropped()
+	if initialDropped != 0 {
+		t.Fatalf("initial drop count = %d, want 0", initialDropped)
+	}
+	daemon.subscribeHooks = []func(){
+		func() {
+			// Increment after a delay so the CLI's poller (which captures
+			// its baseline right after SubscribeRun returns) sees the change.
+			go func() {
+				time.Sleep(300 * time.Millisecond)
+				daemon.notificationsDropped = 1
+			}()
+		},
+	}
+	app.DialRunner = func(ctx context.Context, opts runnerclient.Options) (daemonClient, error) {
+		return daemon, nil
+	}
+
+	done := make(chan int, 1)
+	go func() { done <- app.Run([]string{"run", "capability/greet", "--input", "name=Ada"}) }()
+	select {
+	case code := <-done:
+		if code != ExitSuccess {
+			t.Fatalf("exit = %d, daemon.started = %d, getRun calls = %d, subscribe calls = %v, started: %+v, stderr: %s",
+				code, len(daemon.started), daemon.getRunCalls, daemon.subscribeCalls, daemon.started, app.Stderr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Logf("test timed out; daemon.started=%d getRunCalls=%d subscribeCalls=%v notificationsDropped=%d stderr=%s",
+			len(daemon.started), daemon.getRunCalls, daemon.subscribeCalls, daemon.notificationsDropped, app.Stderr)
+		t.Fatal("TestRunSwitchesToCanonicalPollingOnTransportDrops timed out")
+	}
+	// No second SubscribeRun for this run (transport drop is not a gap).
+	if len(daemon.subscribeCalls) > 1 {
+		t.Fatalf("transport drop must not trigger resubscribe; subscribe calls = %v", daemon.subscribeCalls)
+	}
+	// At least one GetRun call was made for the canonical-poll recovery,
+	// in addition to the final one.
+	if daemon.getRunCalls < 1 {
+		t.Fatalf("expected canonical GetRun polling after transport drop; got %d", daemon.getRunCalls)
 	}
 }

@@ -29,6 +29,7 @@ type daemonClient interface {
 	GetNodeStatus(ctx context.Context) (proto.NodeStatus, error)
 	ListRuns(ctx context.Context, params runnerclient.ListRunsParams) (runnerclient.ListRunsResult, error)
 	SetNotificationHandler(handler func(runnerclient.Notification))
+	NotificationsDropped() uint64
 	Close() error
 }
 
@@ -368,6 +369,34 @@ func (app *App) streamDaemonRun(
 			}
 		}()
 
+		// transportDrops tracks notifications the runnerclient read loop
+		// dropped at the transport boundary (backpressure overflow). Unlike
+		// localOverflow (handler-driven) and resync (daemon-driven), there
+		// is no signal channel for transport drops — the only way to know
+		// is to poll the counter. When it increases, switch to canonical
+		// GetRun polling without resubscribing (the server-side subscription
+		// is still alive; only local delivery has fallen behind).
+		transportDropSignal := make(chan struct{}, 1)
+		lastDropped := client.NotificationsDropped()
+		go func() {
+			ticker := time.NewTicker(200 * time.Millisecond)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-watchdogCtx.Done():
+					return
+				case <-ticker.C:
+					if client.NotificationsDropped() > lastDropped {
+						lastDropped = client.NotificationsDropped()
+						select {
+						case transportDropSignal <- struct{}{}:
+						default:
+						}
+					}
+				}
+			}
+		}()
+
 	loop:
 		for {
 			select {
@@ -422,6 +451,14 @@ func (app *App) streamDaemonRun(
 			case <-watchdogErr:
 				fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
 				return ExitOperational
+			case <-transportDropSignal:
+				terminal, code := pollCanonical()
+				if code != ExitSuccess {
+					return code
+				}
+				if terminal {
+					break loop
+				}
 			case <-ctx.Done():
 				fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
 				return ExitOperational
