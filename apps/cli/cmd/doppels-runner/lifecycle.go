@@ -15,6 +15,7 @@ type lifecycleOptions struct {
 	ConfigDir  string
 	SocketPath string
 	Token      string
+	UID        int
 	Enable     bool
 	StartNow   bool
 }
