@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"unicode/utf8"
 
@@ -74,6 +75,7 @@ func (b *liveLogBroadcaster) stepEnded(stepID string) {
 		b.stepID = ""
 	}
 	b.endedSteps[stepID] = struct{}{}
+	flushes := b.drainPendingLocked(stepID)
 	var ended []*liveLogSubscriber
 	for entry := range b.subscribers {
 		if entry.stepID == stepID {
@@ -81,10 +83,49 @@ func (b *liveLogBroadcaster) stepEnded(stepID string) {
 			ended = append(ended, entry)
 		}
 	}
+	subscribers := make([]*liveLogSubscriber, 0, len(b.subscribers))
+	for entry := range b.subscribers {
+		if entry.stepID == "" || entry.stepID == stepID {
+			subscribers = append(subscribers, entry)
+		}
+	}
 	b.mu.Unlock()
+
+	for _, flush := range flushes {
+		for _, entry := range subscribers {
+			entry.sub.DeliverRunLog(flush)
+		}
+	}
 	for _, entry := range ended {
+		for _, flush := range flushes {
+			entry.sub.DeliverRunLog(flush)
+		}
 		entry.stop()
 	}
+}
+
+// drainPendingLocked flushes any buffered incomplete UTF-8 suffix for streams
+// belonging to stepID so the live wire keeps byte-for-byte parity with the
+// on-disk log once the step can no longer receive further writes. Must be
+// called with b.mu held.
+func (b *liveLogBroadcaster) drainPendingLocked(stepID string) []proto.RunLogChunk {
+	var flushes []proto.RunLogChunk
+	for key, state := range b.streams {
+		if len(state.pending) == 0 || state.truncated {
+			continue
+		}
+		keyStepID, stream, ok := splitStreamKey(key)
+		if !ok || keyStepID != stepID {
+			continue
+		}
+		flushes = append(flushes, proto.RunLogChunk{
+			RunID: b.runID, StepID: stepID, Stream: stream,
+			Data: string(state.pending), Truncated: true,
+		})
+		state.emitted += len(state.pending)
+		state.pending = nil
+	}
+	return flushes
 }
 
 func (b *liveLogBroadcaster) write(stream execution.LogStream, chunk []byte) {
@@ -189,6 +230,11 @@ func largestFittingLogPrefix(runID, stepID, stream string, data []byte) int {
 	return best
 }
 
+func splitStreamKey(key string) (stepID, stream string, ok bool) {
+	stepID, stream, found := strings.Cut(key, ":")
+	return stepID, stream, found
+}
+
 func completeUTF8Prefix(data []byte) int {
 	end := len(data)
 	for end > 0 {
@@ -235,6 +281,7 @@ func (b *liveLogBroadcaster) close() {
 		return
 	}
 	b.closed = true
+	flushes := b.drainAllPendingLocked()
 	entries := make([]*liveLogSubscriber, 0, len(b.subscribers))
 	for entry := range b.subscribers {
 		entries = append(entries, entry)
@@ -242,8 +289,33 @@ func (b *liveLogBroadcaster) close() {
 	b.subscribers = make(map[*liveLogSubscriber]struct{})
 	b.mu.Unlock()
 	for _, entry := range entries {
+		for _, flush := range flushes {
+			entry.sub.DeliverRunLog(flush)
+		}
 		entry.stop()
 	}
+}
+
+// drainAllPendingLocked flushes every stream's buffered incomplete UTF-8
+// suffix when the run itself ends. Must be called with b.mu held.
+func (b *liveLogBroadcaster) drainAllPendingLocked() []proto.RunLogChunk {
+	var flushes []proto.RunLogChunk
+	for key, state := range b.streams {
+		if len(state.pending) == 0 || state.truncated {
+			continue
+		}
+		stepID, stream, ok := splitStreamKey(key)
+		if !ok {
+			continue
+		}
+		flushes = append(flushes, proto.RunLogChunk{
+			RunID: b.runID, StepID: stepID, Stream: stream,
+			Data: string(state.pending), Truncated: true,
+		})
+		state.emitted += len(state.pending)
+		state.pending = nil
+	}
+	return flushes
 }
 
 func (b *liveLogBroadcaster) isActive(stepID string) bool {

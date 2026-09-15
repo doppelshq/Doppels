@@ -189,6 +189,28 @@ func TestLiveLogStreamPreservesUTF8SplitAcrossWrites(t *testing.T) {
 	}
 }
 
+func TestLiveLogTrailingBytesFlushedOnStepEnd(t *testing.T) {
+	broadcaster := newLiveLogBroadcaster("run-id")
+	broadcaster.stepStarted("step-id")
+	sub := newFakeLogSubscriber()
+	broadcaster.addSubscriber("", sub)
+
+	want := []byte("😀")
+	broadcaster.write(execution.LogStreamStdout, want[:2])
+	broadcaster.stepEnded("step-id")
+
+	var got bytes.Buffer
+	for _, chunk := range sub.snapshot() {
+		if chunk.Stream != string(execution.LogStreamStdout) {
+			continue
+		}
+		got.WriteString(chunk.Data)
+	}
+	if !bytes.Equal(got.Bytes(), want[:2]) {
+		t.Fatalf("bytes delivered to subscriber after step end = %x, want %x", got.Bytes(), want[:2])
+	}
+}
+
 func waitForLogSubscriberCount(t *testing.T, manager *Manager, runID string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
