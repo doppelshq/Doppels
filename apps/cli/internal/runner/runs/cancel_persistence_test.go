@@ -207,8 +207,8 @@ func (s *signalingSubscriber) DeliverRunEvent(event proto.RunEventPayload) bool 
 	return true
 }
 
-func (s *signalingSubscriber) DeliverRunGap(string, int) {}
-func (s *signalingSubscriber) Defer(fn func())           { fn() }
+func (s *signalingSubscriber) DeliverRunGap(string, int)  {}
+func (s *signalingSubscriber) Defer(fn func())            { fn() }
 func (s *signalingSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 // TestCancelPendingManualRetriesAfterFailedUpsertWithoutPrematureBroadcast
@@ -402,6 +402,6 @@ func (c *countingSubscriber) DeliverRunEvent(proto.RunEventPayload) bool {
 	c.events <- struct{}{}
 	return true
 }
-func (c *countingSubscriber) DeliverRunGap(string, int) {}
-func (c *countingSubscriber) Defer(fn func())           { fn() }
+func (c *countingSubscriber) DeliverRunGap(string, int)  {}
+func (c *countingSubscriber) Defer(fn func())            { fn() }
 func (c *countingSubscriber) NotifyClosed(func()) func() { return func() {} }

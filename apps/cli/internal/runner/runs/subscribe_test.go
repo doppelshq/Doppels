@@ -41,7 +41,7 @@ func (f *fakeSubscriber) DeliverRunGap(runID string, fromSequence int) {
 	f.notify <- struct{}{}
 }
 
-func (f *fakeSubscriber) Defer(fn func())     { fn() }
+func (f *fakeSubscriber) Defer(fn func())            { fn() }
 func (f *fakeSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 func (f *fakeSubscriber) waitForEvents(t *testing.T, n int) []proto.RunEventPayload {
@@ -334,7 +334,7 @@ func (r *rejectingSubscriber) DeliverRunGap(_ string, fromSequence int) {
 	r.notify <- struct{}{}
 }
 
-func (r *rejectingSubscriber) Defer(fn func())     { fn() }
+func (r *rejectingSubscriber) Defer(fn func())            { fn() }
 func (r *rejectingSubscriber) NotifyClosed(func()) func() { return func() {} }
 
 func (r *rejectingSubscriber) waitForGap(t *testing.T) int {
