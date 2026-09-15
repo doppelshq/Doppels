@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -228,6 +229,95 @@ func TestNotificationDuringInFlightCallStillCompletes(t *testing.T) {
 	mu.Unlock()
 	if n == 0 {
 		t.Fatal("expected at least one notification to have been dispatched")
+	}
+}
+
+func TestNotificationHandlerCanCallPing(t *testing.T) {
+	ts := startTestServer(t)
+	client := dialTest(t, ts.socketPath)
+	var snapshot proto.NodeStatus
+	if err := client.Call(context.Background(), "v1/subscribeNode", map[string]any{}, &snapshot); err != nil {
+		t.Fatalf("subscribeNode: %v", err)
+	}
+
+	done := make(chan error, 1)
+	client.SetNotificationHandler(func(runnerclient.Notification) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		_, err := client.Ping(ctx)
+		done <- err
+	})
+	ts.srv.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventWorkspaceChanged})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Ping from notification handler: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Ping from notification handler deadlocked")
+	}
+}
+
+func TestNotificationHandlerCanCallDecideApproval(t *testing.T) {
+	ts := startTestServer(t)
+	client := dialTest(t, ts.socketPath)
+	var snapshot proto.NodeStatus
+	if err := client.Call(context.Background(), "v1/subscribeNode", map[string]any{}, &snapshot); err != nil {
+		t.Fatalf("subscribeNode: %v", err)
+	}
+
+	done := make(chan error, 1)
+	client.SetNotificationHandler(func(runnerclient.Notification) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		done <- client.DecideApproval(ctx, "missing-run", "step1", "approve")
+	})
+	ts.srv.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventApprovalPending})
+
+	select {
+	case err := <-done:
+		if err == nil || errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("DecideApproval from notification handler = %v, want prompt RPC error without deadlock", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("DecideApproval from notification handler deadlocked")
+	}
+}
+
+func TestNotificationHandlerCanCloseClient(t *testing.T) {
+	ts := startTestServer(t)
+	client, err := runnerclient.Dial(context.Background(), runnerclient.Options{
+		SocketPath: ts.socketPath, Token: testToken,
+	})
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	var snapshot proto.NodeStatus
+	if err := client.Call(context.Background(), "v1/subscribeNode", map[string]any{}, &snapshot); err != nil {
+		t.Fatalf("subscribeNode: %v", err)
+	}
+
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	client.SetNotificationHandler(func(runnerclient.Notification) {
+		calls.Add(1)
+		done <- client.Close()
+	})
+	ts.srv.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventWorkspaceChanged})
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close from notification handler: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close from notification handler deadlocked")
+	}
+	ts.srv.EmitNodeEvent(proto.NodeEvent{Kind: proto.NodeEventWorkspaceChanged})
+	time.Sleep(50 * time.Millisecond)
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("notification handler calls after Close = %d, want 1 total", got)
 	}
 }
 

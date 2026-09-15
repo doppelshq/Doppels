@@ -42,9 +42,11 @@ type Client struct {
 
 	notifyHandler atomic.Pointer[func(Notification)]
 
-	closeOnce sync.Once
-	closeErr  error
-	readDone  chan struct{}
+	closeOnce     sync.Once
+	closeErr      error
+	closing       chan struct{}
+	readDone      chan struct{}
+	notifications chan Notification
 }
 
 type pendingResult struct {
@@ -73,16 +75,19 @@ func Dial(ctx context.Context, opts Options) (*Client, error) {
 	}
 
 	client := &Client{
-		conn:     conn,
-		encoder:  proto.NewEncoder(conn),
-		decoder:  proto.NewDecoder(conn),
-		pending:  make(map[string]chan pendingResult),
-		readDone: make(chan struct{}),
+		conn:          conn,
+		encoder:       proto.NewEncoder(conn),
+		decoder:       proto.NewDecoder(conn),
+		pending:       make(map[string]chan pendingResult),
+		closing:       make(chan struct{}),
+		readDone:      make(chan struct{}),
+		notifications: make(chan Notification, 256),
 	}
 	if resolved.OnNotification != nil {
 		client.SetNotificationHandler(resolved.OnNotification)
 	}
 	go client.readLoop()
+	go client.notificationLoop()
 
 	var params proto.InitializeParams
 	params.Token = resolved.Token
@@ -252,7 +257,10 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 // message without a method is always malformed, which would silently drop
 // every RPC response.
 func (c *Client) readLoop() {
-	defer close(c.readDone)
+	defer func() {
+		close(c.notifications)
+		close(c.readDone)
+	}()
 	for {
 		frame, err := c.decoder.ReadFrame()
 		if err != nil {
@@ -270,7 +278,12 @@ func (c *Client) readLoop() {
 			return
 		}
 		if envelope.Method != "" {
-			c.dispatchNotification(envelope.Method, envelope.Params)
+			select {
+			case c.notifications <- Notification{Method: envelope.Method, Params: envelope.Params}:
+			case <-c.closing:
+				c.failAllPending()
+				return
+			}
 			continue
 		}
 		// It's an RPC response.
@@ -290,6 +303,25 @@ func (c *Client) readLoop() {
 		}
 		result, _ := response.Result.(json.RawMessage)
 		ch <- pendingResult{result: result, err: response.Err}
+	}
+}
+
+func (c *Client) notificationLoop() {
+	for {
+		select {
+		case <-c.closing:
+			return
+		case notification, ok := <-c.notifications:
+			if !ok {
+				return
+			}
+			select {
+			case <-c.closing:
+				return
+			default:
+			}
+			c.dispatchNotification(notification.Method, notification.Params)
+		}
 	}
 }
 
@@ -316,6 +348,7 @@ func (c *Client) failAllPending() {
 // ErrClosed. Idempotent.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
+		close(c.closing)
 		c.closeErr = c.conn.Close()
 		<-c.readDone
 		// readLoop's own failAllPending already fires as ReadFrame returns

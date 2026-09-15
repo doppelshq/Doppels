@@ -22,13 +22,16 @@ func TestCloseFailsInFlightPendingCall(t *testing.T) {
 	defer serverConn.Close()
 
 	client := &Client{
-		conn:     clientConn,
-		encoder:  proto.NewEncoder(clientConn),
-		decoder:  proto.NewDecoder(clientConn),
-		pending:  make(map[string]chan pendingResult),
-		readDone: make(chan struct{}),
+		conn:          clientConn,
+		encoder:       proto.NewEncoder(clientConn),
+		decoder:       proto.NewDecoder(clientConn),
+		pending:       make(map[string]chan pendingResult),
+		closing:       make(chan struct{}),
+		readDone:      make(chan struct{}),
+		notifications: make(chan Notification, 256),
 	}
 	go client.readLoop()
+	go client.notificationLoop()
 
 	// Drain (never answer) whatever the client writes.
 	drained := make(chan struct{})
