@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 )
 
 // lifecycleOptions is the fully resolved service definition shared by the
@@ -29,6 +31,28 @@ func (o lifecycleOptions) programArguments() []string {
 		args = append(args, "--token="+o.Token)
 	}
 	return args
+}
+
+func writeServiceFile(path string, contents []byte, mode os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "doppels-runner.*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if _, err := tmp.Write(contents); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 type commandRunner interface {

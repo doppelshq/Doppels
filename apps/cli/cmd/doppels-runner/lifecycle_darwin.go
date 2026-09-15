@@ -89,11 +89,8 @@ func installLifecycle(opts lifecycleOptions, commands commandRunner) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create LaunchAgents directory: %w", err)
 	}
-	if err := os.WriteFile(path, plist, 0o644); err != nil {
+	if err := writeServiceFile(path, plist, 0o644); err != nil {
 		return fmt.Errorf("write launchd plist %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		return fmt.Errorf("set launchd plist permissions %s: %w", path, err)
 	}
 	domain := launchdDomain(opts)
 	if opts.Enable {

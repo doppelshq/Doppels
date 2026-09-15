@@ -67,11 +67,8 @@ func installLifecycle(opts lifecycleOptions, commands commandRunner) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create systemd user unit directory: %w", err)
 	}
-	if err := os.WriteFile(path, unit, 0o644); err != nil {
+	if err := writeServiceFile(path, unit, 0o644); err != nil {
 		return fmt.Errorf("write systemd user unit %s: %w", path, err)
-	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		return fmt.Errorf("set systemd user unit permissions %s: %w", path, err)
 	}
 	if err := runSystemctl(commands, "daemon-reload"); err != nil {
 		return err

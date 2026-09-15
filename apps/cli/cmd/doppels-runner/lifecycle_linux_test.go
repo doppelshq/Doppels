@@ -3,10 +3,13 @@
 package main
 
 import (
+	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -97,6 +100,109 @@ func TestSystemdInstallAndUninstallSequence(t *testing.T) {
 		}
 	}
 }
+
+func TestConcurrentSystemdInstallsNeverExposeTornUnit(t *testing.T) {
+	configHome := t.TempDir()
+	base := lifecycleOptions{
+		Executable: "/usr/local/bin/doppels-runner",
+		HomeDir:    "/home/alice",
+		ConfigHome: configHome,
+	}
+	optsA := base
+	optsA.ConfigDir = "/tmp/" + strings.Repeat("a", 4<<20)
+	optsA.Enable = true
+	optsB := base
+	optsB.ConfigDir = "/tmp/" + strings.Repeat("b", 2<<20)
+	optsB.StartNow = true
+	wantA, err := renderSystemdUnit(optsA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantB, err := renderSystemdUnit(optsB)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	path := systemdUnitPath(base)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, wantA, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	readerReady := make(chan struct{})
+	stopReader := make(chan struct{})
+	readerDone := make(chan struct{})
+	unexpected := make(chan string, 1)
+	go observeWholeServiceFiles(path, wantA, wantB, readerReady, stopReader, readerDone, unexpected)
+	<-readerReady
+
+	errCh := make(chan error, 2)
+	var writers sync.WaitGroup
+	for _, opts := range []lifecycleOptions{optsA, optsB} {
+		opts := opts
+		writers.Add(1)
+		go func() {
+			defer writers.Done()
+			<-start
+			errCh <- installLifecycle(opts, successfulCommandRunner{})
+		}()
+	}
+	close(start)
+	writers.Wait()
+	close(stopReader)
+	<-readerDone
+	for range 2 {
+		if err := <-errCh; err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case got := <-unexpected:
+		t.Fatal(got)
+	default:
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, wantA) && !bytes.Equal(got, wantB) {
+		t.Fatalf("final unit is torn: got %d bytes, want %d or %d", len(got), len(wantA), len(wantB))
+	}
+}
+
+func observeWholeServiceFiles(path string, wantA, wantB []byte, ready chan<- struct{}, stop <-chan struct{}, done chan<- struct{}, unexpected chan<- string) {
+	defer close(done)
+	close(ready)
+	for {
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			select {
+			case unexpected <- "read service file during install: " + err.Error():
+			default:
+			}
+			return
+		}
+		if !bytes.Equal(got, wantA) && !bytes.Equal(got, wantB) {
+			select {
+			case unexpected <- "observed torn service file with " + fmt.Sprint(len(got)) + " bytes":
+			default:
+			}
+			return
+		}
+	}
+}
+
+type successfulCommandRunner struct{}
+
+func (successfulCommandRunner) Run(string, ...string) error { return nil }
 
 type commandCall struct {
 	name string
