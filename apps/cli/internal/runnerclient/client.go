@@ -97,7 +97,9 @@ func Dial(ctx context.Context, opts Options) (*Client, error) {
 	}{InitializeParams: params, ProtocolVersion: resolved.ProtocolVersion}
 
 	var result proto.InitializeResult
-	if err := client.Call(ctx, "v1/initialize", wireParams, &result); err != nil {
+	dialCtx, cancel := context.WithTimeout(ctx, resolved.HandshakeTimeout)
+	defer cancel()
+	if err := client.Call(dialCtx, "v1/initialize", wireParams, &result); err != nil {
 		var rpcErr *proto.Error
 		if errors.As(err, &rpcErr) && rpcErr.Code == proto.CodeVersionMismatch {
 			supported := resolved.ProtocolVersion

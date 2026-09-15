@@ -3,7 +3,9 @@ package runnerclient_test
 import (
 	"context"
 	"errors"
+	"net"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -50,6 +52,63 @@ func TestDialNoSocketReturnsErrNotRunning(t *testing.T) {
 	})
 	if !errors.Is(err, runnerclient.ErrNotRunning) {
 		t.Fatalf("err = %v, want ErrNotRunning", err)
+	}
+}
+
+func TestDialHandshakeTimeoutClosesUnresponsiveConnection(t *testing.T) {
+	socketPath := filepath.Join(t.TempDir(), "runner.sock")
+	listener, err := net.Listen("unix", socketPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { listener.Close() })
+
+	requestRead := make(chan struct{})
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		decoder := proto.NewDecoder(conn)
+		if _, err := decoder.ReadFrame(); err != nil {
+			serverDone <- err
+			return
+		}
+		close(requestRead)
+		_, err = decoder.ReadFrame()
+		serverDone <- err
+	}()
+
+	parentCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	startedAt := time.Now()
+	_, err = runnerclient.Dial(parentCtx, runnerclient.Options{
+		SocketPath:       socketPath,
+		Token:            testToken,
+		HandshakeTimeout: 200 * time.Millisecond,
+	})
+	elapsed := time.Since(startedAt)
+	if err == nil || !strings.Contains(err.Error(), "runnerclient: initialize") || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Dial error = %v, want clear initialize deadline error", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Dial took %s, want HandshakeTimeout near 200ms", elapsed)
+	}
+	select {
+	case <-requestRead:
+	default:
+		t.Fatal("server did not read initialize request")
+	}
+	select {
+	case err := <-serverDone:
+		if err == nil {
+			t.Fatal("server read unexpectedly succeeded after Dial returned")
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("client connection was not closed after handshake timeout")
 	}
 }
 
