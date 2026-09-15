@@ -136,6 +136,70 @@ func TestSystemdInstallAndUninstallSequence(t *testing.T) {
 	}
 }
 
+func TestSystemdInstallFlagMatrix(t *testing.T) {
+	tests := []struct {
+		name     string
+		enable   bool
+		startNow bool
+		want     []commandCall
+	}{
+		{
+			name: "install",
+			want: []commandCall{{name: "systemctl", args: []string{"--user", "daemon-reload"}}},
+		},
+		{
+			name:   "enable",
+			enable: true,
+			want: []commandCall{
+				{name: "systemctl", args: []string{"--user", "daemon-reload"}},
+				{name: "systemctl", args: []string{"--user", "enable", systemdUnitName}},
+			},
+		},
+		{
+			name:     "start now",
+			startNow: true,
+			want: []commandCall{
+				{name: "systemctl", args: []string{"--user", "daemon-reload"}},
+				{name: "systemctl", args: []string{"--user", "start", systemdUnitName}},
+			},
+		},
+		{
+			name:     "enable and start now",
+			enable:   true,
+			startNow: true,
+			want: []commandCall{
+				{name: "systemctl", args: []string{"--user", "daemon-reload"}},
+				{name: "systemctl", args: []string{"--user", "enable", systemdUnitName}},
+				{name: "systemctl", args: []string{"--user", "start", systemdUnitName}},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configHome := t.TempDir()
+			runner := &recordingCommandRunner{}
+			opts := lifecycleOptions{
+				Executable: "/usr/local/bin/doppels-runner",
+				HomeDir:    "/home/alice",
+				ConfigHome: configHome,
+				ConfigDir:  "/home/alice/.config/doppels",
+				Enable:     tt.enable,
+				StartNow:   tt.startNow,
+			}
+			if err := installLifecycle(opts, runner); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(systemdUnitPath(opts)); err != nil {
+				t.Fatalf("unit was not written: %v", err)
+			}
+			if !reflect.DeepEqual(runner.calls, tt.want) {
+				t.Fatalf("install calls = %#v, want %#v", runner.calls, tt.want)
+			}
+		})
+	}
+}
+
 func TestConcurrentSystemdInstallsNeverExposeTornUnit(t *testing.T) {
 	configHome := t.TempDir()
 	base := lifecycleOptions{
