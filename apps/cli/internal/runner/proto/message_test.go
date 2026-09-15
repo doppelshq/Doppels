@@ -220,9 +220,57 @@ func TestDecodeMessageRejectsTrailingJSON(t *testing.T) {
 
 func TestDecodeMessageRejectsFractionalID(t *testing.T) {
 	_, protoErr := DecodeMessage([]byte(`{"jsonrpc":"2.0","id":1.5,"method":"v1/ping"}`))
-	if protoErr == nil || protoErr.Code != CodeParse {
-		t.Fatalf("err = %+v, want parse error", protoErr)
+	if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+		t.Fatalf("err = %+v, want invalidRequest", protoErr)
 	}
+}
+
+func TestDecodeMessagePreservesValidIDAcrossTypedFieldFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		frame  string
+		wantID string
+	}{
+		{
+			name:   "jsonrpc has wrong type",
+			frame:  `{"jsonrpc":2,"id":"keep-me","method":"v1/ping"}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with string id",
+			frame:  `{"jsonrpc":"2.0","id":"keep-me","method":42}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with integer id",
+			frame:  `{"jsonrpc":"2.0","id":12345,"method":42}`,
+			wantID: `12345`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			message, protoErr := DecodeMessage([]byte(tt.frame))
+			if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+				t.Fatalf("err = %+v, want invalidRequest", protoErr)
+			}
+			if message == nil {
+				t.Fatal("message = nil, want valid id preserved")
+			}
+			if message.ID.String() != tt.wantID {
+				t.Fatalf("id = %s, want %s", message.ID.String(), tt.wantID)
+			}
+		})
+	}
+
+	t.Run("fractional id is not preserved", func(t *testing.T) {
+		message, protoErr := DecodeMessage([]byte(`{"jsonrpc":2,"id":1.5,"method":"v1/ping"}`))
+		if protoErr == nil || protoErr.Code != CodeInvalidRequest {
+			t.Fatalf("err = %+v, want invalidRequest", protoErr)
+		}
+		if message != nil {
+			t.Fatalf("message = %#v, want nil because id itself is invalid", message)
+		}
+	})
 }
 
 // TestDecodeMessagePreservesValidIDAcrossSizeBoundaries reproduces a review

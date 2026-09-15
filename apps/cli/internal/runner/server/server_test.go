@@ -1066,6 +1066,59 @@ func TestOversizedMethodPreservesValidIDOverRealSocket(t *testing.T) {
 	})
 }
 
+func TestTypedFieldFailuresPreserveValidIDOverRealSocket(t *testing.T) {
+	tests := []struct {
+		name   string
+		frame  string
+		wantID string
+	}{
+		{
+			name:   "jsonrpc has wrong type",
+			frame:  `{"jsonrpc":2,"id":"keep-me","method":"v1/ping"}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with string id",
+			frame:  `{"jsonrpc":"2.0","id":"keep-me","method":42}`,
+			wantID: `"keep-me"`,
+		},
+		{
+			name:   "method has wrong type with integer id",
+			frame:  `{"jsonrpc":"2.0","id":12345,"method":42}`,
+			wantID: `12345`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := startServer(t, testConfig())
+			client := dialClient(t, ts)
+			if response := client.initialize(); response.Err != nil {
+				t.Fatalf("initialize: %+v", response.Err)
+			}
+
+			if _, err := client.conn.Write([]byte(tt.frame + "\n")); err != nil {
+				t.Fatal(err)
+			}
+			response := client.readResponse()
+			if response.Err == nil || response.Err.Code != proto.CodeInvalidRequest {
+				t.Fatalf("err = %+v, want invalidRequest", response.Err)
+			}
+			idJSON, err := json.Marshal(response.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(idJSON) != tt.wantID {
+				t.Fatalf("id = %s, want %s", idJSON, tt.wantID)
+			}
+
+			if ping := client.call("ping-after-typed-field-failure", "v1/ping", map[string]any{}); ping.Err != nil {
+				t.Fatalf("connection unusable after typed-field error: %+v", ping.Err)
+			}
+		})
+	}
+}
+
 // TestConnectionStateIsRaceFree pins that the diagnostic client name is read
 // under the same lock that initialize writes it: the overflow log path runs
 // on the emitting goroutine while the handshake runs on the reader.

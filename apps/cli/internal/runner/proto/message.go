@@ -236,10 +236,28 @@ func DecodeMessage(data []byte) (*Message, *Error) {
 	if trimmed[0] == '[' {
 		return nil, &Error{Code: CodeInvalidRequest, Message: "batch requests are not supported"}
 	}
+	var envelope struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return nil, &Error{Code: CodeParse, Message: "malformed JSON frame"}
+	}
 	var message Message
+	if len(envelope.ID) > 0 {
+		if bytes.Equal(bytes.TrimSpace(envelope.ID), []byte("null")) {
+			return nil, &Error{Code: CodeInvalidRequest, Message: "jsonrpc id must not be null"}
+		}
+		if len(envelope.ID) > MaxIDBytes {
+			return nil, &Error{Code: CodeInvalidRequest, Message: "id exceeds maximum size"}
+		}
+		if err := json.Unmarshal(envelope.ID, &message.ID); err != nil {
+			return nil, &Error{Code: CodeInvalidRequest, Message: err.Error()}
+		}
+		message.HasID = true
+	}
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	if err := decoder.Decode(&message); err != nil {
-		return nil, &Error{Code: CodeParse, Message: "malformed JSON frame"}
+		return &message, &Error{Code: CodeInvalidRequest, Message: "invalid request fields"}
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err == nil {
@@ -258,9 +276,6 @@ func DecodeMessage(data []byte) (*Message, *Error) {
 	// check must run before any other validation below returns the id: an
 	// id that fails its own size check is never eligible to be preserved,
 	// no matter what else is also wrong with the request.
-	if len(message.ID.raw) > MaxIDBytes {
-		return nil, &Error{Code: CodeInvalidRequest, Message: "id exceeds maximum size"}
-	}
 	if message.JSONRPC != "2.0" {
 		return &message, &Error{Code: CodeInvalidRequest, Message: `jsonrpc must be "2.0"`}
 	}
