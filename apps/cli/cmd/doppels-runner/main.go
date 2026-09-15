@@ -47,6 +47,9 @@ func main() {
 	configDir := flag.String("config", "", "runner config dir (default: XDG user config + /doppels)")
 	flag.Parse()
 
+	if err := prepareProcessGroup(); err != nil {
+		log.Fatalf("doppels-runner: %v", err)
+	}
 	if err := run(*socket, *tokenFlag, *runnerVersion, *configDir); err != nil {
 		log.Fatalf("doppels-runner: %v", err)
 	}
@@ -148,7 +151,8 @@ func runWithContext(ctx context.Context, socketPath, tokenFlag, runnerVersion, c
 	srv = server.New(config)
 	workspace.RegisterRPC(srv, workspaces)
 	runs.RegisterRPC(srv, manager)
-	return srv.Serve(ctx, listener)
+	serve := func(ctx context.Context) error { return srv.Serve(ctx, listener) }
+	return serveWithGracefulShutdown(ctx, gracefulShutdownTimeout, serve, killOwnProcessGroup)
 }
 
 // probeTimeout bounds the handshake probe against a socket that accepts but
