@@ -26,11 +26,17 @@ type fakeDaemon struct {
 	subscribeEvents  []proto.RunEventPayload
 	subscribeErr     error
 	subscribeStatus  string
+	subscribeCalls   []int
+	subscribeResults []runnerclient.SubscribeRunResult
+	subscribeHooks   []func()
 	notificationFunc func(runnerclient.Notification)
 
 	decided   []string
 	decideErr error
 	onDecide  func()
+
+	getRunIncludes []bool
+	recoveryEvents []proto.RunEventPayload
 
 	gotRuns    runnerclient.ListRunsParams
 	runsResult runnerclient.ListRunsResult
@@ -52,13 +58,28 @@ func (f *fakeDaemon) StartRun(ctx context.Context, params runnerclient.StartRunP
 
 func (f *fakeDaemon) SubscribeRun(ctx context.Context, runID string, fromSequence int) (runnerclient.SubscribeRunResult, error) {
 	f.subscribedRun, f.subscribedFrom = runID, fromSequence
+	call := len(f.subscribeCalls)
+	f.subscribeCalls = append(f.subscribeCalls, fromSequence)
+	if call < len(f.subscribeHooks) && f.subscribeHooks[call] != nil {
+		f.subscribeHooks[call]()
+	}
 	if f.subscribeErr != nil {
 		return runnerclient.SubscribeRunResult{}, f.subscribeErr
+	}
+	if call < len(f.subscribeResults) {
+		return f.subscribeResults[call], nil
 	}
 	return runnerclient.SubscribeRunResult{Events: f.subscribeEvents, Status: f.subscribeStatus}, nil
 }
 
 func (f *fakeDaemon) GetRun(ctx context.Context, runID string, includeEvents bool) (runnerclient.GetRunResult, error) {
+	f.getRunIncludes = append(f.getRunIncludes, includeEvents)
+	if includeEvents {
+		return runnerclient.GetRunResult{
+			Summary: proto.RunSummary{RunID: runID, Status: "running"},
+			Events:  f.recoveryEvents,
+		}, nil
+	}
 	return runnerclient.GetRunResult{Summary: proto.RunSummary{
 		RunID: runID, Status: "succeeded", Capability: "greet", RequestID: "req-1",
 		CreatedAt: "2026-09-15T12:00:00Z",
@@ -200,6 +221,101 @@ func TestRunDecidesApprovalRequestFromSubscribeReplay(t *testing.T) {
 	}
 	if len(daemon.decided) != 1 || daemon.decided[0] != "run-replayed-approval:step1:approve" {
 		t.Fatalf("decideApproval calls = %v, want exactly [run-replayed-approval:step1:approve]", daemon.decided)
+	}
+}
+
+func TestRunRecoversFromRunEventGap(t *testing.T) {
+	app, _, stderr := daemonFixtureApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	app.Context = ctx
+
+	daemon := &fakeDaemon{
+		startRunID: "run-gap",
+		recoveryEvents: []proto.RunEventPayload{
+			{RunID: "run-gap", Sequence: 0, Type: "run_created", OccurredAt: "2026-09-15T12:00:00Z"},
+			{RunID: "run-gap", Sequence: 1, Type: "step_started", StepID: "run", OccurredAt: "2026-09-15T12:00:01Z"},
+		},
+		subscribeResults: []runnerclient.SubscribeRunResult{
+			{Status: "running"},
+			{Status: "succeeded", Events: []proto.RunEventPayload{{
+				RunID: "run-gap", Sequence: 2, Type: "run_succeeded", OccurredAt: "2026-09-15T12:00:02Z",
+			}}},
+		},
+	}
+	daemon.subscribeHooks = []func(){func() {
+		daemon.notificationFunc(runnerclient.Notification{
+			Method: "v1/nodeEvent",
+			Params: json.RawMessage(`{"kind":"runEventGap","payload":{"runId":"run-gap","fromSequence":0}}`),
+		})
+	}}
+	app.DialRunner = func(ctx context.Context, opts runnerclient.Options) (daemonClient, error) {
+		return daemon, nil
+	}
+
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada"})
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if len(daemon.getRunIncludes) < 2 || !daemon.getRunIncludes[0] {
+		t.Fatalf("getRun includeEvents calls = %v, want recovery call with true before final lookup", daemon.getRunIncludes)
+	}
+	if len(daemon.subscribeCalls) != 2 || daemon.subscribeCalls[1] != 2 {
+		t.Fatalf("subscribeRun fromSequence calls = %v, want [0 2]", daemon.subscribeCalls)
+	}
+	if !strings.Contains(stderr.String(), "Run") {
+		t.Fatalf("timeline did not render recovered step_started event: %s", stderr.String())
+	}
+}
+
+func TestRunRecoversFromLocalEventBufferOverflow(t *testing.T) {
+	app, _, stderr := daemonFixtureApp(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	app.Context = ctx
+
+	recovered := make([]proto.RunEventPayload, 257)
+	for sequence := range recovered {
+		recovered[sequence] = proto.RunEventPayload{
+			RunID: "run-overflow", Sequence: sequence, Type: "step_started", StepID: "run",
+			OccurredAt: "2026-09-15T12:00:00Z",
+		}
+	}
+	daemon := &fakeDaemon{
+		startRunID:     "run-overflow",
+		recoveryEvents: recovered,
+		subscribeResults: []runnerclient.SubscribeRunResult{
+			{Status: "running"},
+			{Status: "succeeded", Events: []proto.RunEventPayload{{
+				RunID: "run-overflow", Sequence: 257, Type: "run_succeeded", OccurredAt: "2026-09-15T12:00:01Z",
+			}}},
+		},
+	}
+	daemon.subscribeHooks = []func(){func() {
+		for sequence := 0; sequence < 257; sequence++ {
+			payload, err := json.Marshal(proto.RunEventPayload{
+				RunID: "run-overflow", Sequence: sequence, Type: "step_started", StepID: "run",
+				OccurredAt: "2026-09-15T12:00:00Z",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			daemon.notificationFunc(runnerclient.Notification{Method: "v1/runEvent", Params: payload})
+		}
+	}}
+	app.DialRunner = func(ctx context.Context, opts runnerclient.Options) (daemonClient, error) {
+		return daemon, nil
+	}
+
+	code := app.Run([]string{"run", "capability/greet", "--input", "name=Ada"})
+	if code != ExitSuccess {
+		t.Fatalf("exit = %d, stderr = %s", code, stderr.String())
+	}
+	if len(daemon.getRunIncludes) < 2 || !daemon.getRunIncludes[0] {
+		t.Fatalf("getRun includeEvents calls = %v, want overflow recovery with true", daemon.getRunIncludes)
+	}
+	if len(daemon.subscribeCalls) != 2 || daemon.subscribeCalls[1] != 257 {
+		t.Fatalf("subscribeRun fromSequence calls = %v, want [0 257]", daemon.subscribeCalls)
 	}
 }
 

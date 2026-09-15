@@ -196,21 +196,36 @@ func (app *App) streamDaemonRun(
 	}
 
 	events := make(chan proto.RunEventPayload, 256)
-	client.SetNotificationHandler(func(n runnerclient.Notification) {
-		if n.Method != "v1/runEvent" {
-			return
-		}
-		var payload proto.RunEventPayload
-		if err := json.Unmarshal(n.Params, &payload); err != nil || payload.RunID != runID {
-			return
-		}
+	resync := make(chan struct{}, 1)
+	requestResync := func() {
 		select {
-		case events <- payload:
+		case resync <- struct{}{}:
 		default:
-			// A saturated local buffer only means the CLI's own renderer
-			// fell behind; getRun/getRunLogs remain the authoritative
-			// source, matching the daemon's own best-effort notification
-			// contract (RFC §10).
+		}
+	}
+	client.SetNotificationHandler(func(n runnerclient.Notification) {
+		switch n.Method {
+		case "v1/runEvent":
+			var payload proto.RunEventPayload
+			if err := json.Unmarshal(n.Params, &payload); err != nil || payload.RunID != runID {
+				return
+			}
+			select {
+			case events <- payload:
+			default:
+				requestResync()
+			}
+		case "v1/nodeEvent":
+			var event struct {
+				Kind    string `json:"kind"`
+				Payload struct {
+					RunID string `json:"runId"`
+				} `json:"payload"`
+			}
+			if err := json.Unmarshal(n.Params, &event); err == nil &&
+				event.Kind == proto.NodeEventRunEventGap && event.Payload.RunID == runID {
+				requestResync()
+			}
 		}
 	})
 
@@ -219,15 +234,58 @@ func (app *App) streamDaemonRun(
 		fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
 		return ExitOperational
 	}
-	terminalSeen := false
-	for _, event := range subscribed.Events {
-		render(event)
-		if code := app.handleDaemonRunEvent(ctx, client, runID, approvalMode, interact, event); code != ExitSuccess {
-			return code
+	lastRenderedSequence := -1
+	processEvents := func(batch []proto.RunEventPayload) (bool, int) {
+		terminal := false
+		for _, event := range batch {
+			if event.Sequence <= lastRenderedSequence {
+				continue
+			}
+			render(event)
+			lastRenderedSequence = event.Sequence
+			if code := app.handleDaemonRunEvent(ctx, client, runID, approvalMode, interact, event); code != ExitSuccess {
+				return false, code
+			}
+			if daemonTerminalRunEvents[event.Type] {
+				terminal = true
+			}
 		}
-		if daemonTerminalRunEvents[event.Type] {
-			terminalSeen = true
+		return terminal, ExitSuccess
+	}
+
+	terminalSeen, code := processEvents(subscribed.Events)
+	if code != ExitSuccess {
+		return code
+	}
+
+	recoverStream := func() (bool, int) {
+		// Notifications already queued locally belong to the stream whose
+		// continuity was lost. The durable event list is authoritative.
+	DrainEvents:
+		for {
+			select {
+			case <-events:
+			default:
+				break DrainEvents
+			}
 		}
+
+		recovered, err := client.GetRun(ctx, runID, true)
+		if err != nil {
+			fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
+			return false, ExitOperational
+		}
+		terminal, code := processEvents(recovered.Events)
+		if code != ExitSuccess || terminal {
+			return terminal, code
+		}
+
+		subscribed, err := client.SubscribeRun(ctx, runID, lastRenderedSequence+1)
+		if err != nil {
+			fmt.Fprint(app.Stderr, lostDaemonMessage(runID))
+			return false, ExitOperational
+		}
+		return processEvents(subscribed.Events)
 	}
 
 	if !terminalSeen {
@@ -256,12 +314,32 @@ func (app *App) streamDaemonRun(
 	loop:
 		for {
 			select {
-			case event := <-events:
-				render(event)
-				if code := app.handleDaemonRunEvent(ctx, client, runID, approvalMode, interact, event); code != ExitSuccess {
+			case <-resync:
+				terminal, code := recoverStream()
+				if code != ExitSuccess {
 					return code
 				}
-				if daemonTerminalRunEvents[event.Type] {
+				if terminal {
+					break loop
+				}
+				continue
+			default:
+			}
+			select {
+			case event := <-events:
+				terminal, code := processEvents([]proto.RunEventPayload{event})
+				if code != ExitSuccess {
+					return code
+				}
+				if terminal {
+					break loop
+				}
+			case <-resync:
+				terminal, code := recoverStream()
+				if code != ExitSuccess {
+					return code
+				}
+				if terminal {
 					break loop
 				}
 			case <-watchdogErr:
