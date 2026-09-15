@@ -77,7 +77,60 @@ export VALUE=ok
 	if !bytes.Equal(stdout.Bytes(), diskStdout) || !bytes.Equal(stderr.Bytes(), diskStderr) {
 		t.Fatalf("live logs differ from disk: stdout %q/%q stderr %q/%q", stdout.Bytes(), diskStdout, stderr.Bytes(), diskStderr)
 	}
+	assertSocketPing(t, client, "logs-ping")
 	_ = manager
+}
+
+func TestSubscribeRunLogsAfterStepEndedReturnsInactive(t *testing.T) {
+	_, root, client := startLiveLogIntegrationServer(t, `
+touch live-ready
+sleep 1
+export VALUE=ok
+`)
+	started := startLiveLogRunOverSocket(t, client, root, "live-inactive")
+	waitForFile(t, filepath.Join(root, "live-ready"))
+
+	runResponse := client.call("run-sub", "v1/subscribeRun", map[string]any{"runId": started.RunID})
+	if runResponse.Err != nil {
+		t.Fatalf("subscribeRun: %+v", runResponse.Err)
+	}
+	var snapshot SubscribeResult
+	if err := json.Unmarshal(rawResult(t, runResponse), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	stepEnded := false
+	deadline := time.Now().Add(5 * time.Second)
+	for !stepEnded && time.Now().Before(deadline) {
+		method, params := client.readNotification(t)
+		if method != "v1/runEvent" {
+			continue
+		}
+		var event proto.RunEventPayload
+		if err := json.Unmarshal(params, &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.RunID == started.RunID && event.StepID == "run" && event.Type == "step_succeeded" {
+			stepEnded = true
+		}
+	}
+	if !stepEnded {
+		t.Fatal("never observed step_succeeded over the run subscription")
+	}
+
+	response := client.call("logs-inactive", "v1/subscribeRunLogs", map[string]any{
+		"runId": started.RunID, "stepId": "run",
+	})
+	if response.Err != nil {
+		t.Fatalf("subscribeRunLogs: %+v", response.Err)
+	}
+	var subscription LiveLogSubscription
+	if err := json.Unmarshal(rawResult(t, response), &subscription); err != nil {
+		t.Fatal(err)
+	}
+	if subscription.Active {
+		t.Fatal("subscribeRunLogs returned active after the Step ended")
+	}
+	assertSocketPing(t, client, "inactive-logs-ping")
 }
 
 func TestSubscribeRunLogsDisconnectsCleanly(t *testing.T) {

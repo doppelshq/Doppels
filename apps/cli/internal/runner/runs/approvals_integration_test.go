@@ -34,6 +34,7 @@ func TestListPendingApprovalsOverRealSocket(t *testing.T) {
 	if len(approvals) != 1 || approvals[0].RunID != started.RunID || approvals[0].StepID != "run" || approvals[0].Name != "Run" || approvals[0].RequestedAt.IsZero() {
 		t.Fatalf("approvals = %#v", approvals)
 	}
+	assertSocketPing(t, client, "list-ping")
 	_ = manager
 }
 
@@ -56,24 +57,28 @@ func TestDecideApprovalUnblocksRunOverRealSocket(t *testing.T) {
 	if err := json.Unmarshal(rawResult(t, subResponse), &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if snapshot.Status == "succeeded" {
-		return
+	if snapshot.Status != "succeeded" {
+		completed := false
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			method, params := client.readNotification(t)
+			if method != "v1/runEvent" {
+				continue
+			}
+			var event proto.RunEventPayload
+			if err := json.Unmarshal(params, &event); err != nil {
+				t.Fatal(err)
+			}
+			if event.RunID == started.RunID && event.Type == "run_succeeded" {
+				completed = true
+				break
+			}
+		}
+		if !completed {
+			t.Fatal("Run never completed after approval")
+		}
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		method, params := client.readNotification(t)
-		if method != "v1/runEvent" {
-			continue
-		}
-		var event proto.RunEventPayload
-		if err := json.Unmarshal(params, &event); err != nil {
-			t.Fatal(err)
-		}
-		if event.RunID == started.RunID && event.Type == "run_succeeded" {
-			return
-		}
-	}
-	t.Fatal("Run never completed after approval")
+	assertSocketPing(t, client, "decide-ping")
 }
 
 func TestServerCloseCancelsPendingApproval(t *testing.T) {
